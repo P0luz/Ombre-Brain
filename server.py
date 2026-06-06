@@ -783,8 +783,11 @@ async def hold(
     importance: int = 5,
     pinned: bool = False,
     feel: bool = False,
-    source_bucket: str = "",    valence: float = -1,
+    source_bucket: str = "",
+    valence: float = -1,
     arousal: float = -1,
+    domain: str = "",
+    name: str = "",
 ) -> str:
     """存储单条记忆,自动打标+合并。tags逗号分隔,importance 1-10。pinned=True创建永久钉选桶。feel=True存储你的第一人称感受(不参与普通浮现)。source_bucket=被消化的记忆桶ID(feel模式下,标记源记忆为已消化)。"""
     await decay_engine.ensure_started()
@@ -838,11 +841,11 @@ async def hold(
             "tags": [], "suggested_name": "",
         }
 
-    domain = analysis["domain"]
+    auto_domain = [d.strip() for d in domain.split(",") if d.strip()] if domain else analysis["domain"]
     auto_valence = analysis["valence"]
     auto_arousal = analysis["arousal"]
     auto_tags = analysis["tags"]
-    suggested_name = analysis.get("suggested_name", "")
+    suggested_name = name.strip() if name else analysis.get("suggested_name", "")
 
     # --- User-supplied valence/arousal takes priority over analyze() result ---
     # --- 用户显式传入的 valence/arousal 优先，analyze() 结果作为 fallback ---
@@ -858,7 +861,7 @@ async def hold(
             content=content,
             tags=all_tags,
             importance=10,
-            domain=domain,
+            domain=auto_domain,
             valence=final_valence,
             arousal=final_arousal,
             name=suggested_name or None,
@@ -876,7 +879,7 @@ async def hold(
         content=content,
         tags=all_tags,
         importance=importance,
-        domain=domain,
+        domain=auto_domain,
         valence=final_valence,
         arousal=final_arousal,
         name=suggested_name,
