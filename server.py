@@ -821,15 +821,27 @@ async def hold(
             pass
         # --- Mark source memory as digested + store model's valence perspective ---
         # --- 标记源记忆为已消化 + 存储模型视角的 valence ---
-        if source_bucket and source_bucket.strip():
-            try:
-                update_kwargs = {"digested": True}
-                if 0 <= valence <= 1:
-                    update_kwargs["model_valence"] = feel_valence
-                await bucket_mgr.update(source_bucket.strip(), **update_kwargs)
-            except Exception as e:
-                logger.warning(f"Failed to mark source as digested / 标记已消化失败: {e}")
-        return f"🫧feel→{bucket_id}"
+        source_msg = ""
+if source_bucket and source_bucket.strip():
+    sid = source_bucket.strip()
+    try:
+        update_kwargs = {"digested": True}
+        if 0 <= valence <= 1:
+            update_kwargs["model_valence"] = feel_valence
+
+        ok = await bucket_mgr.update(sid, **update_kwargs)
+
+        if ok:
+            source_msg = f" source✓{sid} model_valence={feel_valence:.2f}"
+        else:
+            source_msg = f" ⚠️source_not_found:{sid}"
+            logger.warning(f"Source bucket not found for feel: {sid}")
+
+    except Exception as e:
+        source_msg = f" ⚠️source_update_error:{e}"
+        logger.warning(f"Failed to mark source as digested / 标记已消化失败: {e}")
+
+return f"🫧feel→{bucket_id}{source_msg}"
 
     # --- Step 1: auto-tagging / 自动打标 ---
     try:
