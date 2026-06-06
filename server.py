@@ -1177,7 +1177,7 @@ async def dream() -> str:
         created = meta.get("created", "")
         parts.append(
             f"[{meta.get('name', b['id'])}]{resolved_tag} "
-            f"主题:{domains} V{val:.1f}/A{aro:.1f} "
+            f"主题:{domains} V{val:.1f}/A{aro:.1f} 模型视角:{meta.get('model_valence', '—')} "
             f"创建:{created}\n"
             f"ID: {b['id']}\n"
             f"{strip_wikilinks(b['content'][:500])}"
