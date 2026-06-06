@@ -872,7 +872,7 @@ async def hold(
             await embedding_engine.generate_and_store(bucket_id, content)
         except Exception:
             pass
-        return f"📌钉选→{bucket_id} {','.join(domain)}"
+        return f"📌钉选→{bucket_id} {','.join(auto_domain)}"
 
     # --- Step 2: merge or create / 合并或新建 ---
     result_name, is_merged = await _merge_or_create(
@@ -886,7 +886,7 @@ async def hold(
     )
 
     action = "合并→" if is_merged else "新建→"
-    return f"{action}{result_name} {','.join(domain)}"
+    return f"{action}{result_name} {','.join(auto_domain)}"
 
 
 # =============================================================
