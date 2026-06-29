@@ -552,7 +552,7 @@ _tools_runtime.init(
 # MCP 工具 —— 仅注册，实现见 tools/<tool>/
 # 每个入口都不超过 10 行，便于一眼看清参数与归属
 # =============================================================
-@mcp.tool()
+@mcp.tool(description="Search or surface memories.")
 async def breath(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,
@@ -579,17 +579,17 @@ async def breath(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Store one memory entry.")
 async def hold(
     content: str,
-    tags: Optional[str] = "",
-    importance: Optional[int] = 5,
-    pinned: Optional[bool] = False,
-    feel: Optional[bool] = False,
-    source_bucket: Optional[str] = "",
-    valence: Optional[float] = -1,
-    arousal: Optional[float] = -1,
-    why_remembered: Optional[str] = "",
+    tags: str = "",
+    importance: int = 5,
+    pinned: bool = False,
+    feel: bool = False,
+    source_bucket: str = "",
+    valence: float = -1,
+    arousal: float = -1,
+    why_remembered: str = "",
 ) -> str:
     """存入一条记忆(一句话级)。系统自动打标并尝试与近似的已有桶合并。tags 逗号分隔,importance 1-10。pinned=True=标记为永久核心,不衰减不合并。feel=True=存为感受类记忆(不参与普通浮现,仅通过 breath(domain=\"feel\") 读取)。source_bucket=正在消化的原始记忆桶 ID,会被标为已消化以加速淡化。why_remembered=记录原因(可选,自由文本,仅用于展示不计分)。"""
     return await _with_notice(
@@ -608,7 +608,7 @@ async def hold(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Split long text into memory entries.")
 async def grow(content: str) -> str:
     """整理一段长文本(如一天的记录/一段日记/一篇总结)存入记忆,系统拆分为 2~6 条独立事件桶并各自尝试合并。短内容(<30 字)走 hold 单条快速路径,不强行拆分。"""
     return await _with_notice(
@@ -618,24 +618,24 @@ async def grow(content: str) -> str:
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Update, confirm, restore, or delete a memory entry.")
 async def trace(
     bucket_id: str,
-    name: Optional[str] = "",
-    domain: Optional[str] = "",
-    valence: Optional[float] = -1,
-    arousal: Optional[float] = -1,
-    importance: Optional[int] = -1,
-    tags: Optional[str] = "",
-    resolved: Optional[int] = -1,
-    pinned: Optional[int] = -1,
-    digested: Optional[int] = -1,
-    content: Optional[str] = "",
-    delete: Optional[bool] = False,
-    status: Optional[str] = "",
-    weight: Optional[float] = -1,
-    dont_surface: Optional[int] = -1,
-    why_remembered: Optional[str] = "",
+    name: str = "",
+    domain: str = "",
+    valence: float = -1,
+    arousal: float = -1,
+    importance: int = -1,
+    tags: str = "",
+    resolved: int = -1,
+    pinned: int = -1,
+    digested: int = -1,
+    content: str = "",
+    delete: bool = False,
+    status: str = "",
+    weight: float = -1,
+    dont_surface: int = -1,
+    why_remembered: str = "",
 ) -> str:
     """修改某条记忆的元数据或内容。resolved=1=标记已放下,沉底仅在关键词触发时返回;resolved=0=重新激活;pinned=1=标记永久核心(锁 importance=10),0=取消;digested=1=标记已消化,加速淡化;content=替换桶正文并重建 embedding;delete=True=彻底删除(不可恢复);status=plan 桶状态(active/resolved/abandoned);weight=plan 承诺重量 0.0-1.0;dont_surface=1=不再出现在 breath,0=恢复;why_remembered=更新记录原因。只传需要修改的字段,-1 或空串表示不改。"""
     return await _with_notice(
@@ -678,7 +678,7 @@ async def release(bucket_id: str) -> str:
     )
 
 
-@mcp_extra.tool()
+@mcp_extra.tool(description="Show memory system status.")
 async def pulse(include_archive: Optional[bool] = False) -> str:
     """返回记忆系统状态摘要:固化/动态/衰减/归档桶数量、总占用、衰减引擎运行状态,以及所有桶的摘要列表。include_archive=True 同时返回归档区。"""
     return await _with_notice(
@@ -772,7 +772,7 @@ async def I(
     )
 
 
-@mcp.tool()
+@mcp.tool(description="Read recent memories for reflection.")
 async def dream(window_hours: Optional[int] = 48) -> str:
     """读取最近 window_hours（默认 48h）内有变动的所有记忆桶,用于回顾与消化。
     每个桶返回其在窗口内的最新内容（按 last_active 取）,完整正文不截断。
