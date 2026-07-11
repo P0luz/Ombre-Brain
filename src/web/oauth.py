@@ -90,6 +90,44 @@ def _mcp_tokens_file() -> str:
     return os.path.join(sh.config["buckets_dir"], ".dashboard_mcp_tokens.json")
 
 
+def _oauth_clients_file() -> str:
+    return os.path.join(sh.config["buckets_dir"], ".oauth_clients.json")
+
+
+def _load_oauth_clients() -> None:
+    """启动时恢复 DCR 客户端注册表。
+
+    注册表若不持久化，容器重启后客户端（Claude Desktop 经 mcp-remote 等）
+    缓存的 client_id 会变成 unknown client_id，授权页 400 无限循环，
+    用户只能手动清客户端缓存才能恢复。与 token 同策略落盘 buckets 卷。"""
+    global _oauth_clients
+    try:
+        path = _oauth_clients_file()
+        if not os.path.exists(path):
+            return
+        with open(path, "r", encoding="utf-8") as f:
+            raw = _json_lib.load(f)
+        if isinstance(raw, dict):
+            _oauth_clients = {
+                cid: info for cid, info in raw.items()
+                if isinstance(cid, str) and isinstance(info, dict)
+            }
+    except Exception as e:
+        logger.warning(f"[oauth] failed to load oauth clients: {e}")
+
+
+def _save_oauth_clients() -> None:
+    try:
+        path = _oauth_clients_file()
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        tmp = path + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            _json_lib.dump(_oauth_clients, f, ensure_ascii=False)
+        os.replace(tmp, path)
+    except Exception as e:
+        logger.warning(f"[oauth] failed to save oauth clients: {e}")
+
+
 def _load_mcp_tokens() -> None:
     global _mcp_tokens, _mcp_token_resources, _mcp_refresh_tokens
     try:
@@ -298,6 +336,7 @@ button:hover{{background:#d4b87a}}
 def register(mcp) -> None:
     """注册 /.well-known/* 与 /oauth/* 路由，并在装配时载入持久化 token。"""
     _load_mcp_tokens()   # 启动时恢复持久化 token，Docker 重启不再强制重新 OAuth
+    _load_oauth_clients()  # 启动时恢复 DCR 客户端注册表，重启后旧 client_id 依然有效
 
     @mcp.custom_route("/.well-known/oauth-protected-resource", methods=["GET"])
     @mcp.custom_route("/.well-known/oauth-protected-resource/{resource_path:path}", methods=["GET"])
@@ -342,7 +381,9 @@ def register(mcp) -> None:
         _oauth_clients[client_id] = {
             "redirect_uris": body.get("redirect_uris", []),
             "client_name": body.get("client_name", "MCP Client"),
+            "registered_at": int(_time_mod.time()),
         }
+        _save_oauth_clients()
         return JSONResponse({
             "client_id": client_id,
             "client_id_issued_at": int(_time_mod.time()),
