@@ -44,6 +44,7 @@ from collections import OrderedDict
 from typing import Any
 
 import httpx
+import numpy as np
 from openai import AsyncOpenAI
 
 try:
@@ -718,20 +719,47 @@ class EmbeddingEngine:
         if not query_embedding:
             raise RuntimeError("embedding provider returned an empty query vector")
 
-        results: list[tuple[str, float]] = []
+        # 逐行反序列化 + 校验，攒出一批同维度的向量再一次性做矩阵运算。
+        # numpy 要求矩阵每行等长，dim 不匹配的行天然没法进同一个 matmul，
+        # 这里干脆连同 malformed 一起在装箱阶段就跳过（原实现里 dim 不匹配
+        # 走的是 _cosine_similarity 的 0.0 分支，混在结果里而不是被剔除）。
+        qdim = len(query_embedding)
+        valid_ids: list[str] = []
+        valid_vecs: list[list[float]] = []
         for bucket_id, emb_json in rows:
             try:
                 stored_embedding = json.loads(emb_json)
-                sim = self._cosine_similarity(query_embedding, stored_embedding)
-                results.append((bucket_id, sim))
+                if not isinstance(stored_embedding, list):
+                    raise TypeError(f"embedding is {type(stored_embedding).__name__}, not list")
+                stored_embedding = [float(x) for x in stored_embedding]
             except (json.JSONDecodeError, ValueError, TypeError) as _emb_exc:
                 logger.warning(
                     f"[embedding] Skipping malformed embedding for {bucket_id!r}: "
                     f"{type(_emb_exc).__name__}: {_emb_exc}"
                 )
                 continue
-        results.sort(key=lambda x: x[1], reverse=True)
-        return results[:top_k]
+            if len(stored_embedding) != qdim:
+                logger.warning(
+                    f"[embedding] Skipping bucket {bucket_id!r}: dim mismatch "
+                    f"(stored={len(stored_embedding)}, query={qdim})"
+                )
+                continue
+            valid_ids.append(bucket_id)
+            valid_vecs.append(stored_embedding)
+
+        if not valid_ids:
+            return []
+
+        sims = self._cosine_similarity_batch(query_embedding, valid_vecs)
+        k = max(0, min(top_k, len(valid_ids)))
+        if k == 0:
+            return []
+        if k < len(valid_ids):
+            top_idx = np.argpartition(-sims, k - 1)[:k]
+        else:
+            top_idx = np.arange(len(valid_ids))
+        top_idx = top_idx[np.argsort(-sims[top_idx], kind="stable")]
+        return [(valid_ids[i], float(sims[i])) for i in top_idx]
 
     async def search_similar(self, query: str, top_k: int = 10) -> list[tuple[str, float]]:
         """返回 [(bucket_id, similarity)]；失败时兼容旧调用方并返回空列表。"""
@@ -756,6 +784,24 @@ class EmbeddingEngine:
         if norm_a == 0 or norm_b == 0:
             return 0.0
         return dot / (norm_a * norm_b)
+
+    @staticmethod
+    def _cosine_similarity_batch(query: list[float], vectors: list[list[float]]) -> "np.ndarray":
+        """query 对 vectors 逐行的余弦相似度，一次矩阵乘法算完整批。
+
+        与 _cosine_similarity 语义保持一致：任一侧范数为 0 时该项记 0.0，
+        而不是让 0/0 产生 nan 污染排序（np.divide 的 where= 分支负责这个）。
+        调用前 vectors 中每一行必须已和 query 等长（search_similar_strict 在
+        装箱阶段就把维度不一致的行剔除了，这里不用再判）。
+        """
+        q = np.asarray(query, dtype=np.float64)
+        m = np.asarray(vectors, dtype=np.float64)
+        q_norm = np.linalg.norm(q)
+        m_norms = np.linalg.norm(m, axis=1)
+        denom = m_norms * q_norm
+        dots = m @ q
+        sims = np.divide(dots, denom, out=np.zeros_like(dots), where=denom != 0)
+        return sims
 
     # -------------------- 前端可读的状态 --------------------
 
