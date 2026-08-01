@@ -1,5 +1,6 @@
 import asyncio
 import json
+import logging
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -232,6 +233,38 @@ async def test_auth_middleware_rejects_an_incorrect_gateway_key(monkeypatch):
 
     assert downstream.scopes == []
     assert messages[0]["status"] == 401
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_logs_only_safe_gateway_diagnostics(
+    monkeypatch, caplog
+):
+    monkeypatch.setenv("OMBRE_GATEWAY_API_KEY", "gateway-secret")
+    downstream = RecordingASGIApp()
+    middleware = MCPAuthMiddleware(
+        downstream,
+        auth_required=True,
+        token_validator=lambda *_args, **_kwargs: False,
+    )
+    scope = {
+        "type": "http",
+        "scheme": "https",
+        "path": "/mcp",
+        "headers": [
+            (b"host", b"ombre.example"),
+            (b"x-ombre-gateway-key", b"wrong-key"),
+        ],
+    }
+
+    with caplog.at_level(logging.WARNING, logger="server_app"):
+        await middleware(scope, _empty_receive, _discard_send)
+
+    assert (
+        "MCP auth rejected: gateway_configured=True, "
+        "gateway_header_received=True, gateway_matched=False"
+    ) in caplog.messages
+    assert "gateway-secret" not in caplog.text
+    assert "wrong-key" not in caplog.text
 
 
 @pytest.mark.asyncio

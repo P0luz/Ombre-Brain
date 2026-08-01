@@ -12,6 +12,7 @@ import asyncio
 import contextlib
 import hmac
 import json
+import logging
 import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -31,6 +32,8 @@ DEFAULT_KEEPALIVE_INTERVAL_SECONDS = 60.0
 
 TokenValidator = Callable[..., bool]
 AsyncCallback = Callable[[], Awaitable[Any]]
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -118,11 +121,20 @@ class MCPAuthMiddleware:
         self.token_validator = token_validator
 
     @staticmethod
-    def _gateway_key_is_valid(headers: Mapping[bytes, bytes]) -> bool:
-        """Validate the optional machine credential without accepting blanks."""
+    def _gateway_key_status(
+        headers: Mapping[bytes, bytes],
+    ) -> tuple[bool, bool, bool]:
+        """Return safe presence and match flags for the machine credential."""
         configured = os.environ.get("OMBRE_GATEWAY_API_KEY", "").strip()
         supplied = headers.get(b"x-ombre-gateway-key", b"").decode("latin-1").strip()
-        return bool(configured and supplied and hmac.compare_digest(supplied, configured))
+        configured_present = bool(configured)
+        header_received = bool(supplied)
+        matched = bool(
+            configured_present
+            and header_received
+            and hmac.compare_digest(supplied, configured)
+        )
+        return configured_present, header_received, matched
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         path = str(scope.get("path", ""))
@@ -130,11 +142,21 @@ class MCPAuthMiddleware:
             headers = {key.lower(): value for key, value in scope.get("headers", [])}
             auth = headers.get(b"authorization", b"").decode("latin-1")
             resource, base = _request_resource(scope, headers)
-            valid = self._gateway_key_is_valid(headers) or (
+            gateway_configured, gateway_header_received, gateway_matched = (
+                self._gateway_key_status(headers)
+            )
+            valid = gateway_matched or (
                 auth.startswith("Bearer ")
                 and self.token_validator(auth[7:], resource=resource)
             )
             if not valid:
+                logger.warning(
+                    "MCP auth rejected: gateway_configured=%s, "
+                    "gateway_header_received=%s, gateway_matched=%s",
+                    gateway_configured,
+                    gateway_header_received,
+                    gateway_matched,
+                )
                 endpoint = path.strip("/")
                 metadata_url = (
                     f"{base}/.well-known/oauth-protected-resource/{endpoint}"
