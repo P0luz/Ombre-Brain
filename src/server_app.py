@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hmac
 import json
 import os
 from contextlib import asynccontextmanager
@@ -98,7 +99,12 @@ def _request_resource(scope: Mapping[str, Any], headers: Mapping[bytes, bytes]) 
 
 
 class MCPAuthMiddleware:
-    """Require an OAuth bearer token for the streamable MCP endpoint."""
+    """Require OAuth or a dedicated gateway credential for ``/mcp``.
+
+    Human MCP clients keep using Ombre's OAuth flow. A separately configured
+    gateway may use ``X-Ombre-Gateway-Key`` for server-to-server access, so it
+    never needs the Dashboard password and OAuth does not need to be disabled.
+    """
 
     def __init__(
         self,
@@ -111,14 +117,22 @@ class MCPAuthMiddleware:
         self.auth_required = bool(auth_required)
         self.token_validator = token_validator
 
+    @staticmethod
+    def _gateway_key_is_valid(headers: Mapping[bytes, bytes]) -> bool:
+        """Validate the optional machine credential without accepting blanks."""
+        configured = os.environ.get("OMBRE_GATEWAY_API_KEY", "").strip()
+        supplied = headers.get(b"x-ombre-gateway-key", b"").decode("latin-1").strip()
+        return bool(configured and supplied and hmac.compare_digest(supplied, configured))
+
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         path = str(scope.get("path", ""))
         if scope.get("type") == "http" and self.auth_required and path.startswith("/mcp"):
             headers = {key.lower(): value for key, value in scope.get("headers", [])}
             auth = headers.get(b"authorization", b"").decode("latin-1")
             resource, base = _request_resource(scope, headers)
-            valid = auth.startswith("Bearer ") and self.token_validator(
-                auth[7:], resource=resource
+            valid = self._gateway_key_is_valid(headers) or (
+                auth.startswith("Bearer ")
+                and self.token_validator(auth[7:], resource=resource)
             )
             if not valid:
                 endpoint = path.strip("/")

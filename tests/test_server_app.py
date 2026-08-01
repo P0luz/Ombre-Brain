@@ -185,6 +185,56 @@ async def test_auth_middleware_validates_token_against_exact_resource():
 
 
 @pytest.mark.asyncio
+async def test_auth_middleware_accepts_only_the_configured_gateway_key(monkeypatch):
+    monkeypatch.setenv("OMBRE_GATEWAY_API_KEY", "gateway-secret")
+    downstream = RecordingASGIApp()
+    middleware = MCPAuthMiddleware(
+        downstream,
+        auth_required=True,
+        token_validator=lambda *_args, **_kwargs: False,
+    )
+    scope = {
+        "type": "http",
+        "scheme": "https",
+        "path": "/mcp",
+        "headers": [
+            (b"host", b"ombre.example"),
+            (b"x-ombre-gateway-key", b"gateway-secret"),
+        ],
+    }
+
+    await middleware(scope, _empty_receive, _discard_send)
+
+    assert downstream.scopes == [scope]
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_rejects_an_incorrect_gateway_key(monkeypatch):
+    monkeypatch.setenv("OMBRE_GATEWAY_API_KEY", "gateway-secret")
+    downstream = RecordingASGIApp()
+    middleware = MCPAuthMiddleware(
+        downstream,
+        auth_required=True,
+        token_validator=lambda *_args, **_kwargs: False,
+    )
+    messages = []
+    scope = {
+        "type": "http",
+        "scheme": "https",
+        "path": "/mcp",
+        "headers": [
+            (b"host", b"ombre.example"),
+            (b"x-ombre-gateway-key", b"wrong-key"),
+        ],
+    }
+
+    await middleware(scope, _empty_receive, _collect_into(messages))
+
+    assert downstream.scopes == []
+    assert messages[0]["status"] == 401
+
+
+@pytest.mark.asyncio
 async def test_auth_middleware_can_be_explicitly_disabled():
     downstream = RecordingASGIApp()
     middleware = MCPAuthMiddleware(
