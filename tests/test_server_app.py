@@ -256,7 +256,7 @@ async def test_auth_middleware_logs_only_safe_gateway_diagnostics(
         ],
     }
 
-    with caplog.at_level(logging.WARNING, logger="server_app"):
+    with caplog.at_level(logging.WARNING, logger="ombre_brain"):
         await middleware(scope, _empty_receive, _discard_send)
 
     assert (

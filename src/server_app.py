@@ -33,7 +33,7 @@ DEFAULT_KEEPALIVE_INTERVAL_SECONDS = 60.0
 TokenValidator = Callable[..., bool]
 AsyncCallback = Callable[[], Awaitable[Any]]
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("ombre_brain")
 
 
 @dataclass(frozen=True)
