@@ -210,6 +210,60 @@ async def test_auth_middleware_accepts_only_the_configured_gateway_key(monkeypat
 
 
 @pytest.mark.asyncio
+async def test_auth_middleware_accepts_configured_gateway_key_as_bearer(monkeypatch):
+    monkeypatch.setenv("OMBRE_GATEWAY_API_KEY", "gateway-secret")
+    downstream = RecordingASGIApp()
+
+    def oauth_validator(*_args, **_kwargs):
+        raise AssertionError("machine credentials must not reach the OAuth validator")
+
+    middleware = MCPAuthMiddleware(
+        downstream,
+        auth_required=True,
+        token_validator=oauth_validator,
+    )
+    scope = {
+        "type": "http",
+        "scheme": "https",
+        "path": "/mcp",
+        "headers": [
+            (b"host", b"ombre.example"),
+            (b"authorization", b"Bearer gateway-secret"),
+        ],
+    }
+
+    await middleware(scope, _empty_receive, _discard_send)
+
+    assert downstream.scopes == [scope]
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_rejects_incorrect_gateway_bearer(monkeypatch):
+    monkeypatch.setenv("OMBRE_GATEWAY_API_KEY", "gateway-secret")
+    downstream = RecordingASGIApp()
+    middleware = MCPAuthMiddleware(
+        downstream,
+        auth_required=True,
+        token_validator=lambda *_args, **_kwargs: False,
+    )
+    messages = []
+    scope = {
+        "type": "http",
+        "scheme": "https",
+        "path": "/mcp",
+        "headers": [
+            (b"host", b"ombre.example"),
+            (b"authorization", b"Bearer wrong-key"),
+        ],
+    }
+
+    await middleware(scope, _empty_receive, _collect_into(messages))
+
+    assert downstream.scopes == []
+    assert messages[0]["status"] == 401
+
+
+@pytest.mark.asyncio
 async def test_auth_middleware_rejects_an_incorrect_gateway_key(monkeypatch):
     monkeypatch.setenv("OMBRE_GATEWAY_API_KEY", "gateway-secret")
     downstream = RecordingASGIApp()

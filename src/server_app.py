@@ -105,8 +105,9 @@ class MCPAuthMiddleware:
     """Require OAuth or a dedicated gateway credential for ``/mcp``.
 
     Human MCP clients keep using Ombre's OAuth flow. A separately configured
-    gateway may use ``X-Ombre-Gateway-Key`` for server-to-server access, so it
-    never needs the Dashboard password and OAuth does not need to be disabled.
+    gateway may use a Bearer machine credential for server-to-server access,
+    so it never needs the Dashboard password and OAuth does not need to be
+    disabled. ``X-Ombre-Gateway-Key`` remains accepted for compatibility.
     """
 
     def __init__(
@@ -121,18 +122,34 @@ class MCPAuthMiddleware:
         self.token_validator = token_validator
 
     @staticmethod
+    def _bearer_token(headers: Mapping[bytes, bytes]) -> str:
+        authorization = headers.get(b"authorization", b"").decode("latin-1").strip()
+        scheme, separator, token = authorization.partition(" ")
+        if separator and scheme.lower() == "bearer":
+            return token.strip()
+        return ""
+
+    @staticmethod
     def _gateway_key_status(
         headers: Mapping[bytes, bytes],
     ) -> tuple[bool, bool, bool]:
         """Return safe presence and match flags for the machine credential."""
         configured = os.environ.get("OMBRE_GATEWAY_API_KEY", "").strip()
-        supplied = headers.get(b"x-ombre-gateway-key", b"").decode("latin-1").strip()
+        legacy_supplied = (
+            headers.get(b"x-ombre-gateway-key", b"").decode("latin-1").strip()
+        )
+        bearer_supplied = MCPAuthMiddleware._bearer_token(headers)
+        supplied_candidates = (bearer_supplied, legacy_supplied)
         configured_present = bool(configured)
-        header_received = bool(supplied)
+        header_received = any(supplied_candidates)
         matched = bool(
             configured_present
             and header_received
-            and hmac.compare_digest(supplied, configured)
+            and any(
+                hmac.compare_digest(supplied, configured)
+                for supplied in supplied_candidates
+                if supplied
+            )
         )
         return configured_present, header_received, matched
 
@@ -140,14 +157,14 @@ class MCPAuthMiddleware:
         path = str(scope.get("path", ""))
         if scope.get("type") == "http" and self.auth_required and path.startswith("/mcp"):
             headers = {key.lower(): value for key, value in scope.get("headers", [])}
-            auth = headers.get(b"authorization", b"").decode("latin-1")
+            bearer_token = self._bearer_token(headers)
             resource, base = _request_resource(scope, headers)
             gateway_configured, gateway_header_received, gateway_matched = (
                 self._gateway_key_status(headers)
             )
             valid = gateway_matched or (
-                auth.startswith("Bearer ")
-                and self.token_validator(auth[7:], resource=resource)
+                bool(bearer_token)
+                and self.token_validator(bearer_token, resource=resource)
             )
             if not valid:
                 logger.warning(
