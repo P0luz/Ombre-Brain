@@ -25,7 +25,9 @@ decay_engine.py — 记忆衰减引擎，模拟人类遗忘曲线
 import math
 import asyncio
 import logging
-from datetime import datetime
+from datetime import datetime, timezone
+
+from utils import parse_iso_aware
 
 logger = logging.getLogger("ombre_brain.decay")
 
@@ -112,8 +114,10 @@ def _days_since_active(meta: dict, fallback_days: float = _DEFAULT_DAYS_FALLBACK
         return fallback_days
     raw = meta.get("last_active") or meta.get("created") or ""
     try:
-        last_active = datetime.fromisoformat(str(raw))
-        return max(0.0, (datetime.now() - last_active).total_seconds() / _SECONDS_PER_DAY)
+        # Legacy naive values were written as UTC; parse uniformly so the
+        # subtraction never mixes naive and aware datetimes.
+        last_active = parse_iso_aware(str(raw))
+        return max(0.0, (datetime.now(timezone.utc) - last_active).total_seconds() / _SECONDS_PER_DAY)
     except (ValueError, TypeError):
         return float(fallback_days)
 

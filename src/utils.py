@@ -31,7 +31,8 @@ import json
 import yaml
 import logging
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timezone
+from zoneinfo import ZoneInfo
 from typing import Optional
 
 
@@ -568,7 +569,52 @@ def count_tokens_approx(text: str) -> int:
 
 def now_iso() -> str:
     """
-    Return current time as ISO format string.
-    返回当前时间的 ISO 格式字符串。
+    Return current time as ISO format string with an explicit UTC offset.
+    Machine metadata (created / last_active / ...) is always stored as aware
+    UTC — a single source of truth, never timezone-naive.
+    返回当前时间的 ISO 格式字符串（带显式 UTC 偏移）。
+    机器元数据（created / last_active 等）一律保存 aware UTC，单一真相。
     """
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+# 展示用：桶名是「给人看的」，用 Asia/Shanghai 本地时间；元数据保持 UTC 不动。
+_SHANGHAI_TZ = ZoneInfo("Asia/Shanghai")
+
+
+def parse_iso_aware(value: str) -> datetime:
+    """
+    Parse an ISO datetime string into an aware datetime.
+    Legacy timezone-naive values are interpreted as UTC (containers run UTC),
+    which is the convention every historical bucket was written with.
+    解析 ISO 时间为 aware datetime；历史 naive 值按 UTC 解释。
+    """
+    s = str(value).strip()
+    if s.endswith("Z"):
+        s = s[:-1] + "+00:00"
+    dt = datetime.fromisoformat(s)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def display_time(value: str, fmt: str = "%Y-%m-%d %H:%M:%S") -> str:
+    """
+    Render a stored timestamp in Asia/Shanghai for humans. Stored data is
+    never rewritten — only the display is converted.
+    将存储时间展示为上海本地时间；不改存储数据。
+    """
+    return parse_iso_aware(value).astimezone(_SHANGHAI_TZ).strftime(fmt)
+
+
+def display_bucket_name(name: str) -> str:
+    """
+    Legacy bucket names embed the creation time as ``YYYY-MM-DD HH-MM-SS``
+    written in naive UTC; render that prefix in Asia/Shanghai for humans.
+    Non-timestamp names pass through untouched.
+    旧桶名以裸 UTC 内嵌创建时间前缀，展示时转上海时间；非时间戳名称原样通过。
+    """
+    m = re.match(r"^(\d{4}-\d{2}-\d{2}) (\d{2})-(\d{2})-(\d{2})(.*)$", str(name))
+    if not m:
+        return str(name)
+    naive_iso = f"{m.group(1)}T{m.group(2)}:{m.group(3)}:{m.group(4)}"
+    local = parse_iso_aware(naive_iso).astimezone(_SHANGHAI_TZ).strftime("%Y-%m-%d %H-%M-%S")
+    return f"{local}{m.group(5)}"

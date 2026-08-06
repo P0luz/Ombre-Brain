@@ -23,9 +23,9 @@ from . import _shared as sh
 logger = sh.logger
 
 try:
-    from utils import strip_wikilinks  # type: ignore
+    from utils import strip_wikilinks, display_bucket_name  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import strip_wikilinks  # type: ignore
+    from ..utils import strip_wikilinks, display_bucket_name  # type: ignore
 
 try:
     from tools._common import check_pinned_quota as _check_pinned_quota  # type: ignore
@@ -120,7 +120,7 @@ def register(mcp) -> None:
                     continue
                 result.append({
                     "id": b["id"],
-                    "name": meta.get("name", b["id"]),
+                    "name": display_bucket_name(meta.get("name", b["id"])),
                     "type": meta.get("type", "dynamic"),
                     "domain": meta.get("domain", []),
                     "tags": meta.get("tags", []),
@@ -485,7 +485,7 @@ def register(mcp) -> None:
             m = b.get("metadata", {})
             items.append({
                 "id": b["id"],
-                "name": m.get("name") or b["id"],
+                "name": display_bucket_name(m.get("name") or b["id"]),
                 "created": m.get("created", ""),
                 "domain": m.get("domain", []),
                 "tags": m.get("tags", []),

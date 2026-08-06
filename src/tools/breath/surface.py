@@ -28,7 +28,7 @@ import time
 from datetime import datetime, timezone, timedelta
 
 from .. import _runtime as rt
-from utils import strip_wikilinks, count_tokens_approx
+from utils import strip_wikilinks, count_tokens_approx, parse_iso_aware
 
 # U-07 fix: throttle the sampling-fallback INFO log to once per 5 minutes.
 # 库小且 sampling=ON 时此分支每次 breath 都触发，原本会刷屏；改为 ≥300s
@@ -116,7 +116,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         meta = b["metadata"]
         score = rt.decay_engine.calculate_score(meta)
         try:
-            last_ts = datetime.fromisoformat(
+            last_ts = parse_iso_aware(
                 str(meta.get("last_active") or meta.get("created", ""))
             ).timestamp()
         except (ValueError, TypeError):
@@ -249,7 +249,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             if imp >= 9:
                 last = meta.get("last_active") or meta.get("created", "")
                 try:
-                    last_dt = datetime.fromisoformat(last.replace("Z", "+00:00")) if last else None
+                    last_dt = parse_iso_aware(last) if last else None
                     if last_dt and last_dt < seven_days_ago:
                         cond_b = True
                 except Exception:

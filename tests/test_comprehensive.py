@@ -10,7 +10,7 @@ import sys
 import asyncio
 import pytest
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
 
 # ---------------------------------------------------------
@@ -166,10 +166,12 @@ class TestNowIso:
 
     def test_approximately_now(self):
         from utils import now_iso
-        # now_iso() truncates to seconds; compare at second granularity
-        before = datetime.now().replace(microsecond=0)
+        # now_iso() truncates to seconds; compare at second granularity.
+        # now_iso() 是 aware UTC，基准也要用 aware 比较。
+        from datetime import timezone
+        before = datetime.now(timezone.utc).replace(microsecond=0)
         result = datetime.fromisoformat(now_iso())
-        after = datetime.now().replace(microsecond=0)
+        after = datetime.now(timezone.utc).replace(microsecond=0)
         assert before <= result <= after
 
 
@@ -444,7 +446,7 @@ class TestBucketManagerUpdate:
     @pytest.mark.asyncio
     async def test_update_refreshes_last_active(self, bucket_mgr):
         bid = await bucket_mgr.create(content="x")
-        before = datetime.now().replace(microsecond=0)
+        before = datetime.now(timezone.utc).replace(microsecond=0)
         await bucket_mgr.update(bid, importance=6)
         result = await bucket_mgr.get(bid)
         last_active = datetime.fromisoformat(result["metadata"]["last_active"])

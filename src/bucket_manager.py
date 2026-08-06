@@ -79,7 +79,7 @@ from typing import Any, Optional
 import frontmatter
 from rapidfuzz import fuzz
 
-from utils import generate_bucket_id, sanitize_name, safe_path, now_iso
+from utils import generate_bucket_id, sanitize_name, safe_path, now_iso, parse_iso_aware
 from bucket_scoring import (
     calc_topic_score,
     calc_emotion_score,
@@ -378,7 +378,10 @@ class BucketManager:
             bucket_id = generate_bucket_id()
         # 桶名 = "YYYY-MM-DD HH-MM-SS [LLM生成的标题]"，无标题时仅用时间戳。
         # 使用连字符替代冒号，避免 sanitize_name 后续编辑时把冒号去掉破坏可读性。
-        _ts = datetime.now().strftime("%Y-%m-%d %H-%M-%S")
+        # 桶名是给人看的：用 Asia/Shanghai 本地时间；元数据（created/last_active）
+        # 仍由 now_iso() 以 aware UTC 写入，两者各司其职。
+        from zoneinfo import ZoneInfo
+        _ts = datetime.now(ZoneInfo("Asia/Shanghai")).strftime("%Y-%m-%d %H-%M-%S")
         _clean = sanitize_name(name) if name else ""
         bucket_name = (f"{_ts} {_clean}" if (_clean and _clean != "unnamed") else _ts)[:80]
         # feel buckets are allowed to have empty domain; others default to ["未分类"]
@@ -839,7 +842,7 @@ class BucketManager:
 
             # --- Time ripple: boost nearby memories within ±48h ---
             # --- 时间涟漪：±48小时内的记忆轻微唤醒 ---
-            current_time = datetime.fromisoformat(str(post.get("created", post.get("last_active", ""))))
+            current_time = parse_iso_aware(str(post.get("created", post.get("last_active", ""))))
             await self._time_ripple(bucket_id, current_time)
         except Exception as e:
             logger.warning(f"Failed to touch bucket / 触碰桶失败: {bucket_id}: {e}")
@@ -868,7 +871,7 @@ class BucketManager:
 
             created_str = meta.get("created", meta.get("last_active", ""))
             try:
-                created = datetime.fromisoformat(str(created_str))
+                created = parse_iso_aware(str(created_str))
                 delta_hours = abs((reference_time - created).total_seconds()) / 3600
             except (ValueError, TypeError):
                 continue
