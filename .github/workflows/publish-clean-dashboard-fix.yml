@@ -1,0 +1,32 @@
+name: Publish clean dashboard search fix branch
+
+on:
+  push:
+    branches:
+      - fix/preserve-dashboard-search-after-refresh
+
+permissions:
+  contents: write
+
+jobs:
+  publish-clean-branch:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/preserve-dashboard-search-after-refresh
+          fetch-depth: 0
+
+      - name: Build clean one-commit branch from upstream base
+        run: |
+          cp frontend/dashboard.html /tmp/dashboard.html
+          cp tests/test_dashboard_bucket_view_state.py /tmp/test_dashboard_bucket_view_state.py
+          git fetch origin main
+          git checkout -B fix/preserve-dashboard-search-after-refresh-clean origin/main
+          cp /tmp/dashboard.html frontend/dashboard.html
+          cp /tmp/test_dashboard_bucket_view_state.py tests/test_dashboard_bucket_view_state.py
+          git config user.name "MorphieEndless"
+          git config user.email "216736159+MorphieEndless@users.noreply.github.com"
+          git add frontend/dashboard.html tests/test_dashboard_bucket_view_state.py
+          git commit -s -m "fix(dashboard): preserve search results after bucket refresh"
+          git push --force origin HEAD:fix/preserve-dashboard-search-after-refresh-clean
