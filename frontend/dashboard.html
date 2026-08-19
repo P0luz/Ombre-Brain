@@ -4771,9 +4771,15 @@ async function loadBuckets() {
     selectedBucketIds.forEach(function(id) { if (!liveIds.has(id)) selectedBucketIds.delete(id); });
     updateStats();
     buildFilters();
-    // 数据刷新不等于用户切换视图：继续应用当前筛选，并保留所在页。
+    // 数据刷新不等于用户切换视图：若搜索框里仍有查询，重跑搜索以保持结果视图；
+    // 否则继续应用当前筛选，并保留所在页。
     // 若刷新后页数减少，_paintBuckets 会自动把 bucketPage 收敛到末页。
-    renderBuckets(filterBuckets(allBuckets), true);
+    var activeQuery = (document.getElementById('search-input') || {}).value || '';
+    if (activeQuery.trim()) {
+      await searchBuckets(activeQuery.trim());
+    } else {
+      renderBuckets(filterBuckets(allBuckets), true);
+    }
     if (data.length === 0 && window.ObPet) window.ObPet.react('empty');
   } catch (e) {
     if (generation !== bucketLoadGeneration || requestedSort !== bucketSort) return;
