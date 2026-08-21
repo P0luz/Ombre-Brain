@@ -112,11 +112,20 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
 
         config_update = client.post(
             "/api/config",
-            json={"surfacing": {"breath_max_results": 11}, "persist": False},
+            json={
+                "surfacing": {
+                    "breath_max_results": 11,
+                    "cold_start_max_results": 0,
+                },
+                "persist": False,
+            },
         )
         assert config_update.status_code == 200
         assert "surfacing.breath_max_results" in config_update.json()["updated"]
-        assert client.get("/api/config").json()["surfacing"]["breath_max_results"] == 11
+        assert "surfacing.cold_start_max_results" in config_update.json()["updated"]
+        surfacing_config = client.get("/api/config").json()["surfacing"]
+        assert surfacing_config["breath_max_results"] == 11
+        assert surfacing_config["cold_start_max_results"] == 0
 
         status = client.get("/api/status")
         assert status.status_code == 200

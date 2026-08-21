@@ -188,13 +188,14 @@ surfacing:
   breath_max_results: 20          # 1-50, hard cap of buckets returned per breath
   breath_max_tokens: 10000        # 500-40000, total token cap per breath; 40000 is a safety ceiling, not the default
   feel_max_tokens: 15000          # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
+  cold_start_max_results: 2       # 0-2; 0 disables unvisited-identity priority/passive surfacing, but keeps those buckets as normal candidates
   # iter 1.8: weighted sampling for breath surfacing mode（无参数浮现）
   # 加权采样：从 top_k 候选里按 score**(1/temperature) 抽 sample_k 个，让"想起"带轻微随机性。
   # 测试 fixture 里默认关 (enabled=false)，保证排序确定。生产可以开。
   sampling:
     enabled: false                # true = 启用加权采样；false = 退化为 top1+shuffle 原行为
     top_k: 5                      # 候选池大小
-    sample_k: 2                   # 抽出几个
+    sample_k: 2                   # 每次最多返回的普通主候选数（另受 top_k 与 breath_max_results 上限约束）
     temperature: 0.7              # >1 更平均、<1 更偏向高分；0.7 是个温和的默认
 
 # --- Limits / 边界限制（iter 1.6 §5）---

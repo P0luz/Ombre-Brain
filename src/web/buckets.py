@@ -668,11 +668,10 @@ def register(mcp) -> None:
 
 
     # ---- iter 1.9 B: dashboard 调 sampling 配置 / sampling control ----
-    # GET 返回当前 surfacing.sampling；POST 接收新值并热更新内存里的 config。
-    # 这里只改运行时 config，不写回 yaml—— yaml 持久化交给 1.6 已有的设置面板机制（如开发者愿意手 sync）。
+    # GET 返回当前 surfacing.sampling；POST 校验后原子写入 YAML，再发布到运行时 config。
     @mcp.custom_route("/api/settings/sampling", methods=["GET", "POST"])
     async def api_settings_sampling(request: Request) -> Response:
-        """Get / hot-update breath weighted sampling settings (iter 1.9 §B)."""
+        """Get or persist breath weighted sampling settings (iter 1.9 §B)."""
         from starlette.responses import JSONResponse
         err = sh._require_auth(request)
         if err:

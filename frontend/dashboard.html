@@ -2846,7 +2846,7 @@
         <div style="font-weight:600;font-size:13px;margin-bottom:6px;">呼吸采样 <span style="font-size:11px;color:var(--text-dim);font-weight:400;">/ Breath Sampling</span></div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:10px;line-height:1.7;">
           <b>关</b>：breath 永远返回得分最高的那条。<br>
-          <b>开</b>：按 score^(1/温度) 加权采样，中等分数的桶也有机会浮现（温度越高越随机；候选不足时自动回退）。
+          <b>开</b>：从 top_k 候选池按 score^(1/温度) 加权抽出最多 sample_k 条；中等分数的桶也有机会浮现（温度越高越随机）。
         </div>
         <div class="config-row" style="align-items:center;">
           <label>启用加权采样</label>
@@ -2867,7 +2867,7 @@
         </div>
         <div style="display:flex;gap:8px;align-items:center;margin-top:6px;">
           <button class="btn-primary" onclick="saveSamplingSettings()" title="保存 / Save" style="padding:0 14px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="check"></i> 保存 Save</button>
-          <button onclick="testSamplingBreath()" title="试一次 breath / Try a breath" style="font-size:12px;padding:0 12px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="wind"></i> 试Breath</button>
+          <button onclick="previewBreathScores()" title="仅查看当前评分前五，不模拟随机 breath" style="font-size:12px;padding:0 12px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="list-ordered"></i> 查看评分前五</button>
           <span id="sampling-msg" style="font-size:12px;"></span>
         </div>
         <div id="sampling-test-result" style="margin-top:10px;font-size:12px;color:var(--text-dim);"></div>
@@ -2879,6 +2879,8 @@
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">0-100，越高越难合并相似桶</div>
         <div class="config-row"><label>breath 默认桶数</label><input type="number" id="cfg-sf-breath-results" min="1" max="50" /></div>
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">1-50。AI 调用 breath() 不指定 max_results 时使用此默认值</div>
+        <div class="config-row"><label>冷启动保留席位</label><input type="number" id="cfg-sf-cold-start-results" min="0" max="2" step="1" /></div>
+        <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">0-2。设为 0 会取消「从未访问」身份的主区插队与被动联想；这些桶仍可作为普通候选被抽中</div>
         <div class="config-row"><label>breath 默认 token</label><input type="number" id="cfg-sf-breath-tokens" min="500" max="40000" step="500" /></div>
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">500-40000。breath 单次返回总 token 上限；40000 为安全上限，不是默认值</div>
         <div class="config-row"><label>feel 历史 token</label><input type="number" id="cfg-sf-feel-tokens" min="500" max="20000" step="500" /></div>
@@ -4371,7 +4373,7 @@ async function saveSamplingSettings() {
     const d = await readJsonSafe(resp);
     if (resp.ok) {
       msg.style.color = 'var(--accent)';
-      msg.textContent = '已保存（仅热更新到内存）';
+      msg.textContent = '已保存并持久化';
     } else {
       msg.style.color = 'var(--negative)';
       msg.textContent = d.error || '保存失败';
@@ -4382,9 +4384,9 @@ async function saveSamplingSettings() {
   }
 }
 
-async function testSamplingBreath() {
+async function previewBreathScores() {
   const out = document.getElementById('sampling-test-result');
-  out.textContent = 'breath 中…';
+  out.textContent = '读取评分中…';
   try {
     const resp = await authFetch('/api/breath?n=5');
     if (!resp) return;
@@ -4394,7 +4396,7 @@ async function testSamplingBreath() {
       out.textContent = '没有候选桶（库可能是空的）';
       return;
     }
-    out.innerHTML = '本次浮现：<br/>' + items.map((b, i) => {
+    out.innerHTML = '当前评分前五（不是随机 breath 结果）：<br/>' + items.map((b, i) => {
       const nm = esc(b.name || b.id || '(无名)');
       const sc = (b.score != null) ? ' · ' + Number(b.score).toFixed(3) : '';
       return (i + 1) + '. ' + nm + sc;
@@ -7340,6 +7342,7 @@ async function loadConfig() {
     }
     var sf = cfg.surfacing || {};
     document.getElementById('cfg-sf-breath-results').value = sf.breath_max_results || 20;
+    document.getElementById('cfg-sf-cold-start-results').value = sf.cold_start_max_results != null ? sf.cold_start_max_results : 2;
     document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 10000;
     document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 15000;
     document.getElementById('cfg-timezone').value = cfg.timezone || 'Asia/Shanghai';
@@ -7616,8 +7619,15 @@ async function saveEmbedKey() {
 async function saveConfig(persist) {
   var dehyTemperatureRaw = document.getElementById('cfg-dehy-temp').value.trim();
   var mergeThresholdRaw = document.getElementById('cfg-merge').value.trim();
+  var coldStartRaw = document.getElementById('cfg-sf-cold-start-results').value.trim();
   var dehyTemperature = dehyTemperatureRaw === '' ? NaN : Number(dehyTemperatureRaw);
   var mergeThreshold = mergeThresholdRaw === '' ? NaN : Number(mergeThresholdRaw);
+  var coldStartMaxResults = coldStartRaw === '' ? 2 : Number(coldStartRaw);
+  var status = document.getElementById('config-status');
+  if (coldStartRaw !== '' && (!Number.isInteger(coldStartMaxResults) || coldStartMaxResults < 0 || coldStartMaxResults > 2)) {
+    status.innerHTML = '<span style="color:var(--negative)">' + _SV.err + ' 冷启动保留席位必须是 0 到 2 的整数</span>';
+    return;
+  }
   var body = {
     dehydration: {
       model: document.getElementById('cfg-dehy-model').value,
@@ -7638,11 +7648,11 @@ async function saveConfig(persist) {
       breath_max_results: parseInt(document.getElementById('cfg-sf-breath-results').value) || 20,
       breath_max_tokens: parseInt(document.getElementById('cfg-sf-breath-tokens').value) || 10000,
       feel_max_tokens: parseInt(document.getElementById('cfg-sf-feel-tokens').value) || 15000,
+      cold_start_max_results: coldStartRaw === '' ? 2 : coldStartMaxResults,
     },
     timezone: (document.getElementById('cfg-timezone').value || '').trim(),
     persist: persist,
   };
-  var status = document.getElementById('config-status');
   try {
     var res = await authFetch('/api/config', {
       method: 'POST',

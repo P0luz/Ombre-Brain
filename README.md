@@ -695,6 +695,9 @@ docker compose -f deploy/docker-compose.yml up -d
 | `embedding.retry_base_seconds` / `retry_max_seconds` | 向量失败后的指数退避起点 / 上限 | `5` / `300` |
 | `decay.lambda` | 衰减速率，越大越快忘 | `0.05` |
 | `merge_threshold` | 合并相似度阈值 (0-100) | `75` |
+| `surfacing.breath_max_results` | 每次 `breath()` 的主要浮现硬上限；采样开启时普通主候选还受 `sample_k` 限制 | `20` |
+| `surfacing.cold_start_max_results` | 从未访问且 importance≥8 的桶强制插队数；`0` 同时取消这类桶因冷启动身份进入「久未浮现」，但仍可作为普通候选被抽中 | `2`（范围 `0～2`） |
+| `surfacing.sampling.enabled` | 是否从 `top_k` 候选池加权抽出最多 `sample_k` 条普通主候选；开启后不再固定保留 Top-1 | `false`；需要降低重复时开启 |
 | `hooks.token` | `/breath-hook` 的 HTTP token | 自托管公网建议设置 |
 | `hooks.allow_public` | 是否允许 hook 无鉴权访问 | `false` |
 

@@ -295,7 +295,7 @@ feel 桶自身：
 2. **Plan 通道**（`domain="plan"`，仅 `breath_advanced`，3.0.0 新增）：直接拉所有 `type==plan && status==active` 桶，按 `created` 倒序逐字返回，放不下的整条省略、不截断不摘要；一条 active plan 都没有时返回「没有计划。」。
    > **为什么必须有这个通道**：plan 桶被浮现模式排除，而 `domain` 参数只在 catalog 模式和检索模式（模式 5，需要 `query`）里生效。没有这一分流时，`breath_advanced(domain="plan")` 会落到模式 4 浮现模式，返回权重最高的桶 + 置顶核心准则——**调用方拿到的是核心准则，不是 plan**。叠加 dream 末尾 plan 段可能因总预算降级成只报条数，plan 正文一度没有任何读取入口。回归测试见 `tests/test_breath_plan_channel.py`。
 3. **重要度批量模式**（`importance_min >= 1`，仅 `breath_advanced`）：跳过语义搜索，按 importance 降序返回 ≤20 条；过滤 `feel/plan/letter` 与 `dont_surface=True`；**不过滤 anchor、不过滤 pinned**（设计：主动按 importance 检索时希望能找到所有重要桶）。
-4. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」。
+4. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序。**冷启动**（`activation_count==0 && importance>=8`）插队数由 `surfacing.cold_start_max_results` 控制（默认 2、范围 0～2）；设为 0 会同时取消这类桶因「从未访问」而进入主区固定席位及「久未浮现」段的特殊待遇，但仍保留普通候选资格。后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时，从得分前 `top_k` 的普通候选池按权重无放回抽出并**只返回**最多 `sample_k` 条（不再固定 Top-1；详见 §7.1）；否则走原 Top-1 固定 + Top-2~20 随机洗牌。冷启动席位与抽样结果合计仍受 `max_results` 硬上限约束。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」；当冷启动上限为 0 时，单凭「从未访问」不再满足此段条件。
 5. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → 活跃桶命中时 `touch()`。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
 
 #### 检索的门：召回与排序目前没有分开（已知设计债）
@@ -543,7 +543,7 @@ dream 侧配合（`tools/dream/hints.py` + `output.py`）：
 | `/api/bucket/{id}/archive` | POST | 🔒 | 软删除（移入 archive/） |
 | `/api/bucket/{id}/forget` | POST | 🔒 | iter 1.8：切换 `dont_surface`。桶仍在磁盘，只是不再被无参 `breath()` 主动浮现，关键词搜索仍可达 |
 | `/api/buckets/forget` | POST | 🔒 | iter 1.9：批量设置 `dont_surface`。Body `{ids:[...], dont_surface: bool}`。返回 `{ok, updated:[], missing:[], errors:[]}` |
-| `/api/settings/sampling` | GET / POST | 🔒 | iter 1.9：dashboard 的加权采样面板。GET 返回当前 `surfacing.sampling.{enabled,top_k,sample_k,temperature}`；POST 校验范围后热更新到内存 config（不写回 yaml） |
+| `/api/settings/sampling` | GET / POST | 🔒 | iter 1.9：dashboard 的加权采样面板。GET 返回当前 `surfacing.sampling.{enabled,top_k,sample_k,temperature}`；POST 校验范围后同时热更新运行态并原子持久化到 yaml |
 | `/api/anchors` | GET | 🔒 | iter 2.0：列出所有 anchor 桶（按 `created` 升序），返回 `{ok, count, limit, anchors:[...]}` |
 | `/api/bucket/{id}/anchor` | POST | 🔒 | iter 2.0：toggle anchor 标记。Body 可传 `{value: bool}` 强制设置；不传则切换。已满 24 时返回 **409** + `{error, count, limit}` |
 | `/api/bucket/{id}` | DELETE | 🔒 | 删除到档案：移入 `archive/` 并写 `deleted_at`，需 `?confirm=true`；不做物理抹除 |
@@ -1518,11 +1518,12 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `surfacing.breath_max_tokens` | `10000` | 覆盖 `breath` 默认 max_tokens |
 | `surfacing.breath_max_results` | `20` | 覆盖 `breath` 默认 max_results |
 | `surfacing.feel_max_tokens` | `15000` | **dream** feel 历史段的 token 预算，超出折叠为 60 字摘要。3.0.0 起不再作用于 feel 通道——`feel(query=...)` 用自己的 `max_tokens`（默认 10000），且放不下时整条省略、不折叠 |
+| `surfacing.cold_start_max_results` | `2` | 0～2；控制「从未访问且 importance>=8」桶的主区插队数。设为 0 同时取消这类桶因未访问身份进入被动联想，但仍保留普通候选资格 |
 | `timezone` | `Asia/Shanghai` | 3.0.0：用户只给日期、不写时区时按它理解（Letter 定时锁 `unlock_date` 等）。IANA 时区名；名字非法或缺 tzdata 时回退固定 `+08:00`，但 Dashboard 保存会当场校验拒绝。Dashboard「设置」可改，热更新生效 |
 | `ai_name` | （空） | 3.0.0：AI 一方的显示名。优先级高于环境变量 `AI_NAME`；随 vault 持久化，容器重建不丢。留空=未配置，回退环境变量再回退 `"AI"` |
 | `surfacing.sampling.enabled` | `false` | 浮现模式加权采样总开关；false 走原 Top-1 + shuffle |
 | `surfacing.sampling.top_k` | `5` | 候选池大小（按衰减分取前 k） |
-| `surfacing.sampling.sample_k` | `2` | 从池里无放回抽 k 条返回 |
+| `surfacing.sampling.sample_k` | `2` | 从前 `top_k` 池里无放回抽样，并只返回最多 k 条普通主候选；另受 `breath_max_results` 上限约束 |
 | `surfacing.sampling.temperature` | `0.7` | 权重 = score^(1/temperature)；>1 更均匀，<1 更偏向高分桶 |
 | `wikilink.*` | （已废弃） | wikilink 自动注入已禁用，由 LLM prompt 直接生成 `[[]]`；`config.example.yaml` 不再给出可配置项 |
 
@@ -1587,7 +1588,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 |---|---|---|
 | `10000` / `40000` | `breath` | max_tokens 默认 / 显式 opt-in 安全上限（非新默认） |
 | `20` / `50` | `breath` | max_results 默认 / 上限 |
-| `2` | `breath` 浮现 | 冷启动桶数上限 |
+| `2`（默认，可设 `0～2`） | `breath` 浮现 | `surfacing.cold_start_max_results` 冷启动桶数上限；0 关闭特殊待遇 |
 | `8` | 冷启动 | importance >= 8 才进入冷启动 |
 | `20` | `breath` 浮现 | top-1 固定 + top-2~20 随机 |
 | `0.65` | `breath` 检索 | 纯语义候选进入结果池的余弦相似度下限 |
@@ -1684,7 +1685,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | 向量搜索没生效 | `embedding_engine.py` + `tools/breath/search.py` | `enabled` 是否为 True；`search_similar_strict` 是否触发降级提示；用 `tools/evaluate_retrieval.py --with-embedding` 对比基线 |
 | 向量后端切换不生效 | `web/config_api.py` | `/api/config` POST 中 embedding.backend 分支必须 `EmbeddingEngine(config)` 完整重建 |
 | `feel(query=...)` 返回空但有 feel 桶 | `bucket_manager.py` | `list_all()` `dirs` 列表必须含 `self.feel_dir`；另确认关键词是否真的与任何 feel 相关（阈值 0.65） |
-| Top-1 永远是同一个桶 | `tools/breath/` | 浮现分支 `top1` 固定逻辑；想加多样性需改成 sampling |
+| 连续 breath 的 Top-1 永远是同一个桶 | `tools/breath/` | 确认 `surfacing.sampling.enabled=true`，并让 `sample_k` 小于候选池规模；启用后只返回抽中的子集，不固定 Top-1 |
 
 ### 11.2 存储 / 合并类
 
@@ -1755,7 +1756,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 
 9. **Dashboard 对普通桶只提供一个经人类发起的「归档」入口**。该入口要求理由并进入 AI 删除审批；批准后移入 `archive/`、写 `deleted_at`。底层 `archive()` 仍保留给 AI/系统生命周期逻辑，且不写删除标记。兼容 DELETE 端点仍执行删除到档案；物理删除 UI 已移除，旧 `/api/buckets/purge` 仅返回 410。
 
-10. **冷启动检测最多 2 个**。`importance >= 8` 的新桶超过 2 个时，第 3 个开始按普通衰减分排队，可能被压在 top-20 后随机洗牌。如果用户一次性钉选 5 条核心准则后又新建 3 个 importance=10 的事件桶，会感到「我刚建的核心事件没浮现」。
+10. **冷启动检测默认最多 2 个，可设为 0～2**。`surfacing.cold_start_max_results=0` 会取消新高重要度桶因「从未访问」身份获得的固定席位与被动联想资格；它们仍按普通衰减分参与候选。若设为 1 或 2，超出席位的第 2／3 个以后也同样按普通候选排队。
 
 11. **Letter 不参与压缩但仍生成 embedding**。原文如果非常长（>2000 字符）embedding 只看前 2000 字符——长信件的语义检索会偏向开头。这是已知 trade-off，未来若需要可改为分段 embedding。
 

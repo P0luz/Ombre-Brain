@@ -11,10 +11,12 @@ tools/breath/surface.py — 无 query 浮现模式
 - 排除 digested 桶（已消化记忆只允许显式检索/审计找回）
 - 通过主动浮现策略的 pinned/permanent 桶作为「核心准则」置顶
 - protected 只防衰减，不进入核心准则、未解决池、被动联想或偶遇池
-- 未解决桶按 calculate_score 排序；冷启动桶（从未访问且 importance>=8）插队前 2
-- 配置开关 surfacing.sampling.enabled 启用后做加权无放回采样，否则
-  保留 top1 + top20 内随机洗牌
-- 末尾 1~2 条「久未浮现」passive association（imp>=8 且未访问 / imp>=9 且 7 天未活跃）
+- 未解决桶按 calculate_score 排序；冷启动桶（从未访问且 importance>=8）的插队数由
+  surfacing.cold_start_max_results 控制（默认 2；0 关闭该身份的特殊待遇）
+- 配置开关 surfacing.sampling.enabled 启用后，从 top_k 候选池加权无放回抽出并只返回
+  最多 sample_k 条普通主候选；否则保留 top1 + top20 内随机洗牌
+- 末尾 1~2 条「久未浮现」passive association（imp>=8 且未访问 / imp>=9 且 7 天未活跃）；
+  cold_start_max_results=0 时，单凭“未访问”不再进入该段
 
 不做什么（边界）：
 - 不调用 touch()：浮现不能重置衰减计时器
@@ -260,11 +262,26 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         rt.logger.info(f"Top unresolved scores: {top_scores}")
 
     # --- 冷启动检测 ---
+    raw_cold_start_max = surfacing_cfg.get("cold_start_max_results", 2)
+    try:
+        if isinstance(raw_cold_start_max, bool):
+            raise ValueError("boolean is not an integer count")
+        cold_start_max_results = int(raw_cold_start_max)
+        if isinstance(raw_cold_start_max, float) and not raw_cold_start_max.is_integer():
+            raise ValueError("fractional count")
+        if not 0 <= cold_start_max_results <= 2:
+            raise ValueError("outside 0..2")
+    except (TypeError, ValueError):
+        rt.logger.warning(
+            "Invalid surfacing.cold_start_max_results=%r; fallback to 2",
+            raw_cold_start_max,
+        )
+        cold_start_max_results = 2
     cold_start = [
         b for b in unresolved
         if int(b["metadata"].get("activation_count") or 0) == 0
         and int(b["metadata"].get("importance") or 0) >= 8
-    ][:2]
+    ][:cold_start_max_results]
     cold_start_ids = {b["id"] for b in cold_start}
     scored_deduped = [b for b in scored if b["id"] not in cold_start_ids]
     scored_with_cold = cold_start + scored_deduped
@@ -279,7 +296,7 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
         top_k = int(sampling_cfg.get("top_k") or 5)
         sample_k = int(sampling_cfg.get("sample_k") or 2)
         temperature = max(0.1, float(sampling_cfg.get("temperature") or 0.7))
-        pool = non_cold[:max(top_k, sample_k)]
+        pool = non_cold[:top_k]
         try:
             weights = [
                 max(0.0001, rt.decay_engine.calculate_score(b["metadata"])) ** (1.0 / temperature)
@@ -292,9 +309,9 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
                 idx = random.choices(range(len(pool_copy)), weights=weights_copy, k=1)[0]
                 picked.append(pool_copy.pop(idx))
                 weights_copy.pop(idx)
-            rest = pool_copy + non_cold[len(pool):]
-            non_cold = picked + rest
-            candidates = cold_start + non_cold
+            # Sampling is a returned subset, not merely a permutation of the
+            # same top-N set.  This is what lets consecutive breaths vary.
+            candidates = cold_start + picked
         except Exception as e:
             rt.logger.warning(f"Weighted sampling failed, fallback to original / 加权采样失败: {e}")
     elif len(candidates) > 1:
@@ -383,7 +400,9 @@ async def surface_default(max_results: int, max_tokens: int, tag_filter: list) -
             meta = b["metadata"]
             ac = int(meta.get("activation_count") or 0)
             imp = int(meta.get("importance") or 0)
-            cond_a = ac == 0 and imp >= 8
+            # A zero cap disables the special "unvisited" identity everywhere.
+            # The same bucket still remains eligible in the ordinary main pool.
+            cond_a = cold_start_max_results > 0 and ac == 0 and imp >= 8
             cond_b = False
             if imp >= 9:
                 last = meta.get("last_active") or meta.get("created", "")

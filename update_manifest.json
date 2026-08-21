@@ -7,8 +7,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "840fd05b06fb03f8914d3020a8eea8e814108d001444c3ce677fe00368056284",
-      "size": 534925
+      "sha256": "67bb1c9518f02f6f257b3ea6b466e9d4e608e23aa0aee5df379ed37cbdafa647",
+      "size": 536007
     },
     {
       "path": "frontend/favicon.svg",
@@ -832,8 +832,8 @@
     },
     {
       "path": "src/tools/breath/surface.py",
-      "sha256": "b0cde79cd74a2fbb7e20a2190359b600f2ac8e70507b5a3fafaa88fdca027942",
-      "size": 20647
+      "sha256": "95b9dca777cebe9c229072f585479ee6589ca51a7d242dd78d8792e605fc483a",
+      "size": 21838
     },
     {
       "path": "src/tools/dream/__init__.py",
@@ -952,13 +952,13 @@
     },
     {
       "path": "src/web/buckets.py",
-      "sha256": "dc274b205d6e47d51eb4e13747c811d67b4f97f12ad9e2a6e853944afabc34d0",
-      "size": 50062
+      "sha256": "2d3de45dd042acab31c6bdf02322dee69e027925c6964399a4d31ea33fc21976",
+      "size": 49928
     },
     {
       "path": "src/web/config_api.py",
-      "sha256": "e7ae32b90ab3e6cd325d66b37ba1c458d9fcf72e218a0f43acb144cf33bb852b",
-      "size": 73746
+      "sha256": "a85291a26ada5078007e24c61efd63d2d79018cb307542787486345483846c1f",
+      "size": 74342
     },
     {
       "path": "src/web/dashboard.py",

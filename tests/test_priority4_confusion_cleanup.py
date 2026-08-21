@@ -933,6 +933,10 @@ def test_mcp_token_regenerate_serializes_disk_and_runtime_commit_across_loops(
         {"surfacing": {"breath_max_tokens": 499}},
         {"surfacing": {"breath_max_tokens": 40001}},
         {"surfacing": {"feel_max_tokens": 20001}},
+        {"surfacing": {"cold_start_max_results": -1}},
+        {"surfacing": {"cold_start_max_results": 3}},
+        {"surfacing": {"cold_start_max_results": True}},
+        {"surfacing": {"cold_start_max_results": 1.5}},
         {"surfacing": {"sampling": {"top_k": 0}}},
         {"surfacing": {"sampling": {"sample_k": 21}}},
         {"surfacing": {"sampling": {"temperature": float("nan")}}},
@@ -997,6 +1001,7 @@ async def test_dashboard_config_persists_validated_numeric_types(monkeypatch):
                     "breath_max_results": "11",
                     "breath_max_tokens": "35000",
                     "feel_max_tokens": "7000",
+                    "cold_start_max_results": "0",
                     "sampling": {
                         "enabled": True,
                         "top_k": "9",
@@ -1016,6 +1021,7 @@ async def test_dashboard_config_persists_validated_numeric_types(monkeypatch):
         "breath_max_results": 11,
         "breath_max_tokens": 35000,
         "feel_max_tokens": 7000,
+        "cold_start_max_results": 0,
     }
     assert persisted["merge_threshold"] == 42
     assert persisted["host_port"] == 8123
@@ -1023,6 +1029,7 @@ async def test_dashboard_config_persists_validated_numeric_types(monkeypatch):
         "breath_max_results": 11,
         "breath_max_tokens": 35000,
         "feel_max_tokens": 7000,
+        "cold_start_max_results": 0,
         "sampling": {
             "enabled": True,
             "top_k": 9,
@@ -1030,6 +1037,14 @@ async def test_dashboard_config_persists_validated_numeric_types(monkeypatch):
             "temperature": 0.8,
         },
     }
+
+    monkeypatch.setattr(
+        config_api,
+        "read_config_yaml",
+        lambda: copy.deepcopy(persisted),
+    )
+    runtime_view = await mcp.routes[("GET", "/api/config")](JsonRequest(method="GET"))
+    assert _json(runtime_view)["surfacing"]["cold_start_max_results"] == 0
 
 
 @pytest.mark.asyncio

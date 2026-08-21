@@ -277,6 +277,20 @@ def register(mcp) -> None:
         )
         api_key = dehy.get("api_key", "")
         masked_key = f"{api_key[:4]}...{api_key[-4:]}" if len(api_key) > 8 else ("***" if api_key else "")
+        surfacing = sh.config.get("surfacing", {}) or {}
+        try:
+            cold_start_max_results = _bounded_config_int(
+                surfacing.get("cold_start_max_results", 2),
+                "surfacing.cold_start_max_results",
+                0,
+                2,
+            )
+        except ValueError:
+            logger.warning(
+                "invalid runtime surfacing.cold_start_max_results=%r; fallback to 2",
+                surfacing.get("cold_start_max_results"),
+            )
+            cold_start_max_results = 2
         return JSONResponse({
             "dehydration": {
                 "model": dehy.get("model", ""),
@@ -298,9 +312,10 @@ def register(mcp) -> None:
                 ],
             },
             "surfacing": {
-                "breath_max_results": int(sh.config.get("surfacing", {}).get("breath_max_results") or 20),
-                "breath_max_tokens": int(sh.config.get("surfacing", {}).get("breath_max_tokens") or 10000),
-                "feel_max_tokens": int(sh.config.get("surfacing", {}).get("feel_max_tokens") or 15000),
+                "breath_max_results": int(surfacing.get("breath_max_results") or 20),
+                "breath_max_tokens": int(surfacing.get("breath_max_tokens") or 10000),
+                "feel_max_tokens": int(surfacing.get("feel_max_tokens") or 15000),
+                "cold_start_max_results": cold_start_max_results,
             },
             "merge_threshold": sh.config.get("merge_threshold", 75),
             # 只给日期不写时区时按它理解（Letter 定时锁等）。前端「设置」可改。
@@ -472,6 +487,7 @@ def register(mcp) -> None:
                 ("breath_max_results", 1, 50),
                 ("breath_max_tokens", 500, 40000),
                 ("feel_max_tokens", 500, 20000),
+                ("cold_start_max_results", 0, 2),
             ):
                 if key in surfacing_payload:
                     surfacing_values[key] = _bounded_config_int(
