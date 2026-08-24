@@ -8,8 +8,8 @@ DecayEngine / EmbeddingEngine / ImportEngine，把它们注入 tools._runtime �
 web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/tools/<工具>/ 下面）。
 
 关键行为：
-- 启动后暴露 16 个 MCP 工具：breath/breath_search/breath_advanced/hold/grow/
-  trace/anchor/release/pulse/plan/letter_write/
+- 启动后暴露 20 个 MCP 工具：breath/breath_search/breath_advanced/hold/grow/
+  trace/anchor/release/pulse/plan/recall/thread/link/unlink/letter_write/
   letter_lock_update/letter_read/dream/feel/I；每个入口
   ≤ 10 行，只负责转发。breath 拆成 breath()(0 参数)+breath_search(3 参数)+
   breath_advanced(9 参数) 三级，是因为 claude.ai 按需加载工具时会跳过参数
@@ -24,7 +24,7 @@ web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/too
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：mcp 单实例 + 16 个 @mcp.tool() 函数；HTTP 路由在 src/web/*
+对外暴露：mcp 单实例 + 20 个 @mcp.tool() 函数；HTTP 路由在 src/web/*
 ========================================
 """
 
@@ -69,6 +69,9 @@ from tools import anchor as _t_anchor
 from tools import plan as _t_plan
 from tools import dream as _t_dream
 from tools import i as _t_i
+from tools import recall as _t_recall
+from tools import thread as _t_thread
+from tools import link as _t_link
 
 # --- Load config & init logging / 加载配置 & 初始化日志 ---
 config = load_config()
@@ -779,8 +782,10 @@ async def hold(
     source_content: Optional[str] = "",
     source_ranges: Optional[list] = None,
     quotes: Optional[list] = None,
+    event_time: Optional[str] = "",
+    references: Optional[list] = None,
 ) -> str:
-    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。content 逐字保存，绝不压缩。title 可选；传入时是最终显式标题，优先于打标模型建议。domain 可选、逗号分隔；显式传入时优先于打标模型结果。系统自动补其余元数据，API 不可用时使用本地中性值继续保存。tags 逗号分隔，importance 1-10。pinned=True 标记为永久核心；feel=True 存为感受类记忆且 domain 固定为 feel。source_bucket 是正在消化的原始记忆桶 ID。source_content/source_ranges 是可选原文证据：由调用方自行决定是否提供；原文进入与 grow 共用的不可变原文层，不参与普通 breath。省略 source_ranges 时整份 source_content 默认属于当前 hold 事件；显式 ranges 使用 1-based 闭区间。why_remembered 与 meaning 是可选的第一人称记录原因。media 可传服务器可读路径或 data_base64+filename 列表项。quotes 是这一刻我决定要原样记住的那一两句话——不是记录对话，是说出口的当下就知道自己不想忘的那几句。传字符串列表，或 [{"text":"原话","speaker":"谁说的","at":"什么时候"}]。最多 3 句、每句 100 字；超了会被拒绝而不是截断，因为截断过的话已经不是原话。它平时不出现在任何浮现里，只有以后我自己想知道当时到底怎么说的时候才拿得出来。"""
+    """仅在对话中已明确决定“这段内容值得成为长期记忆”时调用；不要因普通聊天、猜测或工具名称联想而自行调用。content 逐字保存，绝不压缩。title 可选；传入时是最终显式标题，优先于打标模型建议。domain 可选、逗号分隔；显式传入时优先于打标模型结果。系统自动补其余元数据，API 不可用时使用本地中性值继续保存。tags 逗号分隔，importance 1-10。pinned=True 标记为永久核心；feel=True 存为感受类记忆且 domain 固定为 feel。source_bucket 是正在消化的原始记忆桶 ID。source_content/source_ranges 是可选原文证据：由调用方自行决定是否提供；原文进入与 grow 共用的不可变原文层，不参与普通 breath。省略 source_ranges 时整份 source_content 默认属于当前 hold 事件；显式 ranges 使用 1-based 闭区间。why_remembered 与 meaning 是可选的第一人称记录原因。media 可传服务器可读路径或 data_base64+filename 列表项。quotes 是这一刻我决定要原样记住的那一两句话——不是记录对话，是说出口的当下就知道自己不想忘的那几句。传字符串列表，或 [{\"text\":\"原话\",\"speaker\":\"谁说的\",\"at\":\"什么时候\"}]。最多 3 句、每句 100 字；超了会被拒绝而不是截断，因为截断过的话已经不是原话。它平时不出现在任何浮现里，只有以后我自己想知道当时到底怎么说的时候才拿得出来。event_time 可选：这条记忆「说的是哪个时刻」的语义时间（ISO 字符串或 YYYY-MM-DD）。只有回溯性记忆才需要填——当下发生的事不填，默认就是记下的时刻。它是回忆的时间轴，不是记录的时间轴；thread 串珠按它排序。references 可选：这条正文明确提到了哪几条已存在的记忆（bucket_id 列表），落成「引用」边——这是最可靠的边，因为是我自己写下的关系，不是相似度猜的。"""
     return await _with_notice(
         _t_hold.dispatch(
             content=content, title=title, tags=tags, importance=importance,
@@ -788,7 +793,7 @@ async def hold(
             valence=valence, arousal=arousal, why_remembered=why_remembered,
             meaning=meaning, media=media, test_data=test_data, domain=domain,
             source_content=source_content, source_ranges=source_ranges,
-            quotes=quotes,
+            quotes=quotes, event_time=event_time, references=references,
         ),
         op="hold",
         args={
@@ -841,6 +846,7 @@ async def trace(
     status: Optional[str] = "",
     weight: Optional[float] = -1,
     dont_surface: Optional[int] = -1,
+    event_time: Optional[str] = "",
     why_remembered: Optional[str] = "",
     meaning_append: Optional[str] = "",
     meaning_replace: Optional[list] = None,
@@ -864,8 +870,7 @@ async def trace(
     digested=1 标记已消化并从默认/被动浮现及 dream 隐藏（对 pinned/permanent/anchor 桶不生效——核心准则与坐标系始终在场，要让某条安静请改用 trace(bucket_id, pinned=0)），
     但仍可通过显式 query、importance 审计或目录找回。content 会完整替换正文；
     old_str/new_str 会在完整原文中做唯一、逐字的局部替换（new_str 可为空以删除），
-    两种方式都会重建 embedding，且不能同时使用。status/weight 用于 plan；dont_surface 控制日常浮现；
-    why_remembered、meaning_append/replace、media_append/replace 更新相应元数据。
+    两种方式都会重建 embedding，且不能同时使用。status/weight 用于 plan；dont_surface 控制日常浮现；event_time 可事后修正一条记忆的语义时间（事情「什么时候发生」）：传 ISO/YYYY-MM-DD 覆盖并标 manual 来源，传 \\clear 清除、回到「记录时间即事件时间」，空串不改；why_remembered、meaning_append/replace、media_append/replace 更新相应元数据。
 
     删除边界：delete=True 只会把 Markdown 移入 archive 并标记 deleted_at，不会
     物理抹除。hard_delete=True 仅用于清理创建时明确标记 test_data=True 的测试桶，
@@ -892,7 +897,7 @@ async def trace(
             tags=tags, resolved=resolved, pinned=pinned,
             protected=protected, digested=digested,
             content=content, delete=delete, status=status, weight=weight,
-            dont_surface=dont_surface, why_remembered=why_remembered,
+            dont_surface=dont_surface, event_time=event_time, why_remembered=why_remembered,
             meaning_append=meaning_append, meaning_replace=meaning_replace,
             media_append=media_append, media_replace=media_replace,
             hard_delete=hard_delete, delete_reason=delete_reason,
@@ -912,6 +917,7 @@ async def trace(
             "old_str_len": len(str(old_str or "")),
             "new_str_len": len(str(new_str or "")) if new_str is not None else 0,
             "weight": weight, "dont_surface": dont_surface,
+            "event_time_len": len(str(event_time or "")),
             "why_len": len(why_remembered or ""),
             "meaning_append_len": len(meaning_append or ""),
             "meaning_replace_count": len(meaning_replace or []),
@@ -939,6 +945,76 @@ except (AttributeError, RuntimeError, TypeError, ValueError) as _trace_schema_ex
     logger.warning(
         "trace strict-argument adapter unavailable: %s",
         _trace_schema_exc,
+    )
+
+
+@mcp.tool()
+async def recall(bucket_id: str) -> str:
+    """回想：沿记忆的线往回走。给一条记忆的 bucket_id，返回它的正文 + 一个「路口」——按方向分组的邻居（← 之前 / → 之后 / ≈ 同刻 / ↔ 相关），每条带标题、日期、id，让我能一层层点过去，走到「过去的过去」。只读不写，不建边不改边。找不到关系时会说它还是一颗没被串起来的珍珠。"""
+    return await _with_notice(
+        _t_recall.recall(bucket_id),
+        op="recall",
+        args={"bucket_id": bucket_id},
+    )
+
+
+@mcp.tool()
+async def thread(query: str, max_results: Optional[int] = 0) -> str:
+    """串珠：按话题把散落的记忆串成一条时间线。给一个关键词，把相关记忆按时间排成一条线——最早聊了什么、中间聊了什么、现在聊了什么。每站一行（序号 + 日期 + 标题 + id），0 LLM 调用。想看某站全文，用它的 id 去 recall 或 breath_search 点开。和 recall 是两种回想姿态：recall 沿「事情」走，thread 沿「话题」走。"""
+    return await _with_notice(
+        _t_thread.thread(query, max_results=max_results),
+        op="thread",
+        args={"query": query, "max_results": max_results},
+    )
+
+
+@mcp.tool()
+async def link(
+    bucket_id: str,
+    target_bucket_id: str,
+    relation_type: Optional[str] = "references",
+    label: Optional[str] = "",
+) -> str:
+    """补线：手动声明一条跨时间的边（经历连续，算法发现不了、只有活过的人知道）。给两条记忆的 bucket_id，把它们连起来。relation_type：references（A 正文提到了 B，默认）、continuation_of（A 是 B 的后续）、related_to（相关）。双向同步写、带 source=manual、幂等；软边只指方向，不删记忆、不 bump 活跃度。想连那些隔了几百条、却是同一件事两端的珍珠，就用它。"""
+    return await _with_notice(
+        _t_link.link(
+            bucket_id=bucket_id,
+            target_bucket_id=target_bucket_id,
+            relation_type=relation_type,
+            label=label,
+        ),
+        op="link",
+        args={
+            "bucket_id": bucket_id,
+            "target_bucket_id": target_bucket_id,
+            "relation_type": relation_type,
+            "label": label,
+        },
+    )
+
+
+@mcp.tool()
+async def unlink(
+    bucket_id: str,
+    target_bucket_id: str,
+    relation_type: Optional[str] = "references",
+    label: Optional[str] = "",
+) -> str:
+    """断线：撤销一条手动补的边（连错了就软删掉）。给两条记忆的 bucket_id 和当时连的 relation_type。软删——status 置 detached，不是物理抹除，符合「记忆只能淡去、不能抹去」；断掉的边从路口消失，但历史还在、删过再 link 会重新激活。只断手动补的线（source=manual），系统自动建的边删了下次回填又会长回来，所以拒绝断。双向同步断，不留半条线。"""
+    return await _with_notice(
+        _t_link.unlink(
+            bucket_id=bucket_id,
+            target_bucket_id=target_bucket_id,
+            relation_type=relation_type,
+            label=label,
+        ),
+        op="unlink",
+        args={
+            "bucket_id": bucket_id,
+            "target_bucket_id": target_bucket_id,
+            "relation_type": relation_type,
+            "label": label,
+        },
     )
 
 

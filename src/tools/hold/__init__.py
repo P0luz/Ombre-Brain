@@ -120,6 +120,8 @@ async def dispatch(
     source_content: Optional[str] = "",
     source_ranges: Optional[list] = None,
     quotes: Optional[list] = None,
+    event_time: Optional[str] = "",
+    references: Optional[list] = None,
 ) -> str:
     content = "" if content is None else str(content)
     try:
@@ -266,6 +268,8 @@ async def dispatch(
             media=media,
             source_refs=source_refs,
             quotes=quotes_list,
+            event_time=event_time or "",
+            references=references,
         )
         return result
 
@@ -282,6 +286,8 @@ async def dispatch(
             explicit_domain=explicit_domain,
             source_refs=source_refs,
             quotes=quotes_list,
+            event_time=event_time or "",
+            references=references,
         )
         return result
 
@@ -299,5 +305,7 @@ async def dispatch(
         explicit_domain=explicit_domain,
         source_refs=source_refs,
         quotes=quotes_list,
+        event_time=event_time or "",
+        references=references,
     )
     return result

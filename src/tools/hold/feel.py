@@ -28,6 +28,7 @@ tools/hold/feel.py — hold(feel=True) 分支
 from datetime import datetime
 
 from .. import _runtime as rt
+from ombrebrain.storage.relation_store import MAX_RELATION_LINKS, normalize_relation_links
 
 
 def _build_feel_id(valence: float) -> str:
@@ -39,6 +40,48 @@ def _build_feel_id(valence: float) -> str:
     ts = datetime.now().strftime("%Y%m%d%H%M")
     v_int = max(0, min(100, round(float(valence) * 100)))
     return f"feel_{ts}_V{v_int:03d}"
+
+
+async def _link_source_reverse(source_id: str, feel_id: str) -> None:
+    """给源事件补 referenced_by 反边（源事件 → feel），即时、幂等、只记日志不抛错。
+
+    让「回忆事件时顺出当时的感受」当场成立，不等 dream 兜底。feel 与源事件的
+    关系是定向的：feel --references--> 源事件，源事件 --referenced_by--> feel。
+    """
+    def _mutation(post):
+        try:
+            links = normalize_relation_links(post.metadata.get("relation_links"))
+        except ValueError:
+            return False, 0
+        if any(
+            l.get("type") == "referenced_by"
+            and l.get("target_bucket_id") == feel_id
+            for l in links
+        ):
+            return False, 0
+        if len(links) >= MAX_RELATION_LINKS:
+            return False, 0
+        links.append(
+            {
+                "target_bucket_id": feel_id,
+                "type": "referenced_by",
+                "label": "",
+                "status": "active",
+            }
+        )
+        try:
+            post["relation_links"] = normalize_relation_links(links)
+        except ValueError:
+            return False, 0
+        return True, 1
+
+    try:
+        await rt.bucket_mgr.mutate_relation_links(source_id, _mutation)
+    except Exception as exc:  # noqa: BLE001 - 反边只是 hint，不该影响 feel 写入
+        rt.logger.warning(
+            f"feel source reverse link failed / 感受源事件反边失败 "
+            f"{source_id}<-{feel_id}: {type(exc).__name__}: {exc}"
+        )
 
 
 async def store_feel(
@@ -53,10 +96,16 @@ async def store_feel(
     media: list | None = None,
     source_refs: list[dict] | None = None,
     quotes: list[dict] | None = None,
+    event_time: str = "",
+    references: list[str] | None = None,
 ) -> str:
     feel_valence = valence if 0 <= valence <= 1 else 0.5
     feel_arousal = arousal if 0 <= arousal <= 1 else 0.3
     feel_tags = list(dict.fromkeys(["__feel__"] + extra_tags))
+    # source_bucket 落成 references 边（feel → 源事件）：感受牵着它来自的事件。
+    refs = list(references or [])
+    if source_bucket and source_bucket.strip():
+        refs.append(source_bucket.strip())
     bucket_id = await rt.bucket_mgr.create(
         content=content,
         tags=feel_tags,
@@ -68,6 +117,8 @@ async def store_feel(
         title=title,
         source_refs=source_refs,
         quotes=quotes,
+        event_time=event_time,
+        references=refs or None,
         bucket_type="feel",
         why_remembered=why_remembered,
         triggered_by=source_bucket.strip() if source_bucket else "",
@@ -84,6 +135,8 @@ async def store_feel(
             if 0 <= valence <= 1:
                 update_kwargs["model_valence"] = feel_valence
             await rt.bucket_mgr.update(source_bucket.strip(), **update_kwargs)
+            # 即时补反向边：源事件 → feel 的 referenced_by，让「回忆事件顺出感受」当场成立
+            await _link_source_reverse(source_bucket.strip(), bucket_id)
         except Exception as e:
             rt.logger.warning(f"Failed to mark source as digested / 标记已消化失败: {e}")
     return f"🫧feel→{bucket_id}"

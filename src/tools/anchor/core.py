@@ -67,6 +67,33 @@ async def anchor_release(bucket_id: str) -> str:
     return f"我把它从 anchor 移开了。它会重新参与默认浮现。当前 {result['count']}/{result['limit']}。"
 
 
+def _organize_progress(buckets: list[dict]) -> str:
+    """整理进度行（3.7.0）。
+
+    「引路人」：把 digested 当作「已和小深一起整理过」的记号。整理完一条就用
+    trace(bucket_id, digested=1) 标记，标记后它不再自动浮现在 breath —— 所以
+    breath 里浮现的自然就是「还没整理的」。这里只统计活跃记忆桶
+    （dynamic/permanent），feel/plan/letter/i 各自成层，不混进来。
+    """
+    _NON_MEMORY = {
+        "plan", "feel", "letter", "i", "i_candidate", "identity", "archived",
+    }
+    memory = [
+        b for b in buckets
+        if (b.get("metadata") or {}).get("type") not in _NON_MEMORY
+    ]
+    done = sum(
+        1 for b in memory
+        if parse_bool((b.get("metadata") or {}).get("digested"), default=False)
+    )
+    total = len(memory)
+    if not total:
+        return ""
+    filled = round(done / total * 20)
+    bar = "█" * filled + "░" * (20 - filled)
+    return f"整理进度: {bar} 已整理 {done} / 未整理 {total - done}"
+
+
 async def pulse(include_archive: Optional[bool] = False) -> str:
     if include_archive is None:
         include_archive = False
@@ -76,10 +103,20 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
     except Exception as e:
         return f"获取系统状态失败: {safe_error_detail(e)}"
 
+    progress_line = ""
+    try:
+        _active = await rt.bucket_mgr.list_all(include_archive=False)
+        _pl = _organize_progress(_active)
+        if _pl:
+            progress_line = _pl + "\n"
+    except Exception:
+        progress_line = ""
+
     status = (
         f"=== 我现在的记忆 ===\n"
         f"固化桶: {stats['permanent_count']} 个\n"
         f"动态桶: {stats['dynamic_count']} 个\n"
+        f"{progress_line}"
         f"归档桶: {stats['archive_count']} 个\n"
         f"feel 桶: {stats.get('feel_count', 0)} 条\n"
         f"plan 桶: {stats.get('plan_count', 0)} 条\n"

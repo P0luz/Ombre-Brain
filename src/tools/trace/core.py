@@ -64,6 +64,7 @@ async def trace_core(
     status: Optional[str] = "",
     weight: Optional[float] = -1,
     dont_surface: Optional[int] = -1,
+    event_time: Optional[str] = "",
     why_remembered: Optional[str] = "",
     meaning_append: Optional[str] = "",
     meaning_replace: Optional[list] = None,
@@ -596,6 +597,14 @@ async def trace_core(
             updates["weight"] = float(weight)
         if dont_surface in (0, 1):
             updates["dont_surface"] = bool(dont_surface)
+        # event_time：语义时间事后修正。非空 = 覆盖并标 manual；"\clear" = 清除，
+        # 回到「记录时间即事件时间」。默认空串 = 不改。
+        if event_time is not None:
+            et = str(event_time).strip()
+            if et == "\\clear":
+                updates["event_time"] = None
+            elif et:
+                updates["event_time"] = et
         why_remembered = str(why_remembered).strip()
         if why_remembered == "\\clear":
             updates["why_remembered"] = ""

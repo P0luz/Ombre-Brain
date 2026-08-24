@@ -47,6 +47,8 @@ async def store_core(
     explicit_domain: list[str] | None = None,
     source_refs: list[dict] | None = None,
     quotes: list[dict] | None = None,
+    event_time: str = "",
+    references: list[str] | None = None,
 ) -> str:
     metadata_fallback = False
     try:
@@ -91,6 +93,8 @@ async def store_core(
         title=final_title,
         source_refs=source_refs,
         quotes=quotes,
+        event_time=event_time,
+        references=references,
         raw_merge=True,
         why_remembered=why_remembered,
         source_tool="hold",

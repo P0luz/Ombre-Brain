@@ -1461,6 +1461,8 @@ class BucketManager:
         imported: bool = False,
         source_refs: Any = None,
         quotes: Any = None,
+        event_time: str = "",
+        references: Optional[list[str]] = None,
         event_actor: str = "system",
         lock_type: str = "",
         unlock_date: str | None = None,
@@ -1561,6 +1563,34 @@ class BucketManager:
         }
         if title:
             metadata["title"] = title
+        # event_time：这件事「什么时候发生」的语义时间，与 created（什么时候记下）分开。
+        # 只由模型在 hold 时显式传入（回溯性记忆才需要覆盖，当下的事 created 即正确）。
+        # 不传则不写，读侧自然回退 created。来源 manual；未来系统解析会标 parsed。
+        if event_time:
+            metadata["event_time"] = str(event_time).strip()[:64]
+            metadata["event_time_source"] = "manual"
+        # references：模型显式声明「这条正文提到了哪条桶」，落成 references 边（手动边，
+        # auto 不标）。这是最可靠的边——是我们自己写下的关系，不是相似度猜的。
+        if references:
+            if isinstance(references, str):
+                references = [references]
+            ref_links: list[dict] = []
+            seen_refs: set[str] = set()
+            for ref_id in references:
+                ref_id = str(ref_id or "").strip()
+                if not ref_id or ref_id == bucket_id or ref_id in seen_refs:
+                    continue
+                seen_refs.add(ref_id)
+                ref_links.append(
+                    {
+                        "target_bucket_id": ref_id,
+                        "type": "references",
+                        "label": "",
+                        "status": "active",
+                    }
+                )
+            if ref_links:
+                metadata["relation_links"] = ref_links
         # Letter access metadata is written atomically with the original
         # content.  A create-then-update window could briefly expose a locked
         # body to a concurrent reader or vector search.
@@ -2565,6 +2595,19 @@ class BucketManager:
             post["name"] = sanitize_name(kwargs["name"])
         if "title" in kwargs and kwargs["title"]:
             post["title"] = kwargs["title"]
+        if "event_time" in kwargs:
+            # event_time：语义时间（事情「什么时候发生」）。trace 可事后修正——
+            # 传非空 = 覆盖并标 manual 来源；传 None = 清除该字段，回到
+            # 「记录时间即事件时间」的默认（读侧自动回退 created）。
+            raw_event_time = kwargs["event_time"]
+            if raw_event_time is None:
+                post.metadata.pop("event_time", None)
+                post.metadata.pop("event_time_source", None)
+            else:
+                cleaned_event_time = str(raw_event_time).strip()
+                if cleaned_event_time:
+                    post["event_time"] = cleaned_event_time[:64]
+                    post["event_time_source"] = "manual"
         if "source_refs_append" in kwargs and kwargs["source_refs_append"]:
             from ombrebrain.storage.source_store import append_source_links, active_source_refs_from_links
 
