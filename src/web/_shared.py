@@ -383,6 +383,7 @@ _MAX_SESSION_TTL_DAYS = 365
 _MAX_ACTIVE_SESSIONS = 256
 _SESSION_TTL_SECONDS = 86400 * _DEFAULT_SESSION_TTL_DAYS
 _SESSION_TTL = _SESSION_TTL_SECONDS  # compatibility constant for older callers
+_MIN_SERVICE_TOKEN_LENGTH = 32
 
 
 def _session_ttl_seconds() -> int:
@@ -1093,6 +1094,23 @@ def _is_authenticated(request: Request) -> bool:
         return True
 
 
+def _is_service_token_authenticated(request: Request) -> bool:
+    """Allow a strong sidecar token on explicitly opted-in read-only routes."""
+    configured = str(os.environ.get("OMBRE_MCP_SERVICE_TOKEN", "") or "").strip()
+    if len(configured) < _MIN_SERVICE_TOKEN_LENGTH:
+        return False
+    authorization = str(request.headers.get("authorization", "") or "").strip()
+    scheme, separator, candidate = authorization.partition(" ")
+    candidate = candidate.strip()
+    if (
+        not separator
+        or scheme.lower() != "bearer"
+        or len(candidate) != len(configured)
+    ):
+        return False
+    return hmac.compare_digest(candidate, configured)
+
+
 def _authenticated_credential_generation(request: Request) -> int | None:
     """Atomically bind an authenticated mutation to the credential generation."""
     with _auth_mutation_lock:
@@ -1137,3 +1155,10 @@ def _require_auth(request: Request) -> Response | None:
             status_code=401,
         )
     return None
+
+
+def _require_service_or_dashboard_auth(request: Request) -> Response | None:
+    """Authenticate one opted-in sidecar read or a normal Dashboard session."""
+    if _is_service_token_authenticated(request):
+        return None
+    return _require_auth(request)

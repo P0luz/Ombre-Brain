@@ -12,7 +12,7 @@ pulse 顺带放在这里：它是系统状态 + 桶清单的总览，调用频�
 
 关键行为：
 - anchor_set / anchor_release：调 bucket_mgr.set_anchor，原样转译结果
-- pulse：聚合 stats + list_all，按 type 分组（normal/feel/plan/letter）
+- pulse：聚合 stats + list_all，按 type 分组（normal/feel/plan/letter/i）
   逐行展示 icon + 主题 + 情感 + 权重 + 标签
 - pulse 同时附带「索引漂移」自检：embedding.db 的 ID 集合与磁盘桶 ID 集合
   对账，缺失/孤儿 > 0 时在状态块顶部告警，提示运行 backfill / clean 脚本
@@ -136,6 +136,7 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
     feel_lines: list[str] = []
     plan_lines: list[str] = []
     letter_lines: list[str] = []
+    i_lines: list[str] = []
     for b in buckets:
         meta = b.get("metadata", {})
         btype = meta.get("type")
@@ -149,6 +150,8 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
             icon = "📋"
         elif btype == "letter":
             icon = "💌"
+        elif btype == "i":
+            icon = "🪞"
         elif btype == "archived":
             icon = "🗄️"
         elif meta.get("resolved", False):
@@ -183,6 +186,8 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         elif btype == "letter":
             author = meta.get("author", "?")
             letter_lines.append(line + f" [{author}]")
+        elif btype == "i":
+            i_lines.append(line)
         else:
             normal_lines.append(line)
 
@@ -195,4 +200,6 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         sections.append(f"=== feel（{len(feel_lines)} 条）===\n" + "\n".join(feel_lines))
     if letter_lines:
         sections.append(f"=== 信件（{len(letter_lines)} 封）===\n" + "\n".join(letter_lines))
+    if i_lines:
+        sections.append(f"=== I（{len(i_lines)} 条）===\n" + "\n".join(i_lines))
     return "\n\n".join(sections)
