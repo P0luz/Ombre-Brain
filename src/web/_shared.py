@@ -1,4 +1,4 @@
-"""
+﻿"""
 ========================================
 web/_shared.py — Dashboard/HTTP 层的共享依赖与鉴权工具
 ========================================
@@ -1095,20 +1095,41 @@ def _is_authenticated(request: Request) -> bool:
 
 
 def _is_service_token_authenticated(request: Request) -> bool:
-    """Allow a strong sidecar token on explicitly opted-in read-only routes."""
-    configured = str(os.environ.get("OMBRE_MCP_SERVICE_TOKEN", "") or "").strip()
-    if len(configured) < _MIN_SERVICE_TOKEN_LENGTH:
-        return False
+    """Allow a strong sidecar token on explicitly opted-in read-only routes.
+
+    A trusted sidecar (e.g. Xinchao) connects to OB via MCP using a static
+    token (OMBRE_MCP_TOKEN / config["mcp_token"]).  That same token should also
+    authenticate read-only HTTP API routes such as /api/bucket/{id}, so the
+    star-map detail page can fetch bucket content without a separate
+    OMBRE_MCP_SERVICE_TOKEN that may never be configured.
+
+    Accept either token in constant time.  Both must meet the minimum length.
+    """
     authorization = str(request.headers.get("authorization", "") or "").strip()
     scheme, separator, candidate = authorization.partition(" ")
     candidate = candidate.strip()
-    if (
-        not separator
-        or scheme.lower() != "bearer"
-        or len(candidate) != len(configured)
-    ):
+    if not separator or scheme.lower() != "bearer" or not candidate:
         return False
-    return hmac.compare_digest(candidate, configured)
+
+    configured_tokens: list[str] = []
+    service_token = str(os.environ.get("OMBRE_MCP_SERVICE_TOKEN", "") or "").strip()
+    if len(service_token) >= _MIN_SERVICE_TOKEN_LENGTH:
+        configured_tokens.append(service_token)
+    mcp_token = (
+        str(os.environ.get("OMBRE_MCP_TOKEN", "") or "").strip()
+        or str(config.get("mcp_token", "") or "").strip()
+    )
+    if len(mcp_token) >= _MIN_SERVICE_TOKEN_LENGTH:
+        configured_tokens.append(mcp_token)
+
+    if not configured_tokens:
+        return False
+
+    # compare_digest leaks length, so only compare against tokens of equal length.
+    for configured in configured_tokens:
+        if len(candidate) == len(configured) and hmac.compare_digest(candidate, configured):
+            return True
+    return False
 
 
 def _authenticated_credential_generation(request: Request) -> int | None:
