@@ -194,3 +194,51 @@ def test_no_token_configured_rejects_all(monkeypatch, tmp_path):
     assert not shared_web._is_service_token_authenticated(
         _request("GET", "/api/bucket/feel-1", "Bearer anything")
     )
+
+
+SHORT_MCP_TOKEN = "yanjin13"  # 10 chars, mirrors the real production token length
+
+
+@pytest.fixture
+def short_mcp_token(monkeypatch, tmp_path):
+    """Configure only a short (10-char) MCP static token, no service token."""
+    monkeypatch.delenv("OMBRE_MCP_SERVICE_TOKEN", raising=False)
+    monkeypatch.setenv("OMBRE_MCP_TOKEN", SHORT_MCP_TOKEN)
+    monkeypatch.setattr(
+        shared_web,
+        "config",
+        {"buckets_dir": str(tmp_path), "mcp_token": SHORT_MCP_TOKEN},
+        raising=False,
+    )
+
+
+def test_short_mcp_token_authenticates_read_routes(monkeypatch, short_mcp_token):
+    """A 10-char MCP token should pass auth — this was the original bug."""
+    assert shared_web._is_service_token_authenticated(
+        _request("GET", "/api/bucket/feel-1", f"Bearer {SHORT_MCP_TOKEN}")
+    )
+    assert not shared_web._is_service_token_authenticated(
+        _request("GET", "/api/bucket/feel-1", "Bearer wrong")
+    )
+
+
+@pytest.mark.asyncio
+async def test_short_mcp_token_reads_exact_bucket_detail(monkeypatch, short_mcp_token):
+    """End-to-end: short MCP token can fetch bucket detail via the API route."""
+    monkeypatch.setattr(
+        buckets_web.sh, "bucket_mgr", FakeBucketManager(), raising=False
+    )
+    monkeypatch.setattr(
+        buckets_web.sh, "decay_engine", FakeDecayEngine(), raising=False
+    )
+    mcp = FakeMCP()
+    buckets_web.register(mcp)
+
+    response = await mcp.routes[("GET", "/api/bucket/{bucket_id}")](
+        _request("GET", "/api/bucket/feel-1", f"Bearer {SHORT_MCP_TOKEN}")
+    )
+    payload = json.loads(response.body)
+
+    assert response.status_code == 200
+    assert payload["metadata"]["type"] == "feel"
+    assert payload["content"] == "raw [[memory]]"

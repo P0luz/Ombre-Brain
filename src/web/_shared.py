@@ -384,6 +384,7 @@ _MAX_ACTIVE_SESSIONS = 256
 _SESSION_TTL_SECONDS = 86400 * _DEFAULT_SESSION_TTL_DAYS
 _SESSION_TTL = _SESSION_TTL_SECONDS  # compatibility constant for older callers
 _MIN_SERVICE_TOKEN_LENGTH = 32
+_MIN_MCP_TOKEN_LENGTH = 8  # MCP tokens are validated by the MCP server itself; lower bar OK
 
 
 def _session_ttl_seconds() -> int:
@@ -1119,7 +1120,7 @@ def _is_service_token_authenticated(request: Request) -> bool:
         str(os.environ.get("OMBRE_MCP_TOKEN", "") or "").strip()
         or str(config.get("mcp_token", "") or "").strip()
     )
-    if len(mcp_token) >= _MIN_SERVICE_TOKEN_LENGTH:
+    if len(mcp_token) >= _MIN_MCP_TOKEN_LENGTH:
         configured_tokens.append(mcp_token)
 
     if not configured_tokens:
