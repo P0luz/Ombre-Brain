@@ -27,6 +27,18 @@ def test_bucket_reload_preserves_active_filter_and_page():
     assert "renderBuckets(allBuckets);" not in source
 
 
+def test_bucket_reload_preserves_active_search_results():
+    source = _dashboard_section(
+        "async function loadBuckets()", "function updateStats()"
+    )
+
+    assert "document.getElementById('search-input')" in source
+    assert "if (activeQuery.trim())" in source
+    assert "await searchBuckets(activeQuery.trim());" in source
+    assert "else {" in source
+    assert "renderBuckets(filterBuckets(allBuckets), true);" in source
+
+
 def test_filter_rebuild_restores_active_filter_without_listener_leaks():
     source = _dashboard_section("function buildFilters()", "function filterBuckets(")
 
