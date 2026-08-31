@@ -43,23 +43,30 @@ logger = sh.logger
 
 try:
     from tools._common import (  # type: ignore
-        _HIGH_IMP_THRESHOLD,
         _quota_turn,
         check_content_size as _check_content_size,
         check_pinned_quota as _check_pinned_quota,
-        enforce_high_importance_quota as _enforce_high_importance_quota,
         is_terminal_memory_metadata as _is_terminal_memory_metadata,
-        occupies_high_importance_quota_slot as _occupies_high_importance_slot,
     )
 except ImportError:  # pragma: no cover
     from ..tools._common import (  # type: ignore
-        _HIGH_IMP_THRESHOLD,
         _quota_turn,
         check_content_size as _check_content_size,
         check_pinned_quota as _check_pinned_quota,
-        enforce_high_importance_quota as _enforce_high_importance_quota,
         is_terminal_memory_metadata as _is_terminal_memory_metadata,
-        occupies_high_importance_quota_slot as _occupies_high_importance_slot,
+    )
+
+try:
+    from tools.plan.core import (  # type: ignore
+        is_letter_bucket,
+        letter_lock_revision,
+        letter_lock_state,
+    )
+except ImportError:  # pragma: no cover
+    from ..tools.plan.core import (  # type: ignore
+        is_letter_bucket,
+        letter_lock_revision,
+        letter_lock_state,
     )
 
 try:
@@ -675,16 +682,32 @@ def register(mcp) -> None:
             page = imported_buckets[offset:offset + limit]
             results = []
             for b in page:
+                metadata = b["metadata"]
+                logical_letter = is_letter_bucket(b)
+                lock_state = letter_lock_state(b, "human")
+                letter_locked = bool(lock_state["locked"])
                 results.append({
                     "id": b["id"],
-                    "name": b["metadata"].get("name", ""),
-                    "content": b["content"][:300],
-                    "type": b["metadata"].get("type", ""),
-                    "domain": b["metadata"].get("domain", []),
-                    "tags": b["metadata"].get("tags", []),
-                    "importance": b["metadata"].get("importance", 5),
-                    "created": b["metadata"].get("created", ""),
+                    "name": (
+                        "一封上锁的信"
+                        if letter_locked else metadata.get("name", "")
+                    ),
+                    "content": (
+                        "这封信尚未向你开放。"
+                        if letter_locked else b["content"][:300]
+                    ),
+                    "type": metadata.get("type", ""),
+                    "domain": (
+                        ["letter"] if letter_locked else metadata.get("domain", [])
+                    ),
+                    "tags": (
+                        ["__letter__"] if letter_locked else metadata.get("tags", [])
+                    ),
+                    "importance": metadata.get("importance", 5),
+                    "created": metadata.get("created", ""),
                     "imported": True,
+                    "letter_item": logical_letter,
+                    "letter_locked": letter_locked,
                 })
             next_offset = offset + len(results)
             has_more = next_offset < len(imported_buckets)
@@ -737,80 +760,61 @@ def register(mcp) -> None:
                 continue
             try:
                 if action == "important":
-                    # Serialise the quota classification, enforcement and write.
-                    # Reading inside the lock avoids treating an already-high
-                    # bucket as a new slot after a concurrent review action.
-                    async with _quota_turn("high_importance"):
-                        bucket = await sh.bucket_mgr.get(bid)
-                        if not bucket:
+                    bucket = await sh.bucket_mgr.get(bid)
+                    if not bucket:
+                        errors += 1
+                        continue
+                    if is_letter_bucket(bucket):
+                        errors += 1
+                        continue
+                    metadata = bucket.get("metadata", {})
+                    if not isinstance(metadata, dict):
+                        metadata = {}
+                    try:
+                        current_importance = int(
+                            metadata.get("importance") or 5
+                        )
+                    except (TypeError, ValueError):
+                        current_importance = 5
+                    pinned_or_protected = (
+                        parse_bool(metadata.get("pinned"), default=False)
+                        or parse_bool(metadata.get("protected"), default=False)
+                    )
+                    target_importance = 9
+                    if pinned_or_protected and current_importance >= 9:
+                        # Importance is locked, but the requested semantic is
+                        # already satisfied; keep the idempotent action.
+                        target_importance = current_importance
+
+                    if target_importance != current_importance:
+                        ok = await sh.bucket_mgr.update(
+                            bid, importance=target_importance
+                        )
+                        if not ok:
                             errors += 1
                             continue
-                        metadata = bucket.get("metadata", {})
-                        if not isinstance(metadata, dict):
-                            metadata = {}
+                        persisted = await sh.bucket_mgr.get(bid)
                         try:
-                            current_importance = int(
-                                metadata.get("importance") or 5
+                            actual_importance = int(
+                                (persisted or {}).get("metadata", {}).get(
+                                    "importance"
+                                )
                             )
                         except (TypeError, ValueError):
-                            current_importance = 5
-                        pinned_or_protected = (
-                            parse_bool(metadata.get("pinned"), default=False)
-                            or parse_bool(metadata.get("protected"), default=False)
-                        )
-                        target_importance = 9
-                        if pinned_or_protected and current_importance >= 9:
-                            # Importance is locked, but the requested semantic is
-                            # already satisfied; keep the idempotent action.
-                            target_importance = current_importance
-                        projected_metadata = dict(metadata)
-                        projected_metadata["importance"] = target_importance
-                        reserves_high_importance = (
-                            _occupies_high_importance_slot(projected_metadata)
-                            and not _occupies_high_importance_slot(metadata)
-                        )
-                        if reserves_high_importance:
-                            target_importance = (
-                                await _enforce_high_importance_quota(9)
-                            )
-                            if target_importance < _HIGH_IMP_THRESHOLD:
-                                logger.warning(
-                                    "Review important rejected by high-importance "
-                                    "quota for %s",
-                                    bid,
-                                )
-                                errors += 1
-                                continue
-
-                        if target_importance != current_importance:
-                            ok = await sh.bucket_mgr.update(
-                                bid, importance=target_importance
-                            )
-                            if not ok:
-                                errors += 1
-                                continue
-                            persisted = await sh.bucket_mgr.get(bid)
-                            try:
-                                actual_importance = int(
-                                    (persisted or {}).get("metadata", {}).get(
-                                        "importance"
-                                    )
-                                )
-                            except (TypeError, ValueError):
-                                actual_importance = -1
-                            if actual_importance != target_importance:
-                                errors += 1
-                                continue
+                            actual_importance = -1
+                        if actual_importance != target_importance:
+                            errors += 1
+                            continue
                 elif action == "pin":
                     async with AsyncExitStack() as quota_stack:
                         await quota_stack.enter_async_context(
                             _quota_turn("pinned")
                         )
-                        await quota_stack.enter_async_context(
-                            _quota_turn("high_importance")
-                        )
                         bucket = await sh.bucket_mgr.get(bid)
                         if not bucket:
+                            errors += 1
+                            continue
+                        if is_letter_bucket(bucket):
                             errors += 1
                             continue
                         metadata = bucket.get("metadata", {})
@@ -851,11 +855,11 @@ def register(mcp) -> None:
                         await quota_stack.enter_async_context(
                             _quota_turn("pinned")
                         )
-                        await quota_stack.enter_async_context(
-                            _quota_turn("high_importance")
-                        )
                         bucket = await sh.bucket_mgr.get(bid)
                         if not bucket:
+                            errors += 1
+                            continue
+                        if is_letter_bucket(bucket):
                             errors += 1
                             continue
                         metadata = bucket.get("metadata", {})
@@ -898,8 +902,14 @@ def register(mcp) -> None:
                             errors += 1
                             continue
                 elif action == "delete":
-                    ok = await sh.bucket_mgr.delete(bid)
-                    if not ok:
+                    bucket = await sh.bucket_mgr.get(bid)
+                    if not bucket or is_letter_bucket(bucket):
+                        errors += 1
+                        continue
+                    result = await sh.deletion_requests.submit(
+                        bid, str(d.get("reason") or "")
+                    )
+                    if not result.get("ok"):
                         errors += 1
                         continue
                 else:
@@ -930,6 +940,20 @@ def register(mcp) -> None:
         bucket = await sh.bucket_mgr.get(bucket_id)
         if not bucket:
             return JSONResponse({"error": "bucket not found"}, status_code=404)
+        logical_letter = is_letter_bucket(bucket)
+        lock_precondition = (
+            {"expected_lock_state": letter_lock_revision(bucket)}
+            if logical_letter else {}
+        )
+        if letter_lock_state(bucket, "human")["locked"]:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "locked letter cannot be edited from the bucket API",
+                    "updated": [],
+                },
+                status_code=403,
+            )
         try:
             body = await sh._read_json_object(request)
         except Exception:
@@ -1157,6 +1181,19 @@ def register(mcp) -> None:
             except ValueError as e:
                 return reject(str(e))
 
+        if logical_letter and requested_type != current_type:
+            return reject(
+                "letter type cannot be changed from the bucket API",
+                status_code=409,
+                field="type",
+            )
+        if logical_letter and requested_pinned != current_pinned:
+            return reject(
+                "letter pin state cannot be changed from the bucket API",
+                status_code=409,
+                field="pinned",
+            )
+
         unpinning_now = current_pinned and not requested_pinned and not protected
         if unpinning_now and requested_importance is None:
             return reject(
@@ -1230,57 +1267,6 @@ def register(mcp) -> None:
         ):
             updates["importance"] = requested_importance
 
-        final_type = requested_type
-        if pinning_now:
-            final_type = "permanent"
-        elif pin_state_changed and current_pinned and not protected:
-            final_type = "dynamic"
-
-        final_importance = (
-            10 if pinning_now
-            else int(updates.get("importance", before_values["importance"]))
-        )
-
-        before_quota_metadata = dict(metadata)
-        before_quota_metadata.update({
-            "importance": before_values["importance"],
-            "pinned": current_pinned,
-            "protected": protected,
-            "type": current_type,
-            "dont_surface": before_values["dont_surface"],
-        })
-        after_quota_metadata = dict(before_quota_metadata)
-        after_quota_metadata.update({
-            "importance": final_importance,
-            "pinned": requested_pinned,
-            "type": final_type,
-            "dont_surface": updates.get(
-                "dont_surface", before_values["dont_surface"]
-            ),
-        })
-        occupied_high_before = _occupies_high_importance_slot(
-            before_quota_metadata
-        )
-        occupies_high_after = _occupies_high_importance_slot(
-            after_quota_metadata
-        )
-        reserves_high_importance = occupies_high_after and not occupied_high_before
-        eligibility_field_changed = (
-            pin_state_changed
-            or final_type != current_type
-            or after_quota_metadata["dont_surface"]
-            != before_values["dont_surface"]
-        )
-        importance_changed = final_importance != before_values["importance"]
-        needs_high_importance_lock = (
-            eligibility_field_changed
-            or (
-                importance_changed
-                and max(final_importance, before_values["importance"])
-                >= _HIGH_IMP_THRESHOLD
-            )
-        )
-
         if not updates:
             return JSONResponse({
                 "ok": True,
@@ -1289,24 +1275,15 @@ def register(mcp) -> None:
                 "unchanged": True,
             })
 
-        quota_adjustment = None
         try:
             async with AsyncExitStack() as quota_stack:
-                # Global order is pinned -> high_importance. Both pin and unpin
-                # take the first lock, because an unpin can free a slot while a
-                # concurrent pin is checking the old count.
                 if pin_state_changed:
                     await quota_stack.enter_async_context(_quota_turn("pinned"))
-                if needs_high_importance_lock:
-                    await quota_stack.enter_async_context(
-                        _quota_turn("high_importance")
-                    )
 
                 # The route classified quota transitions from the first read.
-                # Revalidate quota-relevant state after acquiring the locks so
-                # a concurrent edit cannot make this request count itself as a
-                # new high-importance row or write from a stale pin snapshot.
-                if pin_state_changed or needs_high_importance_lock:
+                # Revalidate pin-relevant state after acquiring the lock so a
+                # concurrent edit cannot write from a stale pin snapshot.
+                if pin_state_changed:
                     locked_bucket = await sh.bucket_mgr.get(bucket_id)
                     if not locked_bucket:
                         return reject(
@@ -1352,32 +1329,6 @@ def register(mcp) -> None:
                     if quota_err:
                         return reject(quota_err)
 
-                if reserves_high_importance:
-                    adjusted_importance = await _enforce_high_importance_quota(
-                        final_importance
-                    )
-                    if adjusted_importance != final_importance:
-                        quota_adjustment = {
-                            "field": "importance",
-                            "requested": final_importance,
-                            "applied": adjusted_importance,
-                        }
-                        if adjusted_importance == before_values["importance"]:
-                            updates.pop("importance", None)
-                        else:
-                            updates["importance"] = adjusted_importance
-
-                if not updates:
-                    payload = {
-                        "ok": True,
-                        "id": bucket_id,
-                        "updated": [],
-                        "unchanged": True,
-                    }
-                    if quota_adjustment:
-                        payload["quota_adjustment"] = quota_adjustment
-                    return JSONResponse(payload)
-
                 expected_values = dict(updates)
                 if updates.get("pinned") is True:
                     expected_values["importance"] = 10
@@ -1390,9 +1341,24 @@ def register(mcp) -> None:
                 ):
                     expected_values["type"] = "dynamic"
 
+                latest_bucket = await sh.bucket_mgr.get(bucket_id)
+                if not latest_bucket:
+                    return reject(
+                        "bucket changed concurrently; reload and retry",
+                        status_code=409,
+                        conflict="concurrent_change",
+                    )
+                if letter_lock_state(latest_bucket, "human")["locked"]:
+                    return reject(
+                        "letter was locked concurrently",
+                        status_code=409,
+                        conflict="concurrent_lock",
+                    )
+
                 ok = await sh.bucket_mgr.update(
                     bucket_id,
                     event_actor="human",
+                    **lock_precondition,
                     **updates,
                 )
                 if not ok:
@@ -1448,8 +1414,6 @@ def register(mcp) -> None:
             "id": bucket_id,
             "updated": actual_updated,
         }
-        if quota_adjustment:
-            payload["quota_adjustment"] = quota_adjustment
         return JSONResponse(payload)
 
 

@@ -1,5 +1,9 @@
 # ADR-0002: Spark 只读灵感候选边界
 
+> **该功能已于 2026-08-11 下线**：Spark（`dream(inspiration=True)`、`tools/spark_r1/`、
+> `tools/spark_pilot/`、`tools/spark_shadow/` 及对应 `evaluate_spark*.py`）已连同代码与测试
+> 一并从代码库移除。本文档仅作历史存档保留，不再描述现役功能。
+
 ## Status
 
 `Accepted`，提出与接受日期均为 2026-07-30。
@@ -272,7 +276,10 @@ R1 固定本地确定性路径 ──► 函数局部候选
 
 - `tools.dream.dispatch()` 的既有 dream 流程会启动衰减引擎；Spark 模块本身不得新增启动、
   归档或衰减行为。“无副作用”描述的是 Spark 增量路径，不得把整个 dream 错称为零 I/O。
-- `tools.breath.search.surface_search()` 会在命中后调用 `touch_many()`。
+- ~~`tools.breath.search.surface_search()` 会在命中后调用 `touch_many()`。~~
+  3.6.0 起该路径完全只读，命中不再 touch——强化改为 `trace(bucket_id, reinforce=True)`
+  的显式动作。这条曾经是 Spark 不能复用它的理由之一，现已不成立；但复用与否
+  仍按本 ADR 的其余边界单独判断，不因这一项解除而自动放行。
 - `tools._runtime.record_v3_tool_event()` 当前未挂载 recorder 时可能无操作，但一旦接入
   `v3_runtime` 会将 payload 持久化为 INTERNAL MemoryEvent；Spark 禁止依赖当前空操作状态，
   也禁止调用该入口。
@@ -524,7 +531,9 @@ R1 的 tension 由测试场景显式提供；未来产品由谁触发仍待所�
 
 - **默认或自动把 Spark 加进 `dream`**：会改变每次 dream 语义并挤压当前思考；只批准显式
   `inspiration=True` 的附加段，`False` 必须保持稳定默认。
-- **复用 `breath_search.surface_search()`**：命中会 touch 记忆，不满足无语义副作用要求。
+- **复用 `breath_search.surface_search()`**：当时命中会 touch 记忆，不满足无语义副作用
+  要求。（3.6.0 起该路径已只读，这条理由本身失效；此处保留原始决策记录，重新评估
+  需另开 ADR。）
 - **在默认对话或 hook 中自动注入**：会改变每轮所见内容并挤压当前思考，且无法显式拒绝。
 - **服务端 session Spark Buffer**：当前 MCP 为 stateless HTTP，没有可靠 session 语义；持久化还会
   创造新的状态和清理问题。
@@ -638,7 +647,7 @@ R0 文档必须通过现有 `ADRRequirementsContract` 的标题和八个必答�
 5. **aggregate-only**：stdout 和返回对象不含候选、正文、来源/快照标识、数据截止时间、调用 ID
    或模型元数据；只保留字段白名单与固定无权限声明。
 6. **研究包隔离**：`tools/` 继续被 Docker 排除，产品镜像不存在 R1/R2 包，公开 MCP 仍恰好
-   15 个工具；R2 自身不注册参数、工具或 hook。产品 `dream` 的显式 `inspiration` 参数由
+   16 个工具；R2 自身不注册参数、工具或 hook。产品 `dream` 的显式 `inspiration` 参数由
    独立 `src/tools/dream/inspiration.py` 承担，不得 import 或复制 R2 临时 vault 职责。
 
 获批的 40 场景 Pilot 还必须增加以下自动化证据：
@@ -663,7 +672,7 @@ pilot 后需先预注册阈值和分析方案，再开启确认集。
 
 `testing` 产品候选还必须增加以下自动化证据：
 
-1. **显式 schema**：公开 MCP 仍恰好 15 个工具，`dream` 只有 `window_hours` 与
+1. **显式 schema**：公开 MCP 仍恰好 16 个工具，`dream` 只有 `window_hours` 与
    `inspiration` 两个可选字段；默认调用不出现 Spark，非布尔 `inspiration` 失败关闭。
 2. **Policy-first**：所有禁止类型/状态即使具有最高向量相似度也不得读取其 embedding 或进入
    候选；同一实例当前 owner 边界不扩大，不接受 owner/vault/path 参数。
@@ -685,7 +694,7 @@ pilot 后需先预注册阈值和分析方案，再开启确认集。
 独立空测试 vault 从零部署。`tools/` 和 `docs/adr/` 当前被构建上下文排除，而 `src/` 会进入镜像；
 R1/R2/Pilot 仍位于研究专用 `tools/`，产品候选只位于 `src/tools/dream/`。Docker 与部署验证
 可以证明显式产品入口的工程接入，不得宣称研究质量成立。必须验证公开 MCP 仍恰好为当前
-15 个工具、顺序和诊断不变，只有 dream schema 增加默认关闭的布尔参数；
+16 个工具、顺序和诊断不变，只有 dream schema 增加默认关闭的布尔参数；
 `public_tools.py`、`neural_router.py` 和工具数量文档不得增加 Spark 工具。
 
 本次参数变更必须额外运行 MCP 工具发现和严格 schema、未知参数、双客户端并发、鉴权、dream

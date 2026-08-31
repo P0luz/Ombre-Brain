@@ -24,6 +24,7 @@ from migrate_engine import MigrateEngine
 import migrate_engine as migrate_mod
 from ombrebrain.storage import backup_archive as archive_mod
 from ombrebrain.storage.source_store import SourceStore
+from ombrebrain.you import YouStore, YouStoreError, validate_you_snapshot_file
 
 
 class _Backend:
@@ -96,6 +97,61 @@ def test_export_archive_has_verified_manifest_and_sqlite_snapshot(tmp_path):
             ("memory-1",),
         ).fetchone()
     assert row == ("memory-1", "digest")
+
+
+def test_export_archive_carries_valid_you_snapshot_when_feature_was_configured(tmp_path):
+    vault = tmp_path / "vault"
+    _write_bucket(vault)
+    source_store = YouStore(vault)
+    source_state = source_store.set_enabled(True, expected_revision=0)
+
+    payload, manifest = build_export_archive(
+        str(vault), "", {"exported_at": "now", "version": "test"}
+    )
+    package = read_backup_archive(payload)
+
+    assert "you/you.sqlite3" in package["files"]
+    assert any(item["path"] == "you/you.sqlite3" for item in manifest["files"])
+    snapshot = tmp_path / "you.sqlite3"
+    snapshot.write_bytes(package["files"]["you/you.sqlite3"])
+    validate_you_snapshot_file(snapshot)
+    assert source_state.scope is not None
+
+
+@pytest.mark.asyncio
+async def test_exact_full_restore_publishes_you_snapshot(tmp_path):
+    source_vault = tmp_path / "source"
+    _write_bucket(source_vault)
+    source_store = YouStore(source_vault)
+    source_state = source_store.set_enabled(True, expected_revision=0)
+    payload, _manifest = build_export_archive(
+        str(source_vault),
+        "",
+        {"exported_at": "now", "version": "test"},
+    )
+
+    target_vault = tmp_path / "target"
+    target_config = _config(target_vault)
+    target_engine = _engine(target_config)
+    manager = BucketManager(target_config, embedding_engine=target_engine)
+    migrate = MigrateEngine(target_config, manager, target_engine)
+
+    parsed = await migrate.parse_zip(payload)
+    assert parsed["ok"] is True
+    await migrate.apply({})
+
+    restored = YouStore(target_vault).get_state()
+    assert restored.enabled is True
+    assert restored.scope == source_state.scope
+
+
+def test_you_snapshot_validator_rejects_unrecognized_sqlite_schema(tmp_path):
+    path = tmp_path / "not-you.sqlite3"
+    with sqlite3.connect(path) as connection:
+        connection.execute("CREATE TABLE unrelated(value TEXT)")
+
+    with pytest.raises(YouStoreError, match="schema"):
+        validate_you_snapshot_file(path)
 
 
 def test_disk_export_streams_sources_without_path_read_bytes(tmp_path, monkeypatch):
@@ -587,6 +643,27 @@ async def test_keep_both_maps_imported_vector_to_new_id(tmp_path):
     imported = next(bucket for bucket in buckets if bucket["content"] == "imported version")
     assert imported["id"] != "memory-1"
     assert await target_engine.get_embedding(imported["id"]) == [0.7, 0.8]
+
+
+def test_keep_both_relation_target_remap_preserves_other_ledger_fields(tmp_path):
+    path = _write_bucket(tmp_path, bucket_id="source")
+    post = frontmatter.load(path)
+    post["relation_links"] = [{
+        "target_bucket_id": "old-target", "type": "causes",
+        "label": "", "status": "detached",
+    }]
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    migrate = object.__new__(MigrateEngine)
+    migrate._atomic_write = lambda target, content: Path(target).write_text(content, encoding="utf-8")
+
+    migrate._remap_imported_relation_targets(
+        {"source": str(path)},
+        {"old-target": "new-target"},
+        frozenset({"source", "old-target"}),
+    )
+
+    remapped = frontmatter.load(path).metadata["relation_links"][0]
+    assert remapped == {"target_bucket_id": "new-target", "type": "causes", "label": "", "status": "detached"}
 
 
 @pytest.mark.asyncio

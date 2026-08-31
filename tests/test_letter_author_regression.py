@@ -12,6 +12,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from errors import ToolInputError
+
 import tools._runtime as rt
 from tools.plan.core import letter_write, letter_read
 
@@ -92,8 +94,9 @@ async def test_user_author_unchanged(bucket_mgr, monkeypatch):
 @pytest.mark.asyncio
 async def test_empty_author_rejected(bucket_mgr):
     _install(bucket_mgr)
-    res = await letter_write(author="   ", content="x")
-    assert "author" in res
+    with pytest.raises(ToolInputError) as excinfo:
+        await letter_write(author="   ", content="x")
+    assert 'author' in str(excinfo.value)
 
 
 @pytest.mark.asyncio

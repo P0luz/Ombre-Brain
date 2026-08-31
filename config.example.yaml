@@ -20,6 +20,24 @@ transport: "stdio"
 deployment:
   public_url: ""  # e.g. "https://ob.example.com"
 
+# --- AI display name / AI 一方的显示名 ---
+# 用于 letter 署名、prompt 与面向用户的文案，避免硬编码具体模型名。
+# 留空 = 没配：此时回退到环境变量 AI_NAME，仍为空则用 "AI"。
+# 写在这里的值随 vault 一起持久化，容器重建/重启都不会丢；
+# 环境变量则依赖 compose 逐个透传，漏一个就会静默退回默认名。
+# Display name for the AI side (letter signatures, prompts, user-facing text).
+# Empty = unset: falls back to the AI_NAME env var, then to "AI".
+ai_name: ""
+
+# --- Timezone / 时区 ---
+# 用户只给日期、不写时区时（例如 Letter 定时锁的 unlock_date="2027-01-01"），
+# 按这个时区理解成当地那一天的 00:00。留空 = Asia/Shanghai（东八区）。
+# 用 IANA 时区名（Asia/Shanghai、UTC、America/New_York…）；名字非法或运行环境
+# 缺少 tzdata 时回退固定 +08:00，不会因此报错。Dashboard「设置」里可改。
+# IANA timezone name used to interpret date-only input (e.g. Letter unlock_date).
+# Empty = Asia/Shanghai. Falls back to a fixed +08:00 when unresolvable.
+timezone: "Asia/Shanghai"
+
 # --- Log level / 日志级别 ---
 log_level: "INFO"
 
@@ -154,6 +172,12 @@ scoring_weights:
 # --- Fuzzy matching / 模糊匹配参数 ---
 matching:
   fuzzy_threshold: 50             # Minimum match score (0-100) / 最低匹配分数
+  # 纯语义候选进入结果池的最低余弦相似度（默认 0.55）。
+  # 一条记忆哪怕一个关键词都不沾，只要语义相似度到这个数就能被检索到——
+  # 「问我的工作」这类查询全靠它，因为"我的工作"四个字不会字面出现在记忆里。
+  # 调高：召回更准但更少；调低：捞得更多但开始混进噪音。
+  # 3.2.0 从 0.65 下调到 0.55，依据见 src/bucket_manager.py 的扫描记录。
+  vector_recall_threshold: 0.55
   max_results: 5                  # Max results per search / 单次搜索最多返回条数
 
 # --- Surfacing defaults / 浮现默认参数 ---
@@ -162,8 +186,15 @@ matching:
 # AI 调用 breath() 不显式传 max_* 时使用这些默认；前端「浮现默认参数」面板会回写到这里。
 surfacing:
   breath_max_results: 20          # 1-50, hard cap of buckets returned per breath
-  breath_max_tokens: 10000        # 500-20000, total token cap per breath
-  feel_max_tokens: 6000           # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
+  breath_max_tokens: 10000        # 500-40000, total token cap per breath; 40000 is a safety ceiling, not the default
+  feel_max_tokens: 15000          # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
+  # 3.6.0: 浮现区给近 7 天创建的桶预留几个位置，按 created 倒序；其余位置照旧按权重。
+  # 权重是累积的——旧桶靠历史访问把分数攒得很高，新桶从 0 起步，永远排不进前列。
+  # 往打分公式里掺新近性等于把「新」和「重要」换算成同一种东西，那个换算率没有
+  # 正确答案；留位置不用回答这个问题，它只说「无论权重怎么排，总要有几条是最近的」。
+  # 按缺口补（权重自己送进来几条就少补几条），且不超过 max_results 的一半。
+  # 设 0 关闭，回到 3.5.0 的纯权重排序。
+  recent_slots: 3
   # iter 1.8: weighted sampling for breath surfacing mode（无参数浮现）
   # 加权采样：从 top_k 候选里按 score**(1/temperature) 抽 sample_k 个，让"想起"带轻微随机性。
   # 测试 fixture 里默认关 (enabled=false)，保证排序确定。生产可以开。
@@ -174,9 +205,8 @@ surfacing:
     temperature: 0.7              # >1 更平均、<1 更偏向高分；0.7 是个温和的默认
 
 # --- Limits / 边界限制（iter 1.6 §5）---
-# Single-bucket size cap and pinned bucket quota. Exceeding either is
-# rejected at hold/grow/trace boundaries with a Chinese hint string.
-# 单桶字节上限 + pinned 桶数量上限。超出时在 hold/grow/trace 入口直接拒绝。
+# 单桶字节上限 + pinned/protected 独立配额。显式设为 protected
+# 时如配额已满，trace 会直接拒绝，不部分落盘。
 limits:
   max_bucket_bytes: 51200         # 50KB; 0 disables check
   max_import_upload_bytes: 67108864  # 64MB conversation import request cap
@@ -187,6 +217,28 @@ limits:
   max_metadata_bytes: 16384       # combined tool metadata/filter cap; 0 disables
   max_grow_items: 100             # pre-split/digest item count cap; 0 disables
   max_pinned: 20                  # max pinned buckets; 0 disables check
+  max_protected: 20               # protected 桶上限；0 关闭检查
+
+# --- them: 我对其他人的认识 / knowledge about other people ---
+# 默认关闭，由人类在前端显式开启（同 You）。关掉时 MCP 里没有这个工具，
+# breath / dream 的输出与没有这个模块时逐字一致。
+# max_tokens_per_person 是每个人的 token 上限，前端可改，200–4000。
+# 封顶不是性能考虑：them 是沉淀不是日记，能写满几千 token 的档案，
+# 这个模块就变成了在给人建档。
+them:
+  max_tokens_per_person: 1500
+
+# --- Speech attribution / 发言归属 ---
+# 记忆正文里写成 `名字：内容` 的行，如果那个名字既不是我、也不是用户，
+# 就会被移出正文、单独返回成一条 JSON（带 speaker），免得容易幻觉的模型
+# 把第三方说的话读成用户说的。
+# 内置称呼表已覆盖「我/助手/assistant/claude…」和「你/用户/user…」；
+# 这里补的是这台部署才知道的叫法——用户的名字、昵称、你这一侧的自称。
+# 补不全的后果是保守的：没登记的用户别名会被当第三方拆出来，
+# 拆出来的块里写明了归属，不会反过来变成「用户说过」。
+attribution:
+  self_names: []                  # 我这一侧的自称，如 ["小夜", "ombre"]
+  user_names: []                  # 用户的称呼，如 ["她", "poluz"]
 
 # --- iter 1.9 G: 桶类型默认值 / per-type frontmatter defaults ---
 # Applied at create() time only when caller doesn't pass that field.

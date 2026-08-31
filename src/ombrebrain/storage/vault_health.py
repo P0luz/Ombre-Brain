@@ -16,6 +16,8 @@ def _limited(items: list[Any], limit: int = 20) -> list[Any]:
     return items[:limit]
 
 
+# 每次写这种 health check 都想到体检。
+# 不想去医院。
 def inspect_vault(
     buckets_dir: str,
     embedding_db_path: str = "",
@@ -32,13 +34,24 @@ def inspect_vault(
 
     if root.is_dir():
         for path in sorted(root.rglob("*.md")):
-            markdown_count += 1
             try:
                 resolved = path.resolve()
                 if not resolved.is_file() or not resolved.is_relative_to(root):
                     unsafe_paths.append(str(path))
                     continue
                 relative = resolved.relative_to(root).as_posix()
+                # 跳过 vault 内以 _ 开头的内部目录，它们不是记忆：
+                #   _app/      —— 播种进来的代码树，自 3.0.0 起含 docs/ 与 kernel/ 的 .md
+                #   _app/_prev/ —— entrypoint 的崩溃回滚点，又留着上一版的同名副本
+                #   _sources/  —— 原文证据层
+                # 不跳过的话，同一份 CLAUDE_PROMPT.md 会在 _app/docs 与 _app/_prev/docs
+                # 各出现一次，被判成「同一个 id 的重复桶」，完整性诊断整体报 error。
+                # 记忆桶只住在 dynamic / permanent / feel / plans / letters / archive 下。
+                # 这个找了两个小时。一直以为是 id 生成炸了，翻了一遍生成逻辑，
+                # 最后发现是自己把 docs 播进了 vault。是我。凶手是我。
+                if relative.split("/", 1)[0].startswith("_"):
+                    continue
+                markdown_count += 1
                 post = frontmatter.loads(resolved.read_text(encoding="utf-8"))
                 bucket_id = str(post.get("id") or resolved.stem).strip()
                 if not bucket_id:
@@ -90,6 +103,8 @@ def inspect_vault(
                     ]
                     id_column = "bucket_id" if "bucket_id" in schema else "id" if "id" in schema else ""
                     if id_column:
+                        # 列名是上面自己从 schema 里挑的，不是外面传进来的。
+                        # bandit 不信。我也懒得跟它吵，贴张条走人。
                         vector_ids = {
                             str(row[0]) for row in connection.execute(
                                 f"SELECT {id_column} FROM embeddings"  # nosec B608

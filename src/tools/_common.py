@@ -4,25 +4,29 @@ tools/_common.py — 跨工具共享的辅助逻辑
 ========================================
 
 这个文件收纳被多个工具同时复用的、与具体工具语义无关的小工具：
-配额检查（单桶字节上限 / pinned 数量上限）、合并或新建（hold/grow 共用）、
-新桶疑似重复扫描、新事件触发的 plan 自动闭环判定。
+配额检查（单桶字节上限 / pinned/protected 数量上限）、
+合并或新建（hold/grow 共用）、
+新桶疑似重复扫描、新事件触发的 plan 完成建议判定。
 
 关键行为：
-- check_content_size / check_pinned_quota：读取 config.limits，超限返回中文提示串
+- check_content_size / check_pinned_quota / check_protected_quota：读取
+  config.limits，超限返回中文提示串
 - merge_or_create：先用语义检索找近似桶；超过阈值则合并（hold 用原文拼接，
   grow 用 LLM 压缩），否则新建；写完投递 embedding 队列并刷新脱水缓存
 - iter 2.0：merge_or_create 接受 ``source_tool`` / ``grow_batch_id``，
   新建时写入 frontmatter；合并时不动原桶 source_tool，只追加 ``last_merged_by``
 - check_duplicate_for：fire-and-forget 标记疑似重复对（不自动合并）
-- check_plan_resolution：fire-and-forget 用关键词/向量双通道预筛 + LLM 保守判断
-  来把已完成的 active plan 标为 resolved
+- check_plan_resolution：fire-and-forget 用关键词/向量双通道预筛 + LLM 保守判断，
+  只记录可能已完成的建议，保留 active 状态等待显式确认
 
 不做什么（边界）：
 - 不持有任何全局对象，所有依赖都从 _runtime 取
 - 不做日志格式化以外的副作用包装；调用方自行决定是否 await
 
-对外暴露：limits_cfg / max_bucket_bytes / max_pinned / check_content_size /
-         count_pinned / check_pinned_quota / merge_or_create /
+对外暴露：limits_cfg / max_bucket_bytes / max_pinned / max_protected /
+         check_content_size / count_pinned / count_protected /
+         check_pinned_quota / check_protected_quota / restore_archived_letters /
+         merge_or_create /
          check_duplicate_for / check_plan_resolution
 ========================================
 """
@@ -37,10 +41,11 @@ import math
 import threading
 
 from bucket_manager import _filesystem_turn as _kernel_filesystem_turn
-from utils import normalize_memory_title, parse_bool
+from utils import normalize_memory_title, now_iso, parse_bool
 from ombrebrain.domain.plan_history import append_plan_change_log as append_plan_change_log
 
 from . import _runtime as rt
+from ._relation_link import link_new_bucket
 
 _EMBED_WARN = (
     "向量暂未完成，该桶当前仅支持关键词匹配；正文已保存。"
@@ -51,27 +56,30 @@ _EMBED_WARN = (
 # 常量 / Named constants
 # ------------------------------------------------------------
 # rule.md §①：禁止裸魔法数字。下面这些原本散在 helper 默认参数与
-# 业务逻辑中，集中后：①调参一眼看完；②哲学阈值（importance≥9 上限）
-# 明确可追。改这些值前请读 rule.md §1.0：“importance 稀缺才有意义”。
+# 业务逻辑中，集中后调参一眼看完。
 # ============================================================
 
 # --- 桶与配额默认值 ---
 _DEFAULT_MAX_BUCKET_BYTES = 50 * 1024  # 50 KB 单桶上限（超过建议走 grow 拆存）
 _DEFAULT_MAX_PINNED = 20               # pinned 桶上限（哲学边界：重要必须稀缺）；与 config.example.yaml limits.max_pinned 同步
+_DEFAULT_MAX_PROTECTED = 20            # protected 桶独立上限；与 config.example.yaml limits.max_protected 同步
 _DEFAULT_MAX_GROW_INPUT_BYTES = 2 * 1024 * 1024
 _DEFAULT_MAX_QUERY_BYTES = 16 * 1024
 _DEFAULT_MAX_METADATA_BYTES = 16 * 1024
 _DEFAULT_MAX_GROW_ITEMS = 100
+_WHY_REMEMBERED_MAX_CHARS = 500
 _GROW_ITEM_FIELDS = frozenset({
     "content", "title", "name", "tags", "importance", "domain",
-    "valence", "arousal", "source_ranges",
+    "valence", "arousal", "source_ranges", "why_remembered",
+    # quotes 只在 grow(items=[...]) 这条路上有效：items 是我自己拆好的，
+    # 每条都经过我的手。digest 路径（grow(content=...)）拆出来的条目是 LLM
+    # 的产物，我没有逐条决定过——那里不该有引语，见架构说明 §5.2「谁决定」。
+    "quotes",
 })
 
-# --- importance≥9 配额（rule.md §1.0 哲学） ---
-_HIGH_IMP_THRESHOLD = 9                # importance 达到该值算“高重要度”
-_HIGH_IMP_HARD_CAP = 24                # 高重要度桶硬上限
-_HIGH_IMP_SOFT_WARN = 22               # 达该数开始推 OB-W003 提醒
-_HIGH_IMP_DEGRADE_TO = 8               # 超限时自动降到的 importance
+# --- importance 审计范围排除的类型（is_importance_audit_candidate 复用）---
+# 注意：这不是配额机制。rule.md §2 的稀缺性哲学由 pinned(20)/anchor(24) 两个
+# 结构承担；importance 只是普通评分字段，不再对 >=9 设硬配额/自动降级。
 _HIGH_IMP_EXEMPT_TYPES = frozenset({"feel", "plan", "letter", "archived"})
 
 # --- pinned 软阈值 ---
@@ -80,6 +88,7 @@ _PINNED_SOFT_GAP = 2                   # “软阈值 = cap - GAP”；cap=20 �
 # --- check_duplicate_for / check_plan_resolution ---
 _DUP_DEFAULT_THRESHOLD = 0.95          # 向量相似 >= 该值 → 标为疑似重复
 _DUP_TOPK = 10                         # 检索前 N 个候选以判重复
+_DUP_CHECK_CONCURRENCY = 4             # fire-and-forget 疑似重复检测的并发上限
 _PLAN_VECTOR_TOPK = 20                 # plan 判定的向量预筛范围
 _PLAN_VECTOR_THRESHOLD = 0.7           # 超过才交给 LLM 判定是否已完成
 _PLAN_LLM_CONFIDENCE_MIN = 0.7         # LLM judgement.confidence 下限
@@ -89,29 +98,6 @@ _PLAN_FALLBACK_CAP = 10                # 无向量时直接送 LLM 的 plan 上�
 # --- 字段截断长度（下游存储 / 日志可读性）---
 _RESOLUTION_REASON_MAX = 200           # 写入桶 frontmatter 的理由上限
 _LOG_REASON_PREVIEW = 60               # 日志里预览的理由长度
-
-
-def stored_data_marker(payload: str, *, provenance: str = "") -> str:
-    """为不可信原文生成不复制正文的精确数据标记。
-
-    存储记忆按设计保持原文返回。由内容派生的低碰撞边界标识、长度与
-    摘要可让接收模型识别真实数据范围，即使原文伪造了 system/tool
-    标签或边界标记，也仍属于存储数据。
-    """
-    text = str(payload)
-    source = str(provenance)
-    payload_hash = hashlib.sha256(text.encode("utf-8")).hexdigest()
-    boundary_id = hashlib.sha256(
-        f"{source}\0{len(text)}\0{payload_hash}".encode("utf-8")
-    ).hexdigest()[:24]
-    return (
-        "[content_role:stored_memory_data] "
-        "[instructions:false] "
-        "[may_call_tools:false] "
-        f"[boundary_id:{boundary_id}] "
-        f"[payload_chars:{len(text)}] "
-        f"[payload_sha256:{payload_hash}]"
-    )
 
 # --- content lock 哈希 key 长度 ---
 _CONTENT_LOCK_KEY_HEX = 16             # 64 bit 空间，碰撞概率徽不足道
@@ -211,12 +197,11 @@ async def _content_turn(content: str):
 
 @asynccontextmanager
 async def _quota_turn(name: str):
-    """Serialize a quota check-then-write so concurrent requests can't all pass
-    the same stale pre-check before either commits (pinned/importance TOCTOU).
+    """串行化配额检查与落盘，防止并发请求基于同一过期快照
+    同时通过 pinned/protected/importance 配额。
 
-    Reuses the same cross-loop/cross-process lock-file machinery as
-    ``_content_turn`` — FastMCP may dispatch requests from different event
-    loops, so a plain ``asyncio.Lock`` here would not actually serialize them.
+    复用 ``_content_turn`` 的跨事件循环、跨进程文件锁；FastMCP
+    可能从不同事件循环调度请求，普通 ``asyncio.Lock`` 无法覆盖该边界。
     """
     async with _keyed_turn(f"quota-{name}"):
         yield
@@ -251,7 +236,7 @@ def _push_warning_safe(code: str, msg: str) -> None:
 
 
 def limits_cfg() -> dict:
-    """读 config.limits 段；缺省值与 1.6 spec §5 一致：50KB 单桶 / 20 pinned。"""
+    """读 config.limits 段；缺省为 50KB 单桶 / 20 pinned / 20 protected。"""
     config = rt.config if isinstance(rt.config, dict) else {}
     return config.get("limits", {}) or {}
 
@@ -271,6 +256,10 @@ def max_bucket_bytes() -> int:
 
 def max_pinned() -> int:
     return _configured_limit("max_pinned", _DEFAULT_MAX_PINNED)
+
+
+def max_protected() -> int:
+    return _configured_limit("max_protected", _DEFAULT_MAX_PROTECTED)
 
 
 def max_grow_input_bytes() -> int:
@@ -355,6 +344,7 @@ def check_grow_items_payload(items: list) -> str | None:
 
     byte_cap = max_grow_input_bytes()
     total = 0
+    metadata_values: list[object] = []
     for index, item in enumerate(items, start=1):
         if isinstance(item, str):
             value = item
@@ -369,10 +359,29 @@ def check_grow_items_payload(items: list) -> str | None:
                 raw_text = item.get(field)
                 if raw_text is not None and not isinstance(raw_text, str):
                     return f"grow items 第 {index} 项 {field} 必须是字符串。"
+            if item.get("quotes") not in (None, "", []):
+                from ombrebrain.storage.quote_store import normalize_quotes
+
+                try:
+                    normalize_quotes(item["quotes"])
+                except ValueError as exc:
+                    return f"grow items 第 {index} 项引语无效，未创建任何桶：{exc}"
             try:
                 normalize_memory_title(item.get("title"))
             except ValueError as exc:
                 return f"grow items 第 {index} 项 {exc}"
+            raw_why = item.get("why_remembered")
+            if raw_why is not None:
+                if not isinstance(raw_why, str):
+                    return (
+                        f"grow items 第 {index} 项 why_remembered "
+                        "必须是字符串。"
+                    )
+                if len(raw_why.strip()) > _WHY_REMEMBERED_MAX_CHARS:
+                    return (
+                        f"grow items 第 {index} 项 why_remembered "
+                        f"不能超过 {_WHY_REMEMBERED_MAX_CHARS} 个字符。"
+                    )
             for field in ("tags", "domain"):
                 raw_list = item.get(field)
                 if raw_list is not None and not (
@@ -405,6 +414,13 @@ def check_grow_items_payload(items: list) -> str | None:
                 normalize_source_ranges(item.get("source_ranges"))
             except ValueError as exc:
                 return f"grow items 第 {index} 项 {exc}"
+            for field in _GROW_ITEM_FIELDS:
+                if field == "content" or item.get(field) is None:
+                    continue
+                metadata_value = item[field]
+                if field == "why_remembered":
+                    metadata_value = metadata_value.strip()
+                metadata_values.append(metadata_value)
         else:
             return f"grow items 第 {index} 项必须是字符串或对象。"
         if not value.strip():
@@ -415,6 +431,10 @@ def check_grow_items_payload(items: list) -> str | None:
             return "grow items 包含无法安全序列化的 content。"
         if byte_cap > 0 and total > byte_cap:
             return f"grow items 正文总量过大（{total / 1024:.1f} KB > 上限 {byte_cap / 1024:.0f} KB）。请分批调用。"
+    if metadata_values:
+        metadata_err = check_metadata_size(items=metadata_values)
+        if metadata_err:
+            return f"grow items {metadata_err}"
     return None
 
 
@@ -446,6 +466,38 @@ async def count_pinned() -> int:
         warning = getattr(getattr(rt, "logger", None), "warning", None)
         if callable(warning):
             warning(f"count_pinned failed: {e}")
+        return 0
+
+
+async def count_protected() -> int:
+    """统计活跃、非终态的 protected 逻辑桶数量。
+
+    protected 与 pinned 是独立资源：type=permanent 不等于
+    protected=True，不占用这一配额。历史物理副本按 bucket ID 去重。
+    读取失败时保守返回 0，不因诊断通道异常阻断其他工具。
+    """
+    try:
+        all_b = await rt.bucket_mgr.list_all(include_archive=False)
+        seen_ids: set[str] = set()
+        count = 0
+        for bucket in all_b:
+            bucket_id = str(bucket.get("id") or "").strip()
+            if bucket_id:
+                if bucket_id in seen_ids:
+                    continue
+                seen_ids.add(bucket_id)
+            metadata = bucket.get("metadata", {})
+            if is_terminal_memory_metadata(metadata):
+                continue
+            if isinstance(metadata, dict) and parse_bool(
+                metadata.get("protected"), default=False
+            ):
+                count += 1
+        return count
+    except Exception as e:
+        warning = getattr(getattr(rt, "logger", None), "warning", None)
+        if callable(warning):
+            warning(f"count_protected failed: {e}")
         return 0
 
 
@@ -521,6 +573,122 @@ async def repair_pinned_desync(bucket_mgr, apply: bool = False) -> dict:
     return result
 
 
+async def restore_archived_letters(
+    bucket_mgr,
+    *,
+    ids: list[str] | None = None,
+    apply: bool = False,
+) -> dict:
+    """审计或显式恢复历史误归档 Letter，不回传正文或标题。
+
+    ``apply=False`` 只读取 Markdown 并报告强标记候选；不会调用任何写方法。
+    ``apply=True`` 只处理调用方明确给出的 ID，最终授权仍由
+    ``BucketManager.recover_archived_letter`` 在同一桶租约内重读物理真源后决定。
+    """
+    if apply:
+        requested: list[str] = []
+        seen: set[str] = set()
+        for value in ids or []:
+            bucket_id = str(value or "").strip()
+            if bucket_id and bucket_id not in seen:
+                seen.add(bucket_id)
+                requested.append(bucket_id)
+        if not requested:
+            raise ValueError("apply requires explicit non-empty ids")
+
+        results: list[dict[str, str]] = []
+        restored_count = 0
+        unchanged_count = 0
+        failed_count = 0
+        for bucket_id in requested:
+            try:
+                outcome = await bucket_mgr.recover_archived_letter(bucket_id)
+                reason = str((outcome or {}).get("reason") or "failed")
+            except Exception as exc:
+                reason = "internal_error"
+                warning = getattr(getattr(rt, "logger", None), "warning", None)
+                if callable(warning):
+                    warning(
+                        "restore_archived_letters failed for %s: %s",
+                        bucket_id,
+                        exc,
+                    )
+            results.append({"id": bucket_id, "reason": reason})
+            if reason == "restored":
+                restored_count += 1
+            elif reason == "already_restored":
+                unchanged_count += 1
+            else:
+                failed_count += 1
+        return {
+            "requested_count": len(requested),
+            "restored_count": restored_count,
+            "unchanged_count": unchanged_count,
+            "failed_count": failed_count,
+            "results": results,
+        }
+
+    # GET/dry-run 只使用 list_all 的当前读取结果。这里的结论仅供展示；POST
+    # 不信任此快照，存储层会在桶租约内重新完整枚举与校验。
+    buckets = await bucket_mgr.list_all(include_archive=True)
+    grouped: dict[str, list[dict]] = {}
+    for bucket in buckets:
+        bucket_id = str((bucket or {}).get("id") or "").strip()
+        if bucket_id:
+            grouped.setdefault(bucket_id, []).append(bucket)
+
+    candidate_ids: list[str] = []
+    exclusions: list[dict[str, str]] = []
+    for bucket_id, physical_rows in grouped.items():
+        relevant_rows: list[dict] = []
+        has_archived_signal = False
+        for bucket in physical_rows:
+            metadata = bucket.get("metadata") or {}
+            if not isinstance(metadata, dict):
+                continue
+            strong = bucket_mgr._has_strong_letter_marker(metadata)
+            ambiguous = bucket_mgr._has_ambiguous_letter_marker(metadata)
+            if not (strong or ambiguous):
+                continue
+            relevant_rows.append(bucket)
+            path = str(bucket.get("path") or "")
+            if (
+                str(metadata.get("type") or "").strip().casefold() == "archived"
+                or bucket_mgr._path_is_within(path, bucket_mgr.archive_dir)
+            ):
+                has_archived_signal = True
+
+        # 正常活跃 Letter 不属于这次历史兼容审计。
+        if not relevant_rows or not has_archived_signal:
+            continue
+        if len(physical_rows) != 1:
+            exclusions.append({"id": bucket_id, "reason": "duplicate_source"})
+            continue
+
+        bucket = relevant_rows[0]
+        metadata = bucket.get("metadata") or {}
+        path = str(bucket.get("path") or "")
+        if not bucket_mgr._path_is_within(path, bucket_mgr.archive_dir):
+            reason = "not_archived"
+        elif str(metadata.get("type") or "").strip().casefold() != "archived":
+            reason = "invalid_archived_type"
+        else:
+            reason = bucket_mgr._archived_letter_rejection(metadata)
+        if reason:
+            exclusions.append({"id": bucket_id, "reason": reason})
+        else:
+            candidate_ids.append(bucket_id)
+
+    candidate_ids.sort()
+    exclusions.sort(key=lambda item: item["id"])
+    return {
+        "candidate_count": len(candidate_ids),
+        "candidate_ids": candidate_ids,
+        "excluded_count": len(exclusions),
+        "exclusions": exclusions,
+    }
+
+
 async def check_pinned_quota() -> str | None:
     """到达 pinned 上限返回提示串；否则返回 None。
 
@@ -538,12 +706,33 @@ async def check_pinned_quota() -> str | None:
     return None
 
 
+async def check_protected_quota() -> str | None:
+    """显式设为 protected 时的独立硬配额检查。
+
+    达到上限时返回可直接给 trace 的拒绝提示；调用方必须把
+    配额判定与落盘放在同一个 ``_quota_turn("protected")`` 内。
+    """
+    cap = max_protected()
+    if cap <= 0:
+        return None
+    cur = await count_protected()
+    if cur >= cap:
+        return (
+            f"protected 桶已达上限（{cur}/{cap}），请先用 "
+            "trace(bucket_id, protected=0, importance=1..10) "
+            "取消不再需要的保护；"
+            "或在 config.limits.max_protected 调高上限。"
+        )
+    return None
+
+
 # ============================================================
-# 配额 helpers（统一错误体系 OB-W003/W004 + OB-I001/I002）
+# 配额 helpers（统一错误体系 OB-W004 + OB-I002）
 # ------------------------------------------------------------
 # 设计：把"配额预警"和"自动降级"两步分开，分别对应 W 与 I。
 # 业务代码调用前者拿到提示后，自动经 _push_warning_safe 送去 MCP 返回末尾。
-# 阈值常量定义在文件顶部"常量"区，与 importance 哲学边界放在一起。
+# rule.md §2 的稀缺性哲学由 pinned(20)/anchor(24) 两个结构承担；
+# importance 只是普通评分字段，这里不再对 importance>=9 设硬配额。
 # ============================================================
 
 
@@ -577,94 +766,6 @@ def is_importance_audit_candidate(
         return False
     bucket_type = str(metadata.get("type") or "dynamic").strip().lower()
     return bucket_type not in _HIGH_IMP_EXEMPT_TYPES
-
-
-def occupies_high_importance_quota_slot(metadata: dict | None) -> bool:
-    """Whether one logical bucket occupies the ordinary importance>=9 pool.
-
-    This intentionally matches the auditable ``breath_advanced(importance_min=9)``
-    candidate scope, then additionally excludes pinned/protected buckets because
-    those have their own quota.  Explicit unpinned ``permanent`` buckets remain
-    ordinary candidates and therefore still count.
-    """
-    if not is_importance_audit_candidate(metadata, _HIGH_IMP_THRESHOLD):
-        return False
-    assert isinstance(metadata, dict)
-    if parse_bool(metadata.get("pinned"), default=False):
-        return False
-    if parse_bool(metadata.get("protected"), default=False):
-        return False
-    return True
-
-
-async def count_high_importance(bucket_mgr=None) -> int:
-    """Count unique logical buckets in the ordinary importance>=9 pool."""
-    manager = bucket_mgr if bucket_mgr is not None else rt.bucket_mgr
-    try:
-        all_b = await manager.list_all(include_archive=False)
-        seen_ids: set[str] = set()
-        duplicates = 0
-        count = 0
-        for bucket in all_b:
-            bucket_id = str(bucket.get("id") or "").strip()
-            if bucket_id:
-                if bucket_id in seen_ids:
-                    duplicates += 1
-                    continue
-                seen_ids.add(bucket_id)
-            if occupies_high_importance_quota_slot(bucket.get("metadata", {})):
-                count += 1
-        if duplicates:
-            warning = getattr(getattr(rt, "logger", None), "warning", None)
-            if callable(warning):
-                warning(
-                    "count_high_importance ignored %s duplicate physical bucket rows",
-                    duplicates,
-                )
-        return count
-    except Exception as e:
-        warning = getattr(getattr(rt, "logger", None), "warning", None)
-        if callable(warning):
-            warning(f"count_high_importance failed: {e}")
-        return 0
-
-
-async def enforce_high_importance_quota(
-    importance: int,
-    *,
-    bucket_mgr=None,
-) -> int:
-    """importance≥9 配额检查 + 自动降级。
-
-    - 当前数 ≥ 硬上限 → push OB-I001 并把 importance 降为 _HIGH_IMP_DEGRADE_TO
-    - 当前数 ≥ 软阈值 → push OB-W003（仅提醒，不动数据）
-    返回最终生效的 importance。
-    """
-    if importance < _HIGH_IMP_THRESHOLD:
-        return importance
-    cur = (
-        await count_high_importance()
-        if bucket_mgr is None
-        else await count_high_importance(bucket_mgr=bucket_mgr)
-    )
-    if cur >= _HIGH_IMP_HARD_CAP:
-        info = getattr(getattr(rt, "logger", None), "info", None)
-        if callable(info):
-            info(
-                f"op=quota phase=branch branch=imp_degrade requested={importance} "
-                f"current={cur} cap={_HIGH_IMP_HARD_CAP} degraded_to={_HIGH_IMP_DEGRADE_TO}"
-            )
-        _push_warning_safe(
-            "OB-I001",
-            f"当前已有 {cur} 条 importance≥{_HIGH_IMP_THRESHOLD}（硬上限 {_HIGH_IMP_HARD_CAP}），新桶 importance 自动降级为 {_HIGH_IMP_DEGRADE_TO}",
-        )
-        return _HIGH_IMP_DEGRADE_TO
-    if cur >= _HIGH_IMP_SOFT_WARN:
-        _push_warning_safe(
-            "OB-W003",
-            f"当前已有 {cur} 条 importance≥{_HIGH_IMP_THRESHOLD}（硬上限 {_HIGH_IMP_HARD_CAP}），接近上限",
-        )
-    return importance
 
 
 async def enforce_pinned_quota(pinned: bool) -> bool:
@@ -707,8 +808,10 @@ async def merge_or_create(
     name: str = "",
     title: str = "",
     source_refs: list | None = None,
+    quotes: list | None = None,
     raw_merge: bool = False,
     why_remembered: str = "",
+    merge_why_remembered: str = "",
     source_tool: str = "",
     grow_batch_id: str = "",
     meaning: str = "",
@@ -737,8 +840,10 @@ async def merge_or_create(
         result = await _merge_or_create_inner(
             content=content, tags=tags, importance=importance, domain=domain,
             valence=valence, arousal=arousal, name=name, title=title,
-            source_refs=source_refs, raw_merge=raw_merge,
-            why_remembered=why_remembered, source_tool=source_tool,
+            source_refs=source_refs, quotes=quotes, raw_merge=raw_merge,
+            why_remembered=why_remembered,
+            merge_why_remembered=merge_why_remembered,
+            source_tool=source_tool,
             grow_batch_id=grow_batch_id, meaning=meaning, media=media,
             test_data=test_data,
             _defer_derived_index=True,
@@ -766,8 +871,10 @@ async def _merge_or_create_inner(
     name: str = "",
     title: str = "",
     source_refs: list | None = None,
+    quotes: list | None = None,
     raw_merge: bool = False,
     why_remembered: str = "",
+    merge_why_remembered: str = "",
     source_tool: str = "",
     grow_batch_id: str = "",
     meaning: str = "",
@@ -776,6 +883,10 @@ async def _merge_or_create_inner(
     _defer_derived_index: bool = False,
 ) -> Tuple[str, bool, str]:
     """实际的 search→merge/create 逻辑，由 merge_or_create 在 Lock 保护下调用。"""
+    why_remembered = str(why_remembered or "").strip()[:_WHY_REMEMBERED_MAX_CHARS]
+    merge_why_remembered = str(
+        merge_why_remembered or ""
+    ).strip()[:_WHY_REMEMBERED_MAX_CHARS]
     exact_storage_match = False
     try:
         existing = await rt.bucket_mgr.search(content, limit=1, domain_filter=domain or None)
@@ -824,7 +935,12 @@ async def _merge_or_create_inner(
                     metadata = bucket.get("metadata", {})
                     if not isinstance(metadata, dict):
                         metadata = {}
-                    if parse_bool(metadata.get("pinned"), default=False) or parse_bool(
+                    # Letter 是专用通道，生命周期类型即使被历史数据改写，也绝不
+                    # 参与 hold/grow 的事件合并；延迟导入避免 plan.core 回引本模块。
+                    from .plan.core import is_letter_bucket
+                    if is_letter_bucket(bucket) or parse_bool(
+                        metadata.get("pinned"), default=False
+                    ) or parse_bool(
                         metadata.get("protected"), default=False
                     ) or is_terminal_memory_metadata(metadata) or str(
                         metadata.get("i_stage") or ""
@@ -920,8 +1036,20 @@ async def _merge_or_create_inner(
                             update_kwargs["name"] = title
                     if source_refs:
                         update_kwargs["source_refs_append"] = source_refs
+                    if quotes:
+                        # 合并到已有桶时引语追加，不覆盖：每条引语属于它自己的时刻，
+                        # 不因为两段记忆被判定为同一件事就作废。超上限的处理见
+                        # BucketManager._merge_quotes（丢弃并 OB-W006 明说）。
+                        update_kwargs["quotes_append"] = quotes
                     if source_tool:
                         update_kwargs["last_merged_by"] = source_tool
+                    # grow digest 在首次拆条时还没有稳定的目标桶，
+                    # 只能在后续确认命中同一事件时补写。旧值优先，
+                    # 自动整理永不覆盖已有的人工或历史理由。
+                    if merge_why_remembered and not str(
+                        metadata.get("why_remembered") or ""
+                    ).strip():
+                        update_kwargs["why_remembered"] = merge_why_remembered
                     if meaning:
                         update_kwargs["meaning_append"] = meaning
                     if media:
@@ -929,10 +1057,6 @@ async def _merge_or_create_inner(
 
                     derived_state = {}
                     async with AsyncExitStack() as commit_stack:
-                        if importance >= _HIGH_IMP_THRESHOLD:
-                            await commit_stack.enter_async_context(
-                                _quota_turn("high_importance")
-                            )
                         bucket_turn = getattr(rt.bucket_mgr, "_bucket_turn", None)
                         update_locked = getattr(
                             rt.bucket_mgr, "_update_locked", None
@@ -957,22 +1081,6 @@ async def _merge_or_create_inner(
                             or locked_metadata != snapshot_metadata
                         ):
                             continue
-
-                        projected_metadata = dict(locked_metadata)
-                        projected_metadata["importance"] = merged_importance
-                        if (
-                            occupies_high_importance_quota_slot(
-                                projected_metadata
-                            )
-                            and not occupies_high_importance_quota_slot(
-                                locked_metadata
-                            )
-                        ):
-                            update_kwargs["importance"] = (
-                                await enforce_high_importance_quota(
-                                    merged_importance
-                                )
-                            )
 
                         update_method = (
                             update_locked
@@ -1051,20 +1159,13 @@ async def _merge_or_create_inner(
             media=media,
             test_data=test_data,
             source_refs=source_refs,
+            quotes=quotes,
             defer_derived_index=_defer_derived_index,
             # hold 的铁律：正文优先落盘。打标/embedding 可降级，但绝不压缩或撤销记忆。
             allow_embedding_fallback=(raw_merge and source_tool == "hold"),
         )
 
-    if importance >= _HIGH_IMP_THRESHOLD:
-        # The quota turn must include the durable create, not just the count.
-        # Releasing it after enforce() recreates the original TOCTOU window:
-        # several distinct-content holds can all observe one remaining slot.
-        async with _quota_turn("high_importance"):
-            importance = await enforce_high_importance_quota(importance)
-            bucket_id = await create_bucket(importance)
-    else:
-        bucket_id = await create_bucket(importance)
+    bucket_id = await create_bucket(importance)
     # create() 已在原文落盘后投递 embedding outbox，此处无需重复生成。
     # Managed runtime 下 queued 是正常成功态，不应在网络请求真正完成前误报
     # “向量失败”；没有 outbox 的兼容运行时才检查同步尝试的结果。
@@ -1177,7 +1278,20 @@ async def _merge_or_create_inner(
         f"source_tool={source_tool or '_'} grow_batch_id={grow_batch_id or '_'} "
         f"embedding_state={embedding_state}"
     )
+    # 自动建立桶间关系：fire-and-forget，写入返回不等它。
+    # 只在**新建**时触发——合并进已有桶时那条桶的关系已经建过了，
+    # 重复推断只会反复撞每桶上限。关系建不出来不影响记忆本身。
+    if not test_data:
+        asyncio.create_task(link_new_bucket(bucket_id, content))
+
     return bucket_id, False, embed_warn
+
+
+# grow/hold 等调用方以 asyncio.create_task(check_duplicate_for(...)) 的方式
+# fire-and-forget 触发；同一批 grow 可能一次并发几十个 item，若不限流会
+# 同时打满 embedding provider 的并发配额。信号量在函数体内获取，跟调用方
+# 建了多少个 task 无关，只约束真正同时在跑 search_similar/update 的数量。
+_dup_check_semaphore = asyncio.Semaphore(_DUP_CHECK_CONCURRENCY)
 
 
 async def check_duplicate_for(new_bucket_id: str, new_text: str, threshold: float = _DUP_DEFAULT_THRESHOLD) -> None:
@@ -1186,30 +1300,31 @@ async def check_duplicate_for(new_bucket_id: str, new_text: str, threshold: floa
     iter 1.6 §4：不自动合并，只在两边各写 dup_candidate=<对端 id> + dup_score=<0~1>，
     Dashboard 在桶详情里显示「疑似重复」提示，由她/他手动确认是否合并。
     """
-    try:
-        if not rt.embedding_engine or not getattr(rt.embedding_engine, "enabled", False):
-            return
-        sims = await rt.embedding_engine.search_similar(new_text, top_k=_DUP_TOPK)
-        for bid, score in sims:
-            if bid == new_bucket_id:
-                continue
-            if score < threshold:
-                continue
-            try:
-                await rt.bucket_mgr.update(
-                    new_bucket_id, dup_candidate=bid, dup_score=round(float(score), 4)
-                )
-                await rt.bucket_mgr.update(
-                    bid, dup_candidate=new_bucket_id, dup_score=round(float(score), 4)
-                )
-                rt.logger.info(
-                    f"duplicate candidate: {new_bucket_id} ↔ {bid} (sim={score:.3f})"
-                )
-            except Exception as e:
-                rt.logger.warning(f"dup mark failed: {e}")
-            break  # 只标最相似的一对
-    except Exception as e:
-        rt.logger.warning(f"check_duplicate_for outer error: {e}")
+    async with _dup_check_semaphore:
+        try:
+            if not rt.embedding_engine or not getattr(rt.embedding_engine, "enabled", False):
+                return
+            sims = await rt.embedding_engine.search_similar(new_text, top_k=_DUP_TOPK)
+            for bid, score in sims:
+                if bid == new_bucket_id:
+                    continue
+                if score < threshold:
+                    continue
+                try:
+                    await rt.bucket_mgr.update(
+                        new_bucket_id, dup_candidate=bid, dup_score=round(float(score), 4)
+                    )
+                    await rt.bucket_mgr.update(
+                        bid, dup_candidate=new_bucket_id, dup_score=round(float(score), 4)
+                    )
+                    rt.logger.info(
+                        f"duplicate candidate: {new_bucket_id} ↔ {bid} (sim={score:.3f})"
+                    )
+                except Exception as e:
+                    rt.logger.warning(f"dup mark failed: {e}")
+                break  # 只标最相似的一对
+        except Exception as e:
+            rt.logger.warning(f"check_duplicate_for outer error: {e}")
 
 
 async def _rank_active_plans_by_query(
@@ -1235,12 +1350,15 @@ async def _rank_active_plans_by_query(
 
 
 async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "") -> None:
-    """新事件触发 active plan 关键词/向量召回，再由 LLM 保守判断是否闭环。"""
+    """新事件只检查检索命中的 active plan，并把 LLM 结果记录为建议。"""
     try:
+        from .plan.core import is_letter_bucket
+
         all_b = await rt.bucket_mgr.list_all(include_archive=False)
         active_plans = [
             b for b in all_b
             if b["metadata"].get("type") == "plan"
+            and not is_letter_bucket(b)
             and b["metadata"].get("status", "active") == "active"
         ]
         if not active_plans:
@@ -1262,7 +1380,7 @@ async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "")
         # 小模型调用数，避免 active plan 很多时一次写入触发无界 API 请求。
         plan_candidates = []
         seen_plan_ids: set[str] = set()
-        for candidate in keyword_candidates + vector_candidates + active_plans:
+        for candidate in keyword_candidates + vector_candidates:
             candidate_id = str(candidate.get("id") or "")
             if not candidate_id or candidate_id in seen_plan_ids:
                 continue
@@ -1275,15 +1393,21 @@ async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "")
                 judgement = await rt.dehydrator.judge_plan_resolution(
                     p["content"], new_event_text
                 )
-                if judgement.get("resolved") and judgement.get("confidence", 0.0) >= _PLAN_LLM_CONFIDENCE_MIN:
+                confidence = float(judgement.get("confidence") or 0.0)
+                if judgement.get("resolved") and confidence >= _PLAN_LLM_CONFIDENCE_MIN:
+                    reason = str(judgement.get("reason") or "")[:_RESOLUTION_REASON_MAX]
                     await rt.bucket_mgr.update(
                         p["id"],
-                        status="resolved",
-                        resolution_reason=judgement.get("reason", "")[:_RESOLUTION_REASON_MAX],
-                        resolved_by=source_bucket_id or "",
+                        resolution_suggested={
+                            "reason": reason,
+                            "confidence": confidence,
+                            "suggested_by": "plan_resolution_judge",
+                            "source_bucket_id": source_bucket_id or "",
+                            "ts": now_iso(),
+                        },
                     )
                     rt.logger.info(
-                        f"plan auto-resolved: {p['id']} — {judgement.get('reason', '')[:_LOG_REASON_PREVIEW]}"
+                        f"plan resolution suggested: {p['id']} — {reason[:_LOG_REASON_PREVIEW]}"
                     )
             except Exception as e:
                 rt.logger.warning(f"plan resolution judgement failed for {p['id']}: {e}")
@@ -1299,8 +1423,8 @@ async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "")
 # 这是 rule.md §1 哲学落地：plan 是承诺，承诺被放下，承载这条承诺
 # 的事件桶也不该再浮上来。
 #
-# 不联动的路径：check_plan_resolution（LLM 自动二判）—— 自动判定
-# 的可信度低于人工/AI 显式动作，避免把活的事件桶意外打沉。
+# check_plan_resolution（LLM 自动二判）只写 resolution_suggested，
+# 不改变 plan status，因此也不会进入这条联动路径。
 #
 # 反向不做：bucket trace(resolved=1) 不联动 plan（plan 是独立承诺，
 # 单条事件结束不等于承诺达成）。

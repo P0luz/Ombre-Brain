@@ -26,6 +26,7 @@ class LegacyCompatibilityContract:
                 "pulse",
                 "plan",
                 "letter_write",
+                "letter_lock_update",
                 "letter_read",
                 "I",
             ),

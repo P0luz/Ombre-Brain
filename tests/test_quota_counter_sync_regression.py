@@ -3,25 +3,30 @@
 反馈场景（v2.3.22，Render）：
 1. pinned：取消钉选到 17 个后仍订不上新的，报「有 24 个 pin」
    → 旧根因：取消钉选后残留的 type=permanent 也被算进 pinned 配额。
-2. importance≥9：trace(bucket_id, importance=7) 降级后，hold(importance=9)
-   仍报「已有 84 条 ≥9（硬上限 24）」自动降为 8；实际 breath 只剩 18 条
-   → 旧根因：pinned/protected（importance 锁 10）也被算进 ≥9 配额，且计数不实时。
 
-当前实现的两条硬保证（本文件锁死，防止回退）：
+当前实现的硬保证（本文件锁死，防止回退）：
 - 配额计数每次实时从盘上数（无缓存计数器），trace 改完立即生效；
-- pinned 只数 metadata.pinned，type=permanent 不占 pinned 配额；
-  importance≥9 配额排除 pinned/protected。
+- pinned 只数 metadata.pinned，type=permanent 不占 pinned 配额。
+
+注：importance≥9 硬配额/自动降级机制已按 rule.md §2 撤销（2026-08-11）——
+稀缺性哲学改由 pinned(20)/anchor(24) 两个结构承担，importance 只是普通
+评分字段，不再设配额。本文件原有围绕 `_HIGH_IMP_HARD_CAP` /
+`count_high_importance` / `enforce_high_importance_quota` 的用例已整体移除。
 """
 import asyncio
+from pathlib import Path
 from unittest.mock import MagicMock
 
+import frontmatter
 import pytest
+
+from errors import ToolInputError
 
 import tools._runtime as rt
 from tools._common import (
-    count_high_importance,
+    check_protected_quota,
     count_pinned,
-    enforce_high_importance_quota,
+    count_protected,
     enforce_pinned_quota,
     merge_or_create,
 )
@@ -103,28 +108,6 @@ async def test_unpin_via_trace_frees_pinned_quota(bucket_mgr):
 
 
 @pytest.mark.asyncio
-async def test_trace_unpin_reserves_new_high_importance_slot(
-    bucket_mgr,
-    monkeypatch,
-):
-    """A pinned 10 starts consuming the ordinary high quota when unpinned."""
-    install_runtime(bucket_mgr)
-    monkeypatch.setattr("tools._common._HIGH_IMP_HARD_CAP", 1)
-    monkeypatch.setattr("tools._common._HIGH_IMP_SOFT_WARN", 1)
-
-    await bucket_mgr.create(content="existing high slot", importance=9)
-    pinned_id = await bucket_mgr.create(content="will be unpinned", pinned=True)
-
-    await trace_core(pinned_id, pinned=0, importance=10)
-
-    unpinned = await bucket_mgr.get(pinned_id)
-    assert unpinned["metadata"]["pinned"] is False
-    assert unpinned["metadata"]["type"] == "dynamic"
-    assert unpinned["metadata"]["importance"] == 8
-    assert await count_high_importance() == 1
-
-
-@pytest.mark.asyncio
 async def test_trace_can_unpin_and_lower_importance_atomically(bucket_mgr):
     install_runtime(bucket_mgr)
     pinned_id = await bucket_mgr.create(content="lower while unpinning", pinned=True)
@@ -144,10 +127,11 @@ async def test_trace_rejects_unpin_without_same_call_importance(bucket_mgr):
     install_runtime(bucket_mgr)
     pinned_id = await bucket_mgr.create(content="must choose importance", pinned=True)
 
-    result = await trace_core(pinned_id, pinned=0)
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_core(pinned_id, pinned=0)
 
     unchanged = await bucket_mgr.get(pinned_id)
-    assert "importance" in result
+    assert "importance" in str(excinfo.value)
     assert unchanged["metadata"]["pinned"] is True
     assert unchanged["metadata"]["type"] == "permanent"
     assert unchanged["metadata"]["importance"] == 10
@@ -190,206 +174,108 @@ async def test_pinned_counter_normalizes_booleans_and_logical_ids():
     assert await count_pinned() == 1
 
 
-# ------------------------------------------------------------
-# ② importance≥9 配额：trace 降级后计数必须实时同步
-# ------------------------------------------------------------
-
 @pytest.mark.asyncio
-async def test_trace_demote_frees_high_importance_quota(bucket_mgr, monkeypatch):
-    install_runtime(bucket_mgr)
-    # 上限收小到 3，复刻「超限自动降级」再「trace 释放后恢复」的完整链路
-    monkeypatch.setattr("tools._common._HIGH_IMP_HARD_CAP", 3)
-    monkeypatch.setattr("tools._common._HIGH_IMP_SOFT_WARN", 3)
-
-    ids = []
-    for i in range(3):
-        ids.append(await bucket_mgr.create(content=f"重要记忆 {i}", importance=9))
-
-    # 满额：新 hold(importance=9) 被自动降级为 8（OB-I001 行为）
-    assert await count_high_importance() == 3
-    assert await enforce_high_importance_quota(9) == 8
-
-    # 复现步骤：trace(bucket_id, importance=7) 降级一条
-    await trace_core(ids[0], importance=7)
-
-    # 计数实时同步 → 新的 importance=9 不再被误降
-    assert await count_high_importance() == 2
-    assert await enforce_high_importance_quota(9) == 9
-
-
-@pytest.mark.asyncio
-async def test_pinned_not_counted_in_high_importance_quota(bucket_mgr):
-    """旧根因锁死：pinned/protected（importance 锁 10）不占 ≥9 配额。
-
-    （用户实际 18 条 ≥9 却被报 84：虚高部分就是 pinned/permanent 混入。）"""
-    install_runtime(bucket_mgr)
-
-    await bucket_mgr.create(content="钉住的核心", pinned=True)      # importance 锁 10
-    await bucket_mgr.create(content="普通高重要", importance=9)
-
-    assert await count_high_importance() == 1
-
-
-# ------------------------------------------------------------
-# ③ trace 不能绕过 importance≥9 配额（此前只有 hold 的创建路径检查过）
-# ------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_trace_promote_respects_high_importance_quota(bucket_mgr, monkeypatch):
-    """回归锁死：trace(bucket_id, importance=9) 也要经过硬上限检查。"""
-    install_runtime(bucket_mgr)
-    monkeypatch.setattr("tools._common._HIGH_IMP_HARD_CAP", 3)
-    monkeypatch.setattr("tools._common._HIGH_IMP_SOFT_WARN", 3)
-
-    ids = [await bucket_mgr.create(content=f"普通桶 {i}", importance=5) for i in range(4)]
-
-    for bid in ids[:3]:
-        await trace_core(bid, importance=9)
-    assert await count_high_importance() == 3
-
-    # 第 4 个再通过 trace 提到 9 应被自动降级为 8，而不是把配额冲破 3
-    await trace_core(ids[3], importance=9)
-    bucket = await bucket_mgr.get(ids[3])
-    assert bucket["metadata"]["importance"] == 8
-    assert await count_high_importance() == 3
-
-
-@pytest.mark.asyncio
-async def test_trace_re_setting_already_high_importance_is_not_self_penalized(bucket_mgr, monkeypatch):
-    """已经占着配额的桶改自己的 importance（仍 ≥9）不该被自己的存在误挡。"""
-    install_runtime(bucket_mgr)
-    monkeypatch.setattr("tools._common._HIGH_IMP_HARD_CAP", 1)
-    monkeypatch.setattr("tools._common._HIGH_IMP_SOFT_WARN", 1)
-
-    bid = await bucket_mgr.create(content="唯一高重要", importance=9)
-    assert await count_high_importance() == 1
-
-    await trace_core(bid, importance=10)
-    bucket = await bucket_mgr.get(bid)
-    assert bucket["metadata"]["importance"] == 10
-
-
-# ------------------------------------------------------------
-# ④ letter 固定 importance=10，不该占 ≥9 配额（letter 永不衰减/合并，
-#    不是"抢到了高重要度名额"的动态记忆）
-# ------------------------------------------------------------
-
-@pytest.mark.asyncio
-async def test_letter_does_not_occupy_high_importance_quota(bucket_mgr):
-    install_runtime(bucket_mgr)
-
+async def test_active_protected_uses_an_independent_configured_quota(bucket_mgr):
+    install_runtime(bucket_mgr, limits={"max_pinned": 1, "max_protected": 1})
+    await bucket_mgr.create(content="ordinary pinned slot", pinned=True)
     await bucket_mgr.create(
-        content="给未来自己的一封信", importance=10, bucket_type="letter",
+        content="the sole protected slot",
+        protected=True,
+        bucket_type="dynamic",
     )
-    await bucket_mgr.create(content="普通高重要", importance=9)
+    await bucket_mgr.create(
+        content="unprotected permanent does not use protected quota",
+        bucket_type="permanent",
+    )
 
-    # 只数普通桶那一条，letter 不占位
-    assert await count_high_importance() == 1
+    assert await count_pinned() == 1
+    assert await count_protected() == 1
+    assert await check_protected_quota() is not None
 
+    candidate_id = await bucket_mgr.create(
+        content="protected quota overflow candidate",
+        importance=5,
+    )
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_core(candidate_id, protected=1)
+    candidate = await bucket_mgr.get(candidate_id)
 
-@pytest.mark.asyncio
-async def test_high_importance_counter_matches_breath_audit_scope():
-    """Regression: the quota warning must not report 89 when only 18 are auditable."""
-    rows = [
-        *[_quota_row(f"ordinary-{index}") for index in range(18)],
-        *[
-            _quota_row(f"forgotten-{index}", dont_surface=True)
-            for index in range(50)
-        ],
-        *[_quota_row(f"feel-{index}", bucket_type="feel") for index in range(11)],
-        *[_quota_row(f"plan-{index}", bucket_type="plan") for index in range(10)],
-    ]
-    install_runtime(StaticBucketManager(rows))
-
-    assert len(rows) == 89
-    assert await count_high_importance() == 18
-
-
-@pytest.mark.asyncio
-async def test_high_importance_counter_counts_each_logical_bucket_id_once():
-    canonical = [_quota_row(f"bucket-{index}") for index in range(12)]
-    install_runtime(StaticBucketManager(canonical + canonical))
-
-    assert await count_high_importance() == 12
+    assert "protected 桶已达上限" in str(excinfo.value)
+    assert candidate["metadata"].get("protected", False) is False
+    assert candidate["metadata"]["importance"] == 5
+    assert await count_protected() == 1
 
 
 @pytest.mark.asyncio
-async def test_high_importance_counter_normalizes_legacy_metadata_per_row():
-    visible = _quota_row("visible")
-    text_false = _quota_row("text-false", pinned="false")
-    text_true = _quota_row("text-true", pinned="true")
-    permanent = _quota_row("permanent", bucket_type="permanent", importance="10")
-    corrupt = _quota_row("corrupt", importance="not-a-number")
-    tombstone = _quota_row("tombstone")
-    tombstone["metadata"]["tombstone"] = True
-    deleted = _quota_row("deleted")
-    deleted["metadata"]["deleted_at"] = "2026-01-01T00:00:00Z"
-    install_runtime(
-        StaticBucketManager(
-            [visible, text_false, text_true, permanent, corrupt, tombstone, deleted]
+async def test_restore_archived_protected_rejects_when_quota_is_full(bucket_mgr):
+    install_runtime(bucket_mgr, limits={"max_protected": 1})
+    archived_id = await bucket_mgr.create(
+        content="archived protected memory",
+        protected=True,
+    )
+    assert await bucket_mgr.archive(archived_id) is True
+    assert await count_protected() == 0
+
+    await bucket_mgr.create(content="active protected slot", protected=True)
+    assert await count_protected() == 1
+
+    result = await trace_core(archived_id, restore=True)
+    archived = await bucket_mgr.get_including_archive(archived_id)
+
+    assert "protected 桶已达上限" in result
+    assert archived["metadata"]["type"] == "archived"
+    assert archived["metadata"]["protected"] is True
+    assert await count_protected() == 1
+
+
+@pytest.mark.asyncio
+async def test_trace_restore_dirty_protected_anchor_requires_atomic_unprotect(
+    bucket_mgr,
+):
+    install_runtime(bucket_mgr)
+
+    archived_id = await bucket_mgr.create(
+        content="historical protected anchor conflict",
+        protected=True,
+    )
+    active = await bucket_mgr.get(archived_id)
+    active_path = Path(active["path"])
+    dirty_post = frontmatter.load(active_path)
+    dirty_post["anchor"] = True
+    active_path.write_text(frontmatter.dumps(dirty_post), encoding="utf-8")
+    assert await bucket_mgr.archive(archived_id) is True
+
+    with pytest.raises(ToolInputError) as 冲突:
+        await trace_core(archived_id, restore=True)
+    with pytest.raises(ToolInputError) as 缺importance:
+        await trace_core(
+            archived_id,
+            restore=True,
+            protected=0,
         )
-    )
+    unchanged = await bucket_mgr.get_including_archive(archived_id)
 
-    # Explicit unpinned permanent is a first-class visible memory and counts;
-    # malformed/terminal rows do not zero the rest of the scan.
-    assert await count_high_importance() == 3
+    assert "restore=True, protected=0" in str(冲突.value)
+    assert "importance=1..10" in str(冲突.value)
+    assert "importance=1..10" in str(缺importance.value)
+    assert unchanged["metadata"]["type"] == "archived"
+    assert unchanged["metadata"]["protected"] is True
+    assert unchanged["metadata"]["anchor"] is True
 
-
-@pytest.mark.asyncio
-async def test_trace_restore_hidden_high_importance_reserves_slot(
-    bucket_mgr,
-    monkeypatch,
-):
-    install_runtime(bucket_mgr)
-    monkeypatch.setattr("tools._common._HIGH_IMP_HARD_CAP", 1)
-    monkeypatch.setattr("tools._common._HIGH_IMP_SOFT_WARN", 1)
-
-    await bucket_mgr.create(content="existing visible high", importance=9)
-    hidden_id = await bucket_mgr.create(content="hidden high", importance=10)
-    await bucket_mgr.update(hidden_id, dont_surface=True)
-
-    await trace_core(hidden_id, dont_surface=0)
-
-    restored = await bucket_mgr.get(hidden_id)
-    assert restored["metadata"]["dont_surface"] is False
-    assert restored["metadata"]["importance"] == 8
-    assert await count_high_importance() == 1
-
-
-@pytest.mark.asyncio
-async def test_merge_promotion_cannot_bypass_high_importance_cap(
-    bucket_mgr,
-    monkeypatch,
-):
-    install_runtime(bucket_mgr)
-    monkeypatch.setattr("tools._common._HIGH_IMP_HARD_CAP", 1)
-    monkeypatch.setattr("tools._common._HIGH_IMP_SOFT_WARN", 1)
-
-    await bucket_mgr.create(content="existing visible high", importance=9)
-    target_id = await bucket_mgr.create(content="merge target", importance=5)
-    target = await bucket_mgr.get(target_id)
-    target["score"] = 100.0
-
-    async def find_target(*_args, **_kwargs):
-        return [target]
-
-    monkeypatch.setattr(bucket_mgr, "search", find_target)
-    merged_id, merged, _warning = await merge_or_create(
-        content="new merged event",
-        tags=[],
+    result = await trace_core(
+        archived_id,
+        restore=True,
+        protected=0,
         importance=9,
-        domain=[],
-        valence=0.5,
-        arousal=0.3,
-        raw_merge=True,
-        source_tool="hold",
     )
+    restored = await bucket_mgr.get(archived_id)
 
-    persisted = await bucket_mgr.get(target_id)
-    assert merged is True
-    assert merged_id == target_id
-    assert persisted["metadata"]["importance"] == 8
-    assert await count_high_importance() == 1
+    assert result == f"已重新回忆并恢复记忆桶: {archived_id}"
+    assert restored["metadata"]["type"] == "dynamic"
+    assert restored["metadata"].get("protected", False) is False
+    assert restored["metadata"]["pinned"] is False
+    assert restored["metadata"]["anchor"] is True
+    assert restored["metadata"]["importance"] == 9
 
 
 @pytest.mark.asyncio
@@ -398,8 +284,6 @@ async def test_concurrent_merge_promotions_preserve_both_events_and_one_slot(
     monkeypatch,
 ):
     install_runtime(bucket_mgr)
-    monkeypatch.setattr("tools._common._HIGH_IMP_HARD_CAP", 1)
-    monkeypatch.setattr("tools._common._HIGH_IMP_SOFT_WARN", 1)
     target_id = await bucket_mgr.create(content="merge base", importance=5)
 
     async def find_target(*_args, **_kwargs):
@@ -431,4 +315,3 @@ async def test_concurrent_merge_promotions_preserve_both_events_and_one_slot(
     assert "concurrent event A" in persisted["content"]
     assert "concurrent event B" in persisted["content"]
     assert persisted["metadata"]["importance"] == 9
-    assert await count_high_importance() == 1

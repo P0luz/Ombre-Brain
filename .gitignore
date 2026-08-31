@@ -72,3 +72,7 @@ kernel/rust/**/target/
 kernel/rust/ombre-kernel/Cargo.lock
 .tmp/ombre-nodes-v2.yaml
 .tmp/
+
+# Local test protocols and generated smoke outputs — never publish.
+tmp_pas_docs_*/
+tmp_hnf1_pas_pair_smoke_*/

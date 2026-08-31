@@ -137,6 +137,7 @@ class AdvancedCommandBoundaryContract:
                     "plan",
                     "letter",
                     "letter_write",
+                    "letter_lock_update",
                     "i",
                     "create_trace",
                     "touch_trace",

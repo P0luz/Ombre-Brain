@@ -22,6 +22,9 @@ from typing import Any
 
 _SAFE_SUFFIX = re.compile(r"^\.[a-zA-Z0-9]{1,10}$")
 _DEFAULT_MAX_MEDIA_BYTES = 25 * 1024 * 1024
+# 与 bucket_manager._MEDIA_MAX_ITEMS 同一个契约。那边的截断发生在持久化**之后**，
+# 于是 10 万项会被逐个写完再截成 20 条（实测 35.9 秒）。上限得在动手之前就生效。
+_DEFAULT_MAX_MEDIA_ITEMS = 20
 
 
 class MediaPersistenceError(ValueError):
@@ -37,11 +40,58 @@ class MediaStore:
         media_dir: str,
         *,
         max_bytes: int = _DEFAULT_MAX_MEDIA_BYTES,
+        max_items: int = _DEFAULT_MAX_MEDIA_ITEMS,
     ) -> None:
         self.vault_dir = Path(vault_dir).resolve()
         self.media_dir = Path(media_dir).resolve()
         self.max_bytes = max(1, int(max_bytes))
+        self.max_items = max(1, int(max_items))
+        self.allowed_roots = self._default_allowed_roots()
         self.media_dir.mkdir(parents=True, exist_ok=True)
+
+    @staticmethod
+    def _default_allowed_roots() -> tuple[Path, ...]:
+        """``path`` 这条路只接受这些根目录下的文件。
+
+        为什么是临时目录：path 本来就是给「客户端刚上传、还躺在服务器临时
+        目录里」的文件用的（见模块 docstring，以及下面那句「不能把客户端临时
+        路径直接写进记忆」的错误文案）。在此之外的任何服务器文件都不该因为
+        一次 MCP 调用就被复制进 vault——那等于把记忆当成任意文件读取器。
+
+        原来这里什么都不查：只验了文件类型、符号链接和大小，``..`` 与绝对
+        路径畅通无阻。真机复现过一次读走 vault 外文件并落成记忆附件。
+        """
+        roots: list[Path] = []
+        # B108 在这里是反的：它防的是「往写死的 /tmp 里建临时文件」，而这行是
+        # 把 /tmp 列进**允许读取的白名单**——这个函数本身就是那道限制。
+        # 显式列它是因为 gettempdir() 在 macOS 上返回 /var/folders/...，
+        # 而容器里的客户端通常把上传文件放在 /tmp，只认 gettempdir() 会漏掉。
+        for candidate in (tempfile.gettempdir(), os.environ.get("TMPDIR") or "", "/tmp"):  # nosec B108
+            if not candidate:
+                continue
+            try:
+                resolved = Path(candidate).resolve()
+            except OSError:
+                continue
+            if resolved not in roots:
+                roots.append(resolved)
+        return tuple(roots)
+
+    def _reject_outside_allowed_roots(self, source: Path, raw_path: str) -> None:
+        try:
+            resolved = source.resolve()
+        except OSError as exc:
+            raise MediaPersistenceError(
+                f"媒体临时路径在 OB 服务器上不可读：{raw_path}。"
+                "请改传 data_base64，不能把客户端临时路径直接写进记忆。"
+            ) from exc
+        for root in self.allowed_roots:
+            if resolved == root or root in resolved.parents:
+                return
+        raise MediaPersistenceError(
+            f"媒体路径不在允许的临时目录内：{raw_path}。"
+            "请改传 data_base64——服务器上的文件不会因为一次调用就变成记忆附件。"
+        )
 
     @staticmethod
     def _suffix(name: str, mime_type: str) -> str:
@@ -99,6 +149,9 @@ class MediaStore:
             raise MediaPersistenceError(
                 f"媒体路径必须是普通文件：{raw_path}"
             )
+        # 放在符号链接检查之后：那一步已经保证最后一段不是链接，这里再按
+        # 解析后的真实路径判定它落在哪个根下。
+        self._reject_outside_allowed_roots(source, raw_path)
 
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
         flags |= getattr(os, "O_NONBLOCK", 0)
@@ -162,7 +215,12 @@ class MediaStore:
             )
         return data
 
-    def _persist_one(self, bucket_id: str, item: Any) -> dict[str, Any]:
+    def _load_one(self, item: Any) -> tuple[bytes, str, str]:
+        """把一项媒体读进内存。所有可失败的步骤都在这里，不写任何文件。
+
+        单独抽出来是为了让调用方能在真正落盘之前先问一句「这批读得进来吗」，
+        见 precheck()。
+        """
         entry = {"path": item} if isinstance(item, str) else dict(item or {})
         mime_type = str(entry.get("type") or entry.get("mime_type") or "")[:128]
         if entry.get("data_base64"):
@@ -173,6 +231,11 @@ class MediaStore:
             if not raw_path:
                 raise MediaPersistenceError("media 每项必须提供 path 或 data_base64。")
             data, source_name = self._read_path(raw_path)
+        return data, source_name, mime_type
+
+    def _persist_one(self, bucket_id: str, item: Any) -> dict[str, Any]:
+        entry = {"path": item} if isinstance(item, str) else dict(item or {})
+        data, source_name, mime_type = self._load_one(item)
         digest = hashlib.sha256(data).hexdigest()
         suffix = self._suffix(source_name, mime_type)
         target = self._stable_path(bucket_id, digest, suffix)
@@ -190,11 +253,36 @@ class MediaStore:
                 result[key] = str(value)[:limit]
         return result
 
+    async def precheck(self, media: Any) -> None:
+        """只读不写：确认这批媒体每一项都能取到字节。
+
+        为什么需要它：媒体的持久化发生在建桶那一步，比 hold 写原文证据晚。
+        等到那时才失败，原文已经落进 _sources，而给调用方的错误说的是
+        「未创建任何桶」——它据此重试，上一半副作用已经在那了。有它，
+        所有可失败的准备就都排在任何写入之前。
+
+        代价是 path 类媒体会被读两遍，所以调用方只在「确实要先写别的东西」
+        时才调它，普通 hold 不付这个成本。
+        """
+        if not media:
+            return
+        items = self._bounded_items(media)
+        await asyncio.to_thread(lambda: [self._load_one(item) for item in items])
+
+    def _bounded_items(self, media: Any) -> list[Any]:
+        """归一成列表并当场卡上限——超了就在读第一个字节之前拒绝。"""
+        items = media if isinstance(media, list) else [media]
+        if len(items) > self.max_items:
+            raise MediaPersistenceError(
+                f"media 一次最多 {self.max_items} 项，收到 {len(items)} 项；本次未保存任何媒体。"
+            )
+        return items
+
     async def persist(self, bucket_id: str, media: Any) -> list[dict[str, Any]]:
         """永久保存一项或多项媒体；任何一项失败则明确报错。"""
         if not media:
             return []
-        items = media if isinstance(media, list) else [media]
+        items = self._bounded_items(media)
         return await asyncio.to_thread(
             lambda: [self._persist_one(bucket_id, item) for item in items]
         )

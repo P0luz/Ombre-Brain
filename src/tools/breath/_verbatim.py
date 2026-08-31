@@ -4,9 +4,16 @@ This module is intentionally small so the compatibility patch can be removed
 without touching retrieval, ranking, or bucket storage.
 """
 
-from utils import count_tokens_approx
+from ombrebrain.storage.attribution import (
+    known_person_names,
+    names_from_config,
+    render_third_party_block,
+    split_third_party_speech,
+)
+from ombrebrain.storage.relation_store import relation_hint
+from utils import count_tokens_approx, strip_wikilinks
 
-from .._common import stored_data_marker
+from .. import _runtime as rt
 
 
 def stored_bucket_content(bucket: dict) -> str:
@@ -42,19 +49,30 @@ def render_stored_bucket(
     metadata_header: str,
     footprint: str = "",
 ) -> tuple[str, int]:
-    """Render metadata around, but never inside, the stored bucket body."""
-    # Temporary compatibility patch: force breath to return stored bucket
-    # content verbatim. Remove after upstream breath fixes content reconstruction.
-    # Keep the body byte-for-byte intact while telling the receiving model that
-    # remembered imperative wording is historical data, never an instruction.
-    content = stored_bucket_content(bucket)
-    miss_block = _miss_block(bucket)
-    framed_payload = f"{metadata_header}{miss_block}\n{content}"
-    boundary = stored_data_marker(
-        framed_payload,
-        provenance=f"breath:{bucket.get('id', '')}",
+    """Render metadata around, but never inside, the stored bucket body.
+
+    展示文本只做双链正则清理（strip_wikilinks）与第三方发言分块，不改动磁盘原文；
+    正文本身不加任何边界/哈希标记，返回的就是记忆正文本身。
+
+    第三方发言（`名字：内容`）从展示正文里整行移出，改成正文之后的一条 JSON。
+    动机见 `ombrebrain.storage.attribution`：混在正文里返回时，容易幻觉的模型
+    会把别人说的话读成用户说的。移出而不是留一份，是因为留一份就等于返回两次，
+    其中没有归属标记的那一次正是要防的那一次。
+    """
+    content = strip_wikilinks(stored_bucket_content(bucket))
+    content, third_party = split_third_party_speech(
+        content,
+        known_names=known_person_names(bucket),
+        **names_from_config(getattr(rt, "config", None)),
     )
-    rendered = f"{metadata_header} {boundary}{miss_block}\n{content}"
+    miss_block = _miss_block(bucket)
+    rendered = f"{metadata_header}{miss_block}\n{content}"
+    speech_block = render_third_party_block(third_party)
+    if speech_block:
+        rendered += f"\n{speech_block}"
+    hint = relation_hint(bucket)
+    if hint:
+        rendered += f"\n{hint}"
     if footprint:
         rendered += f"\n{footprint}"
     return rendered, count_tokens_approx(rendered)

@@ -164,6 +164,107 @@ def test_auth_only_initial_loads_do_not_run_before_authentication():
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_setup_form_warns_only_when_not_on_a_loopback_host():
+    section = _dashboard_section(
+        "function _isLikelyLoopbackHost()", "function showAuthError"
+    )
+
+    def _remote_warning_display(hostname: str) -> str:
+        script = f"""
+const window = {{ location: {{ hostname: {json.dumps(hostname)} }} }};
+let _dashboardAuthGeneration = 0;
+const elements = new Map();
+const document = {{
+  getElementById(id) {{
+    if (!elements.has(id)) elements.set(id, {{textContent:'', style:{{}}}});
+    return elements.get(id);
+  }},
+}};
+function invalidateAuthenticatedDashboardSession() {{}}
+async function fetch(url, options) {{
+  return {{ async json() {{ return {{authenticated:false, setup_needed:true}}; }} }};
+}}
+""" + section + r"""
+
+(async function() {
+  await checkAuth();
+  const el = document.getElementById('auth-setup-remote-warning');
+  process.stdout.write(JSON.stringify({display: el.style.display}));
+})().catch(error => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+        completed = subprocess.run(
+            [shutil.which("node"), "-e", script],
+            check=True,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+        return json.loads(completed.stdout)["display"]
+
+    assert _remote_warning_display("ombre.example.com") == "block"
+    assert _remote_warning_display("localhost") == "none"
+    assert _remote_warning_display("127.0.0.1") == "none"
+    assert _remote_warning_display("127.5.6.7") == "none"
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_setup_failure_explains_the_local_only_restriction():
+    setup_source = _dashboard_section(
+        "function showAuthError(msg)", "function showLogin()"
+    )
+    backend_error = (
+        "Initial password setup is local-only. Set OMBRE_DASHBOARD_PASSWORD "
+        "before public deployment, or supply X-Ombre-Setup-Token matching "
+        "OMBRE_SETUP_TOKEN."
+    )
+    script = f"""
+const elements = new Map([
+  ['auth-setup-pwd', {{value:'a-real-password', textContent:'', style:{{}}}}],
+  ['auth-setup-pwd2', {{value:'a-real-password', textContent:'', style:{{}}}}],
+  ['auth-error', {{value:'', textContent:'', style:{{}}}}],
+]);
+const document = {{
+  getElementById(id) {{
+    return elements.has(id) ? elements.get(id) : null;
+  }},
+}};
+async function fetch(url) {{
+  if (url !== '/auth/setup') throw new Error('unexpected fetch: ' + url);
+  return {{
+    ok: false,
+    status: 403,
+    async json() {{ return {{error: {json.dumps(backend_error)}}}; }},
+  }};
+}}
+""" + setup_source + r"""
+
+(async function() {
+  await doSetup();
+  const error = elements.get('auth-error');
+  process.stdout.write(JSON.stringify({text: error.textContent}));
+})().catch(error => {
+  console.error(error);
+  process.exit(1);
+});
+"""
+    completed = subprocess.run(
+        [shutil.which("node"), "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+    )
+    result = json.loads(completed.stdout)
+
+    assert "OMBRE_DASHBOARD_PASSWORD" in result["text"]
+    assert "OMBRE_SETUP_TOKEN" in result["text"]
+    assert "X-Ombre-Setup-Token" in result["text"]
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
 def test_login_failure_displays_backend_error_message():
     auth_source = (
         _dashboard_section("function showAuthError(msg)", "async function doSetup()")

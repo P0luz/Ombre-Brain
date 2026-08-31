@@ -232,7 +232,14 @@ async def test_compress_client_rebuild_failure_is_not_reported_as_success(
     assert os.environ["OMBRE_COMPRESS_BASE_URL"] == "https://old.example/v1"
 
 
-def test_v1_environment_names_remain_compatible(monkeypatch, tmp_path):
+def test_v1_environment_names_remain_compatible(request, monkeypatch, tmp_path):
+    # load_config() 把 legacy PASSWORD 映射成 OMBRE_DASHBOARD_PASSWORD 时是直接写
+    # os.environ 的。monkeypatch.delenv 在变量原本就不存在时不记录任何东西，于是
+    # 还原不了这个「测试期间才被创建」的变量——它会泄漏到本次 session 的后续用例，
+    # 让 web/auth 的用例在随机序下变红（env 密码模式会让请求在 JSON 校验前短路）。
+    request.addfinalizer(
+        lambda: os.environ.pop("OMBRE_DASHBOARD_PASSWORD", None)
+    )
     monkeypatch.delenv("OMBRE_COMPRESS_API_KEY", raising=False)
     monkeypatch.delenv("OMBRE_COMPRESS_BASE_URL", raising=False)
     monkeypatch.delenv("OMBRE_DASHBOARD_PASSWORD", raising=False)
@@ -317,3 +324,85 @@ async def test_embedding_provider_tuple_rebuilds_and_persists_once(
     ]
     assert persisted_configs[0]["embedding"]["model"] == "BAAI/bge-m3"
     assert persisted_configs[0]["embedding"]["api_format"] == "openai_compat"
+
+
+# ============================================================
+# ai_name 的两级来源：config.yaml（随 vault 持久化）→ AI_NAME 环境变量 → "AI"
+#
+# 为什么 config 排在环境变量前面：Docker 下 config.yaml 落在挂载的 vault 里，
+# 容器重建/重启都不丢；环境变量得靠 compose 逐个透传，漏一个就静默退回默认名
+# （带锁 Letter 曾因此在 Docker 上完全无法创建）。
+# ============================================================
+
+def _reset_ai_name_cache():
+    """_config_ai_name 按 (路径, mtime) 缓存，测试之间必须清掉避免互相污染。"""
+    import utils
+    utils._ai_name_cache = None
+
+
+def _point_config_at(monkeypatch, path):
+    monkeypatch.setenv("OMBRE_CONFIG_PATH", str(path))
+    _reset_ai_name_cache()
+
+
+def test_config_ai_name_wins_over_env(monkeypatch, tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('ai_name: "Ombre"\n', encoding="utf-8")
+    monkeypatch.setenv("AI_NAME", "从环境变量来的名字")
+    _point_config_at(monkeypatch, cfg)
+
+    assert get_ai_name() == "Ombre"
+
+
+def test_empty_config_ai_name_falls_back_to_env(monkeypatch, tmp_path):
+    """默认空值：config 里留空表示「没配」，行为与改动前完全一致。"""
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('ai_name: ""\n', encoding="utf-8")
+    monkeypatch.setenv("AI_NAME", "环境变量兜底")
+    _point_config_at(monkeypatch, cfg)
+
+    assert get_ai_name() == "环境变量兜底"
+
+
+def test_no_config_and_no_env_falls_back_to_ai(monkeypatch, tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("log_level: INFO\n", encoding="utf-8")
+    monkeypatch.delenv("AI_NAME", raising=False)
+    _point_config_at(monkeypatch, cfg)
+
+    assert get_ai_name() == "AI"
+
+
+def test_missing_config_file_does_not_break_signing(monkeypatch, tmp_path):
+    """配置文件不存在时不能抛异常——署名逻辑遍布 letter/prompt/Dashboard。"""
+    monkeypatch.setenv("AI_NAME", "仍然可用")
+    _point_config_at(monkeypatch, tmp_path / "不存在的.yaml")
+
+    assert get_ai_name() == "仍然可用"
+
+
+def test_broken_config_falls_back_instead_of_raising(monkeypatch, tmp_path):
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text("这不是: 合法的: yaml: [[[\n", encoding="utf-8")
+    monkeypatch.setenv("AI_NAME", "坏配置也要能署名")
+    _point_config_at(monkeypatch, cfg)
+
+    assert get_ai_name() == "坏配置也要能署名"
+
+
+def test_config_edit_invalidates_cache(monkeypatch, tmp_path):
+    """改完配置必须立刻生效，不能被 mtime 缓存挡住。"""
+    import os as _os
+
+    cfg = tmp_path / "config.yaml"
+    cfg.write_text('ai_name: "旧名字"\n', encoding="utf-8")
+    monkeypatch.delenv("AI_NAME", raising=False)
+    _point_config_at(monkeypatch, cfg)
+    assert get_ai_name() == "旧名字"
+
+    cfg.write_text('ai_name: "新名字"\n', encoding="utf-8")
+    # 同秒内改写可能 mtime 不变，显式推进以确保测的是缓存失效而不是时钟精度
+    stat = _os.stat(cfg)
+    _os.utime(cfg, (stat.st_atime + 5, stat.st_mtime + 5))
+
+    assert get_ai_name() == "新名字"

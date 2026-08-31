@@ -10,6 +10,7 @@ from tools.breath._verbatim import render_stored_bucket
 from tools.breath.importance import surface_by_importance
 from tools.breath.search import surface_search
 from tools.breath.surface import surface_default
+from utils import strip_wikilinks
 
 
 class ExplodingDehydrator:
@@ -70,6 +71,30 @@ def _install_runtime(bucket_mgr, dehydrator=None):
     rt.mark_op = None
     rt.record_v3_tool_event = lambda *_args, **_kwargs: None
     return rt.dehydrator
+
+
+@pytest.mark.asyncio
+async def test_dispatch_keeps_default_breath_budget_and_allows_explicit_headroom(
+    monkeypatch,
+):
+    _install_runtime(OrderedBucketManager([]))
+    seen = []
+
+    async def capture_default(
+        *, max_results, max_tokens, tag_filter, created_from=None, created_to=None
+    ):
+        seen.append(max_tokens)
+        return ""
+
+    monkeypatch.setattr("tools.breath.surface_default", capture_default)
+
+    await dispatch()
+    rt.config["surfacing"]["breath_max_tokens"] = 10_000
+    await dispatch()
+    await dispatch(max_tokens=35_000)
+    await dispatch(max_tokens=50_000)
+
+    assert seen == [10_000, 10_000, 35_000, 40_000]
 
 
 async def _search(query, **overrides):
@@ -162,12 +187,15 @@ async def test_query_multiple_buckets_return_each_body_exactly(bucket_mgr, monke
         for content in contents
     ]
     stored = {bucket_id: (await bucket_mgr.get(bucket_id))["content"] for bucket_id in ids}
+    # 展示文本只做双链正则清理（strip_wikilinks），不改磁盘原文：
+    # 磁盘上 [[原始双链]] 仍保留括号，但 breath 返回的展示文本会去掉它们。
+    displayed = {bucket_id: strip_wikilinks(content) for bucket_id, content in stored.items()}
     dehydrator = _install_runtime(bucket_mgr)
     monkeypatch.setattr("tools.breath.search.random.random", lambda: 1.0)
 
     output = await _search("群星校验词")
 
-    for bucket_id, expected in stored.items():
+    for bucket_id, expected in displayed.items():
         actual = _returned_body(output, bucket_id, len(expected))
         assert actual == expected
         assert _sha256(actual) == _sha256(expected)
@@ -185,6 +213,53 @@ async def test_catalog_still_returns_metadata_without_body(bucket_mgr):
     assert "目录校验 | 测试 | 9" in output
     assert body not in output
     assert dehydrator.calls == 0
+
+
+@pytest.mark.asyncio
+async def test_breath_never_exposes_source_evidence(
+    bucket_mgr, monkeypatch
+):
+    source_ref = "src_" + "a" * 64
+    body = "只返回这条记忆正文，不自动展开背后的聊天原文。"
+    bucket_id = await bucket_mgr.create(
+        content=body,
+        title="京都计划",
+        domain=["旅行"],
+        importance=8,
+        source_refs=[{"ref": source_ref, "ranges": [[1, 3]]}],
+    )
+    _install_runtime(bucket_mgr)
+    monkeypatch.setattr("tools.breath.search.random.random", lambda: 1.0)
+
+    output = await dispatch(query=bucket_id, max_tokens=10000)
+
+    assert body in output
+    # 原文回顾能力已删除：不再提示原文存在，也绝不泄漏 ref
+    assert "source_available" not in output
+    assert source_ref not in output
+
+
+@pytest.mark.asyncio
+async def test_catalog_never_exposes_source_evidence(bucket_mgr):
+    source_ref = "src_" + "b" * 64
+    body = "目录里绝不能出现的原文或记忆正文。"
+    await bucket_mgr.create(
+        content=body,
+        name="京都旅行",
+        title="京都旅行",
+        domain=["旅行"],
+        importance=9,
+        source_refs=[{"ref": source_ref, "ranges": [[1, 1]]}],
+    )
+    _install_runtime(bucket_mgr)
+
+    output = await dispatch(catalog=True)
+
+    assert "京都旅行 | 旅行 | 9" in output
+    # 原文回顾能力已删除：目录不再提示原文存在，也绝不泄漏 ref
+    assert "source_available" not in output
+    assert body not in output
+    assert source_ref not in output
 
 
 @pytest.mark.asyncio
@@ -213,7 +288,7 @@ async def test_token_budget_omits_whole_bucket_instead_of_truncating(monkeypatch
     assert "[bucket_id:second]" not in output
     assert second["content"][:20] not in output
     assert "token 预算不足" in output
-    assert manager.touched == ["first"]
+    assert manager.touched == []
     assert dehydrator.calls == 0
 
 
@@ -258,6 +333,177 @@ async def test_default_surface_skips_oversized_core_and_keeps_later_core(monkeyp
     assert later["content"] in output
     assert "[bucket_id:oversized-core]" not in output
     assert "token 预算不足" in output
+
+
+@pytest.mark.asyncio
+async def test_default_surface_skips_ordinary_results_when_core_is_omitted(monkeypatch):
+    first_core = {
+        "id": "first-core",
+        "content": "First core rule fits completely.",
+        "metadata": {
+            "type": "permanent",
+            "importance": 10,
+            "pinned": True,
+            "domain": [],
+        },
+    }
+    oversized_core = {
+        "id": "oversized-core",
+        "content": "Oversized core rule " * 400,
+        "metadata": {
+            "type": "permanent",
+            "importance": 10,
+            "pinned": True,
+            "domain": [],
+        },
+    }
+    ordinary = {
+        "id": "ordinary",
+        "content": "Ordinary memory would fit the remaining budget.",
+        "metadata": {
+            "type": "dynamic",
+            "importance": 10,
+            "activation_count": 1,
+            "domain": [],
+        },
+    }
+    passive = {
+        "id": "passive",
+        "content": "Passive memory must also stay hidden.",
+        "metadata": {
+            "type": "dynamic",
+            "importance": 9,
+            "activation_count": 1,
+            "last_active": "2020-01-01T00:00:00",
+            "domain": [],
+        },
+    }
+    accidental = {
+        "id": "accidental",
+        "content": "Accidental memory must stay hidden too.",
+        "metadata": {
+            "type": "dynamic",
+            "importance": 5,
+            "resolved": True,
+            "domain": [],
+        },
+    }
+    manager = OrderedBucketManager(
+        [first_core, oversized_core, ordinary, passive, accidental]
+    )
+    _install_runtime(manager)
+    monkeypatch.setattr("tools.breath.surface.random.random", lambda: 0.0)
+    _, first_core_cost = render_stored_bucket(
+        first_core,
+        "📌 [核心准则] [bucket_id:first-core]",
+        "👣 Footprint：暂时无法读取",
+    )
+    _, oversized_core_cost = render_stored_bucket(
+        oversized_core,
+        "📌 [核心准则] [bucket_id:oversized-core]",
+        "👣 Footprint：暂时无法读取",
+    )
+    _, ordinary_cost = render_stored_bucket(
+        ordinary,
+        "[权重:10.00] [bucket_id:ordinary]",
+        "👣 Footprint：暂时无法读取",
+    )
+
+    output = await surface_default(
+        max_results=1,
+        max_tokens=first_core_cost + ordinary_cost,
+        tag_filter=[],
+    )
+
+    assert "[bucket_id:first-core]" in output
+    assert first_core["content"] in output
+    assert "[bucket_id:oversized-core]" not in output
+    assert "[bucket_id:ordinary]" not in output
+    assert "[bucket_id:passive]" not in output
+    assert "[bucket_id:accidental]" not in output
+    assert "token 预算不足" in output
+    assert "核心准则" in output
+    assert "普通浮现已跳过" in output
+    assert f"required≈{first_core_cost + oversized_core_cost} tokens" in output
+    assert f"limit={first_core_cost + ordinary_cost} tokens" in output
+    assert "omitted=1" in output
+    assert "可由用户明确提高" in output
+
+
+@pytest.mark.asyncio
+async def test_default_surface_reports_hard_cap_when_pins_exceed_40000():
+    oversized_core = {
+        "id": "hard-cap-core",
+        "content": "Oversized core rule " * 10000,
+        "metadata": {
+            "type": "permanent",
+            "importance": 10,
+            "pinned": True,
+            "domain": [],
+        },
+    }
+    _install_runtime(OrderedBucketManager([oversized_core]))
+
+    output = await surface_default(
+        max_results=10,
+        max_tokens=40_000,
+        tag_filter=[],
+    )
+
+    assert "required≈" in output
+    assert "limit=40000 tokens" in output
+    assert "omitted=1" in output
+    assert "已达到当前版本 40000 token 安全上限" in output
+    assert "可由用户明确提高" not in output
+
+
+@pytest.mark.asyncio
+async def test_default_surface_keeps_ordinary_results_when_all_core_fits(monkeypatch):
+    core = {
+        "id": "fitting-core",
+        "content": "Fitting core rule remains complete.",
+        "metadata": {
+            "type": "permanent",
+            "importance": 10,
+            "pinned": True,
+            "domain": [],
+        },
+    }
+    ordinary = {
+        "id": "fitting-ordinary",
+        "content": "Ordinary memory remains available when pins fit.",
+        "metadata": {
+            "type": "dynamic",
+            "importance": 9,
+            "activation_count": 1,
+            "domain": [],
+        },
+    }
+    manager = OrderedBucketManager([core, ordinary])
+    _install_runtime(manager)
+    monkeypatch.setattr("tools.breath.surface.random.random", lambda: 1.0)
+    _, core_cost = render_stored_bucket(
+        core,
+        "📌 [核心准则] [bucket_id:fitting-core]",
+        "👣 Footprint：暂时无法读取",
+    )
+    _, ordinary_cost = render_stored_bucket(
+        ordinary,
+        "[权重:9.00] [bucket_id:fitting-ordinary]",
+        "👣 Footprint：暂时无法读取",
+    )
+
+    output = await surface_default(
+        max_results=10,
+        max_tokens=core_cost + ordinary_cost,
+        tag_filter=[],
+    )
+
+    assert "[bucket_id:fitting-core]" in output
+    assert core["content"] in output
+    assert "[bucket_id:fitting-ordinary]" in output
+    assert ordinary["content"] in output
+    assert "普通浮现已跳过" not in output
 
 
 @pytest.mark.asyncio

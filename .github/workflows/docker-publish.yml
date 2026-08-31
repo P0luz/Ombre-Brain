@@ -24,6 +24,14 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Verify hot-update manifest
+        run: python deploy/gen_update_manifest.py --check
+
       - name: Read version from VERSION file
         id: ver
         run: echo "version=$(tr -d '[:space:]' < VERSION)" >> "$GITHUB_OUTPUT"

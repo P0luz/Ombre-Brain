@@ -17,6 +17,7 @@ def _bucket(**metadata):
     [
         ({"dont_surface": True}, "dont_surface"),
         ({"anchor": True}, "anchor"),
+        ({"protected": True}, "protected"),
         ({"type": "feel"}, "private_type"),
         ({"type": "plan"}, "private_type"),
         ({"type": "letter"}, "private_type"),
@@ -71,6 +72,33 @@ def test_digested_visibility_depends_on_explicit_or_passive_mode(
         assert "digested" not in decision.reasons
     else:
         assert "digested" in decision.reasons
+
+
+@pytest.mark.parametrize("protected", [True, "true"])
+@pytest.mark.parametrize(
+    ("mode", "allowed"),
+    [
+        ("spontaneous", False),
+        ("dream", False),
+        ("search", True),
+        ("importance", True),
+    ],
+)
+def test_protected_visibility_depends_on_explicit_or_passive_mode(
+    protected,
+    mode,
+    allowed,
+):
+    decision = SurfacePolicyVM.default().evaluate_bucket(
+        _bucket(protected=protected),
+        mode=mode,
+    )
+
+    assert decision.allowed is allowed
+    if allowed:
+        assert "protected" not in decision.reasons
+    else:
+        assert decision.reasons == ("protected",)
 
 
 @pytest.mark.parametrize("mode", ["spontaneous", "search", "importance"])
@@ -132,6 +160,7 @@ class FakeBucketManager:
             _bucket(id="visible", importance=8),
             _bucket(id="hidden", importance=10, dont_surface=True),
             _bucket(id="digested", importance=10, digested=True),
+            _bucket(id="protected", importance=10, protected="true"),
             _bucket(id="archived", importance=10, type="archived"),
         ]
 

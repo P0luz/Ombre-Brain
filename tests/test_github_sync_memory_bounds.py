@@ -195,7 +195,7 @@ async def test_manifest_payload_limit_fails_before_any_tree_write(monkeypatch):
 @pytest.mark.asyncio
 async def test_manual_and_scheduled_syncs_cannot_overlap(monkeypatch):
     sync = GitHubSync(token="t", repo="owner/repo")
-    monkeypatch.setattr(sync, "_collect_files", lambda _root: {"a.md": b"x"})
+    monkeypatch.setattr(sync, "_collect_files", lambda _root, _extra=None: {"a.md": b"x"})
     active = 0
     peak = 0
 

@@ -73,3 +73,58 @@ def test_vault_health_reports_parse_errors_and_duplicate_ids(tmp_path):
     assert report["status"] == "error"
     assert report["markdown"]["duplicate_id_count"] == 1
     assert report["markdown"]["parse_error_count"] == 1
+
+
+# ============================================================
+# 代码树不是记忆：vault 内以 _ 开头的目录必须跳过
+#
+# CODE_DIR 默认就在 <vault>/_app。3.0.0 起 entrypoint 会把 docs/ 与 kernel/
+# 一起播种进去，而 _app/_prev 这个崩溃回滚点又保留了上一版的同名副本——
+# 同一份 CLAUDE_PROMPT.md 于是在两个路径各出现一次。不跳过的话它们会被当成
+# 「同一个 id 的重复桶」，让完整性诊断整体报 error，掩盖真正的记忆损坏。
+# ============================================================
+
+def test_code_tree_markdown_is_not_counted_as_memory(tmp_path):
+    vault = tmp_path / "vault"
+    _write(vault / "dynamic" / "general" / "Memory_aaa.md", "aaa")
+
+    # 播种进来的代码树：docs 与 kernel 里的 .md，外加回滚点里的同名副本
+    for base in ("_app", "_app/_prev"):
+        for rel in ("docs/CLAUDE_PROMPT.md", "docs/adr/ADR-0001.md",
+                    "kernel/rust/ombre-kernel/README.md"):
+            target = vault / base / rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_text("# 文档，不是记忆\n", encoding="utf-8")
+
+    health = inspect_vault(str(vault), "")
+    markdown = health["markdown"]
+
+    assert markdown["duplicate_id_count"] == 0, markdown["duplicate_ids"]
+    assert markdown["file_count"] == 1, "只有真正的记忆桶应计入"
+    assert markdown["unique_ids"] == 1
+    assert markdown["parse_error_count"] == 0
+
+
+def test_source_evidence_dir_is_also_skipped(tmp_path):
+    vault = tmp_path / "vault"
+    _write(vault / "dynamic" / "general" / "Memory_bbb.md", "bbb")
+    stray = vault / "_sources" / "notes.md"
+    stray.parent.mkdir(parents=True, exist_ok=True)
+    stray.write_text("# 原文层里的散落文件\n", encoding="utf-8")
+
+    markdown = inspect_vault(str(vault), "")["markdown"]
+
+    assert markdown["file_count"] == 1
+    assert markdown["duplicate_id_count"] == 0
+
+
+def test_real_duplicate_memory_ids_are_still_reported(tmp_path):
+    """跳过内部目录不能把真正的重复记忆一起放过。"""
+    vault = tmp_path / "vault"
+    _write(vault / "dynamic" / "general" / "Memory_ccc.md", "ccc")
+    _write(vault / "archive" / "Memory_ccc_copy.md", "ccc")
+
+    markdown = inspect_vault(str(vault), "")["markdown"]
+
+    assert markdown["duplicate_id_count"] == 1
+    assert "ccc" in markdown["duplicate_ids"]

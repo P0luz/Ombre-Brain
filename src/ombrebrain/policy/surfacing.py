@@ -66,13 +66,34 @@ class SurfacePolicyVM:
         if metadata.get("deleted_at"):
             reasons.append("deleted")
 
+        # 核心准则与坐标系不可被消化。
+        #
+        # `digested` 的语义是"这条我消化过了，别再自动浮现"，`pinned` /
+        # `permanent` 的语义是"这是核心准则，必须始终在场"，`anchor` 的语义是
+        # "这是我的坐标系"。两个标记打在同一个桶上时，后者赢——人生中最重要的
+        # 锚点不可被消化。
+        #
+        # 实际发生过：12 条核心准则里有 2 条带着 digested，于是 breath() 只返回
+        # 10 条。看起来像被普通桶挤掉了（旁边确实有普通桶），实际是压根没进候选。
+        # 这类静默缺失最难发现——没有报错，只是少了两条。
+        #
+        # 注意这里只豁免 digested。`anchor` 自身仍然不主动浮现（下面那条规则
+        # 保留），豁免的意思是"它不会因为被消化过而从它该出现的地方消失"。
+        _never_digested = (
+            _truthy(metadata.get("pinned"))
+            or bucket_type == "permanent"
+            or _truthy(metadata.get("anchor"))
+        )
+
         if normalized_mode in (SurfaceMode.SPONTANEOUS, SurfaceMode.DREAM):
             if _truthy(metadata.get("dont_surface")):
                 reasons.append("dont_surface")
-            if _truthy(metadata.get("digested")):
+            if _truthy(metadata.get("digested")) and not _never_digested:
                 reasons.append("digested")
             if _truthy(metadata.get("anchor")):
                 reasons.append("anchor")
+            if _truthy(metadata.get("protected")):
+                reasons.append("protected")
             if bucket_type in self.private_types:
                 reasons.append("private_type")
         elif normalized_mode == SurfaceMode.IMPORTANCE:

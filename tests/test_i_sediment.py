@@ -14,8 +14,11 @@ from datetime import datetime
 
 import pytest
 
+from errors import ToolInputError
+
 from tools import dream
 from tools import _runtime as rt
+from tools.dream.hints import build_crystal_hint
 from tools.i import core as i_core
 from tools.i.core import I_CANDIDATE_TAG, I_PROMOTE_THRESHOLD
 
@@ -123,14 +126,33 @@ async def test_write_creates_ordinary_candidate_not_a_self_entry(env):
 
 
 @pytest.mark.asyncio
+async def test_write_reports_candidate_stage_commit_failure(env, monkeypatch):
+    original_update = env.update
+
+    async def reject_stage_write(bucket_id: str, **kwargs) -> bool:
+        if "i_stage" in kwargs:
+            return False
+        return await original_update(bucket_id, **kwargs)
+
+    monkeypatch.setattr(env, "update", reject_stage_write)
+
+    out = await i_core.i_core(content="我觉得这条状态写入会失败。")
+
+    assert "候选状态标记失败" in out
+    assert "接下来 3 次 dream" not in out
+    assert not i_core.is_pending_candidate(next(iter(env.buckets.values())))
+
+
+@pytest.mark.asyncio
 async def test_promote_rejected_before_enough_dream_witnesses(env):
     await i_core.i_core(content="我觉得我更信任慢下来的判断。")
     bucket_id = next(iter(env.buckets))
 
-    out = await i_core.i_core(promote=bucket_id)
+    with pytest.raises(ToolInputError) as excinfo:
+        await i_core.i_core(promote=bucket_id)
 
-    assert "还不够" in out
-    assert f"0/{I_PROMOTE_THRESHOLD}" in out
+    assert "还不够" in str(excinfo.value)
+    assert f"0/{I_PROMOTE_THRESHOLD}" in str(excinfo.value)
     assert all(b["metadata"]["type"] != "i" for b in env.buckets.values())
 
 
@@ -179,9 +201,10 @@ async def test_promote_can_use_refined_wording(env):
 async def test_non_candidate_bucket_cannot_jump_into_i(env):
     plain = await env.create("一条普通记忆")
 
-    out = await i_core.i_core(promote=plain)
+    with pytest.raises(ToolInputError) as excinfo:
+        await i_core.i_core(promote=plain)
 
-    assert "不是 I 候选" in out
+    assert '不是 I 候选' in str(excinfo.value)
     assert all(b["metadata"]["type"] != "i" for b in env.buckets.values())
 
 
@@ -199,6 +222,91 @@ async def test_dream_shows_candidates_and_records_one_witness_per_day(env):
     # 同一天再做一次梦不该把念头刷成沉淀。
     await dream.dispatch(window_hours=48)
     assert env.buckets[bucket_id]["metadata"]["i_dream_dates"] == [today]
+
+
+@pytest.mark.asyncio
+async def test_pending_candidate_outside_recent_window_still_gets_witnessed(env):
+    """A pending I candidate must not become impossible to promote with age."""
+    await i_core.i_core(content="我觉得这条旧候选仍需要完成沉淀。")
+    bucket_id = next(iter(env.buckets))
+    old = "2026-08-01T00:00:00"
+    await env.update(bucket_id, created=old, last_active=old)
+
+    out = await dream.dispatch(window_hours=48)
+
+    assert "我写下的「我觉得」（待沉淀）" in out
+    assert bucket_id in out
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert env.buckets[bucket_id]["metadata"]["i_dream_dates"] == [today]
+
+
+@pytest.mark.asyncio
+async def test_candidate_visible_in_recent_counts_when_i_section_is_omitted(
+    env,
+    monkeypatch,
+):
+    """A candidate seen in the ordinary recent section is still witnessed."""
+    monkeypatch.setattr(
+        rt, "config", {"surfacing": {"dream_max_tokens": 1000}}, raising=False
+    )
+    await i_core.i_core(content="初始候选")
+    bucket_id = next(iter(env.buckets))
+    marker = "关键候选正文"
+    # The complete recent block fits, but repeating it in the dedicated I
+    # section at the end would exceed the total dream budget.
+    env.buckets[bucket_id]["content"] = marker * 75
+
+    out = await dream.dispatch(window_hours=48)
+
+    assert bucket_id in out
+    assert marker in out
+    assert "我写下的「我觉得」（待沉淀）" not in out
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert env.buckets[bucket_id]["metadata"]["i_dream_dates"] == [today]
+
+
+@pytest.mark.asyncio
+async def test_visible_candidate_witness_persists_to_markdown(
+    bucket_mgr,
+    test_config,
+    monkeypatch,
+):
+    """Exercise the regression through the real Markdown BucketManager."""
+    from bucket_manager import BucketManager
+
+    monkeypatch.setattr(rt, "bucket_mgr", bucket_mgr, raising=False)
+    monkeypatch.setattr(rt, "decay_engine", _NoopDecay(), raising=False)
+    monkeypatch.setattr(rt, "embedding_engine", _DisabledEmbedding(), raising=False)
+    monkeypatch.setattr(
+        rt, "config", {"surfacing": {"dream_max_tokens": 1000}}, raising=False
+    )
+    monkeypatch.setattr(rt, "mark_op", None, raising=False)
+    monkeypatch.setattr(rt, "fire_webhook", None, raising=False)
+
+    await i_core.i_core(content="初始候选")
+    pending = [
+        bucket
+        for bucket in await bucket_mgr.list_all(include_archive=False)
+        if i_core.is_pending_candidate(bucket)
+    ]
+    assert len(pending) == 1
+    bucket_id = pending[0]["id"]
+    marker = "真实落盘候选"
+    assert await bucket_mgr.update(bucket_id, content=marker * 75)
+
+    out = await dream.dispatch(window_hours=48)
+
+    assert bucket_id in out
+    assert marker in out
+    assert "我写下的「我觉得」（待沉淀）" not in out
+
+    # A fresh manager proves the witness was committed to frontmatter rather
+    # than only mutating a fake/in-memory bucket object.
+    reloaded = BucketManager(test_config, embedding_engine=None)
+    persisted = await reloaded.get(bucket_id)
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert persisted is not None
+    assert persisted["metadata"]["i_dream_dates"] == [today]
 
 
 @pytest.mark.asyncio
@@ -231,6 +339,107 @@ async def test_dream_surfaces_collisions_with_existing_self_knowledge(env, monke
 
 
 @pytest.mark.asyncio
+async def test_pending_candidate_visible_as_collision_is_witnessed(env, monkeypatch):
+    await i_core.i_core(content="我觉得新的候选正在碰撞。")
+    primary_id = next(iter(env.buckets))
+    await i_core.i_core(content="我觉得旧候选仍然构成对照。")
+    collision_id = list(env.buckets)[-1]
+    # Keep the second candidate out of the 48-hour primary list while leaving
+    # it eligible as collision material. Its structured block is still visible
+    # in the final dream, so it must be witnessed under the public contract.
+    old = "2026-07-01T00:00:00"
+    await env.update(collision_id, created=old, last_active=old)
+    monkeypatch.setattr(
+        rt,
+        "embedding_engine",
+        _StubEmbedding({primary_id: [1.0, 0.0], collision_id: [1.0, 0.0]}),
+        raising=False,
+    )
+
+    out = await dream.dispatch(window_hours=48)
+
+    assert primary_id in out
+    assert collision_id in out
+    today = datetime.now().strftime("%Y-%m-%d")
+    assert env.buckets[primary_id]["metadata"]["i_dream_dates"] == [today]
+    assert env.buckets[collision_id]["metadata"]["i_dream_dates"] == [today]
+
+
+@pytest.mark.asyncio
+async def test_protected_i_candidate_and_collision_material_stay_out_of_dream(
+    env,
+    monkeypatch,
+):
+    await i_core.i_core(content="我觉得可见候选需要继续核查。")
+    visible_id = next(iter(env.buckets))
+    await i_core.i_core(content="受保护 I 候选正文不得进入 dream。")
+    protected_candidate_id = list(env.buckets)[-1]
+    await env.update(protected_candidate_id, protected=True)
+
+    protected_memory_id = await env.create("受保护普通碰撞正文不得进入 dream。")
+    await env.update(protected_memory_id, protected=True)
+    protected_i_id = await env.create(
+        "受保护正式 I 正文不得进入 dream。",
+        bucket_type="i",
+    )
+    await env.update(
+        protected_i_id,
+        protected="true",
+        tags=["__i__"],
+        dont_surface=True,
+    )
+    monkeypatch.setattr(
+        rt,
+        "embedding_engine",
+        _StubEmbedding(
+            {
+                visible_id: [1.0, 0.0],
+                protected_candidate_id: [1.0, 0.0],
+                protected_memory_id: [1.0, 0.0],
+                protected_i_id: [1.0, 0.0],
+            }
+        ),
+        raising=False,
+    )
+
+    out = await dream.dispatch(window_hours=48)
+
+    assert "我觉得可见候选需要继续核查" in out
+    assert "受保护 I 候选正文不得进入 dream" not in out
+    assert "受保护普通碰撞正文不得进入 dream" not in out
+    assert "受保护正式 I 正文不得进入 dream" not in out
+    assert env.buckets[protected_candidate_id]["metadata"].get("i_dream_dates") == []
+
+
+@pytest.mark.asyncio
+async def test_crystal_hint_ignores_protected_feel(env, monkeypatch):
+    protected_id = await env.create(
+        "受保护 feel 预览不得进入结晶提示。",
+        bucket_type="feel",
+    )
+    await env.update(protected_id, protected="true")
+    visible_a = await env.create("普通 feel A", bucket_type="feel")
+    visible_b = await env.create("普通 feel B", bucket_type="feel")
+    monkeypatch.setattr(
+        rt,
+        "embedding_engine",
+        _StubEmbedding(
+            {
+                protected_id: [1.0, 0.0],
+                visible_a: [1.0, 0.0],
+                visible_b: [1.0, 0.0],
+            }
+        ),
+        raising=False,
+    )
+
+    hint = await build_crystal_hint(await env.list_all())
+
+    assert hint == ""
+    assert "受保护 feel 预览不得进入结晶提示" not in hint
+
+
+@pytest.mark.asyncio
 async def test_promoted_candidate_leaves_the_dream_pool(env):
     await i_core.i_core(content="我觉得我更信任慢下来的判断。")
     bucket_id = next(iter(env.buckets))
@@ -258,6 +467,67 @@ async def test_candidate_not_rendered_is_not_counted_as_witnessed(env, monkeypat
 
     assert "我写下的「我觉得」（待沉淀）" not in out
     assert env.buckets[bucket_id]["metadata"].get("i_dream_dates") == []
+
+
+@pytest.mark.asyncio
+async def test_failed_witness_write_is_not_reported_as_recorded(
+    env,
+    monkeypatch,
+    caplog,
+):
+    await i_core.i_core(content="我觉得我需要更早说不。")
+    bucket_id = next(iter(env.buckets))
+    original_update = env.update
+
+    async def reject_witness_write(target_id: str, **kwargs) -> bool:
+        if "i_dream_dates" in kwargs:
+            return False
+        return await original_update(target_id, **kwargs)
+
+    monkeypatch.setattr(env, "update", reject_witness_write)
+
+    recorded = await i_core.record_dream_pass([bucket_id])
+
+    assert recorded == 0
+    assert env.buckets[bucket_id]["metadata"]["i_dream_dates"] == []
+    assert f"write returned false for {bucket_id}" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_promote_counts_distinct_dream_dates_only(env):
+    await i_core.i_core(content="我觉得重复经历不是多次沉淀。")
+    bucket_id = next(iter(env.buckets))
+    await env.update(
+        bucket_id,
+        i_dream_dates=["2026-08-01", "2026-08-01", "2026-08-02"],
+    )
+
+    with pytest.raises(ToolInputError) as excinfo:
+        await i_core.i_core(promote=bucket_id)
+
+    assert f"2/{I_PROMOTE_THRESHOLD}" in str(excinfo.value)
+    assert all(b["metadata"]["type"] != "i" for b in env.buckets.values())
+
+
+@pytest.mark.asyncio
+async def test_three_distinct_dream_dates_allow_promotion(env, monkeypatch):
+    await i_core.i_core(content="我觉得跨天仍站得住的念头可以沉淀。")
+    bucket_id = next(iter(env.buckets))
+    for day in ("2026-08-01", "2026-08-02", "2026-08-03"):
+        current_day = day
+
+        class _Clock:
+            @staticmethod
+            def now():
+                return datetime.fromisoformat(current_day)
+
+        monkeypatch.setattr(i_core, "datetime", _Clock)
+        assert await i_core.record_dream_pass([bucket_id]) == 1
+
+    out = await i_core.i_core(promote=bucket_id)
+
+    assert "经过 3 次 dream 沉淀" in out
+    assert env.buckets[bucket_id]["metadata"]["i_stage"] == "promoted"
 
 
 @pytest.mark.asyncio

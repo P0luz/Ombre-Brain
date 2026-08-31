@@ -34,11 +34,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from tools._common import (
-    _HIGH_IMP_THRESHOLD,
-    _quota_turn,
-    enforce_high_importance_quota,
-)
+from errors import safe_error_detail
+from tools.plan.core import is_letter_bucket
 from utils import atomic_write_text, clean_llm_json, count_tokens_approx, now_iso, parse_bool
 
 logger = logging.getLogger("ombre_brain.import")
@@ -117,17 +114,12 @@ _IMPORT_ERROR_RULES = (
 
 
 def _safe_import_error_detail(exc: BaseException) -> str:
-    """Return a bounded provider error while redacting common credential forms."""
+    """导入侧的异常脱敏，实现已上移到 errors.safe_error_detail。
 
-    detail = str(exc).strip() or type(exc).__name__
-    detail = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1[REDACTED]", detail)
-    detail = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", detail)
-    detail = re.sub(
-        r"(?i)((?:api[_-]?key|token)\s*[=:]\s*)[^\s,;]+",
-        r"\1[REDACTED]",
-        detail,
-    )
-    return detail[:_CHUNK_ERR_PREVIEW]
+    保留这个名字是因为导入流水线内部已有多处调用（以及针对它的回归测试）；
+    真正的脱敏规则只维护 errors.py 一份，避免两处正则各自漂移。
+    """
+    return safe_error_detail(exc)
 
 
 def diagnose_import_errors(errors: list[object]) -> list[dict[str, str]]:
@@ -273,6 +265,13 @@ def _parse_structured_memory_json(
     marker_fields = {
         "name", "domain", "valence", "arousal", "tags", "importance"
     }
+    known_conversation_fields = {"chat_messages", "mapping", "messages"}
+    if not explicit_wrapper and any(
+        isinstance(item, dict)
+        and known_conversation_fields.intersection(item)
+        for item in candidates
+    ):
+        return None
     dictionary_items = all(
         isinstance(item, dict) and "role" not in item for item in candidates
     )
@@ -1246,47 +1245,22 @@ class ImportEngine:
             )
 
     async def _create_import_bucket(self, item: dict) -> str:
-        """在普通高重要度配额内创建一条导入记忆。"""
+        """创建一条导入记忆；importance 只是普通评分字段，不设硬配额。"""
         requested_importance = item.get(
             "importance", _DEFAULT_IMPORTANCE
         )
-
-        async def create(
-            final_importance: int,
-            *,
-            defer_derived_index: bool = False,
-        ) -> str:
-            return await self.bucket_mgr.create(
-                content=item["content"],
-                tags=item.get("tags", []),
-                importance=final_importance,
-                domain=item.get("domain", ["未分类"]),
-                valence=item.get("valence", _DEFAULT_VALENCE),
-                arousal=item.get("arousal", _DEFAULT_AROUSAL),
-                name=item.get("name") or None,
-                source_tool="import",
-                event_actor="human",
-                imported=True,
-                defer_derived_index=defer_derived_index,
-            )
-
-        if requested_importance >= _HIGH_IMP_THRESHOLD:
-            async with _quota_turn("high_importance"):
-                final_importance = await enforce_high_importance_quota(
-                    requested_importance,
-                    bucket_mgr=self.bucket_mgr,
-                )
-                bucket_id = await create(
-                    final_importance,
-                    defer_derived_index=True,
-                )
-            post_index = getattr(
-                self.bucket_mgr, "_index_after_update", None
-            )
-            if callable(post_index):
-                await post_index(bucket_id, content_changed=True)
-            return bucket_id
-        return await create(requested_importance)
+        return await self.bucket_mgr.create(
+            content=item["content"],
+            tags=item.get("tags", []),
+            importance=requested_importance,
+            domain=item.get("domain", ["未分类"]),
+            valence=item.get("valence", _DEFAULT_VALENCE),
+            arousal=item.get("arousal", _DEFAULT_AROUSAL),
+            name=item.get("name") or None,
+            source_tool="import",
+            event_actor="human",
+            imported=True,
+        )
 
     async def _process_single_chunk(self, chunk: dict, preserve_raw: bool) -> bool:
         """Extract memories from a single chunk and store them."""
@@ -1527,7 +1501,8 @@ class ImportEngine:
         all_buckets = await self.bucket_mgr.list_all(include_archive=False)
         dynamic_buckets = [
             b for b in all_buckets
-            if b["metadata"].get("type") == "dynamic"
+            if not is_letter_bucket(b)
+            and b["metadata"].get("type") == "dynamic"
             and not b["metadata"].get("pinned")
             and not b["metadata"].get("resolved")
         ]

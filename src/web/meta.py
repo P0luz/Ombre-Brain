@@ -26,9 +26,9 @@ from starlette.responses import Response, StreamingResponse
 from . import _shared as sh
 
 try:
-    from utils import parse_bool  # type: ignore
+    from utils import parse_bool, atomic_update_config_yaml  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..utils import parse_bool  # type: ignore
+    from ..utils import parse_bool, atomic_update_config_yaml  # type: ignore
 
 
 def _restart_self() -> None:
@@ -85,6 +85,8 @@ _AUTHOR_NOTE = {
         {"body": "一个兴趣使然的开发者", "signature": "——万世"},
     ],
     # 爱发电区块上方的文案。
+    # 这句改了七遍。
+    # 可恶写完又要发小红书不想写文案…
     "support": "如果 OB 对你有用，可以在爱发电支持我们。如果没有，也感谢你用过它。",
 }
 
@@ -98,6 +100,8 @@ _MAX_UPDATE_MEMBERS = 5_000
 _MAX_UPDATE_MEMBER_BYTES = 16 * 1024 * 1024
 _MAX_UPDATE_TOTAL_BYTES = 128 * 1024 * 1024
 _MAX_UPDATE_COMPRESSION_RATIO = 500.0
+_ARCHIVED_LETTER_RESTORE_MAX_IDS = 100
+_ARCHIVED_LETTER_RESTORE_ID_MAX_CHARS = 128
 _MAX_UPDATE_MANIFEST_BYTES = 2 * 1024 * 1024
 _MAX_DEPENDENCY_MANIFEST_BYTES = 2 * 1024 * 1024
 _DEPENDENCY_MANIFEST_NAMES = ("requirements.txt", "requirements.lock.txt")
@@ -1000,7 +1004,52 @@ def register(mcp) -> None:
             "hot_update_persistent": persistence["persistent"],
             "hot_update_mode": persistence["mode"],
             "hot_update_note": persistence["note"],
+            "update_allow_pip_install": _pip_install_allowed(),
         })
+
+    @mcp.custom_route("/api/update-settings", methods=["POST"])
+    async def api_update_settings(request: Request) -> Response:
+        """持久化「热更新遇到依赖变化时是否自动 pip install」这一个开关。
+
+        这不是把默认值改掉——OMBRE_UPDATE_ALLOW_PIP 环境变量默认关闭的安全立场
+        （安全加固 #2：自动 pip 把「谁能点热更新」放大成任意 PyPI 包的 RCE 面）
+        没有变化，这里只是把已经存在、此前只能靠 SSH 改 env 才能碰到的
+        config.update.allow_pip_install 开关，暴露成 Dashboard 上能点的一个选项，
+        由部署者自己清醒地打开。写入 config.yaml 后立即在运行态生效，不需要重启
+        （_pip_install_allowed() 每次 do-update 都会重新读取）。
+        """
+        from starlette.responses import JSONResponse
+        err = sh._require_auth(request)
+        if err:
+            return err
+        try:
+            body = await sh._read_json_object(request)
+        except Exception:
+            return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
+        if "allow_pip_install" not in body:
+            return JSONResponse(
+                {"ok": False, "error": "缺少 allow_pip_install 字段"}, status_code=400
+            )
+        allow = bool(body.get("allow_pip_install"))
+
+        def _mutate(saved: dict) -> None:
+            update_cfg = saved.get("update")
+            if not isinstance(update_cfg, dict):
+                update_cfg = {}
+                saved["update"] = update_cfg
+            update_cfg["allow_pip_install"] = allow
+
+        try:
+            atomic_update_config_yaml(_mutate)
+        except Exception as e:
+            return JSONResponse(
+                {"ok": False, "error": f"写 config.yaml 失败：{e}"}, status_code=500
+            )
+
+        if not isinstance(sh.config.get("update"), dict):
+            sh.config["update"] = {}
+        sh.config["update"]["allow_pip_install"] = allow
+        return JSONResponse({"ok": True, "allow_pip_install": allow})
 
     @mcp.custom_route("/api/do-update", methods=["POST"])
     async def api_do_update(request: Request) -> Response:
@@ -1126,14 +1175,33 @@ def register(mcp) -> None:
                     yield f"data: ERROR:{plan['abort']}（已中止，未改动任何文件）\n\n"
                     return
 
-                yield "data: 下载完成，正在解压文件…\n\n"
-                await _asyncio.sleep(0.1)
-
                 # 目标根目录用注入的 sh.repo_root（Docker 下 = /app；裸机/VPS = 实际安装目录）。
                 # 绝不能在这里用 __file__：本文件在 src/web/ 下，算出来会差一层。
                 repo_root = sh.repo_root
                 src_root = os.path.join(repo_root, "src")
                 frontend_root = os.path.join(repo_root, "frontend")
+
+                # 依赖是否变化只需要「刚下载的清单」+「磁盘上现有清单」，跟这次更新有没有
+                # 真的写文件无关。提前到备份/写盘之前判断：pip 关闭又确实需要装时直接在这里
+                # 拒绝，不用先建 _prev 备份、写完文件再回滚一遍——省一轮磁盘 I/O，报错也更准确
+                # （这时候是真的「未改动任何文件」，不是「已回滚」）。
+                requirements_changed = await _await_update_worker(
+                    _requirements_changed,
+                    repo_root,
+                    requirements_bytes,
+                    requirements_lock_bytes,
+                )
+                if requirements_changed and not _pip_install_allowed():
+                    yield (
+                        "data: ERROR:新版依赖清单有变化，自动 pip 安装处于关闭状态；"
+                        "未改动任何文件。可在 Dashboard「热更新」里打开"
+                        "「允许自动安装新依赖」开关后重试，或重建镜像，或设置 "
+                        "OMBRE_UPDATE_ALLOW_PIP=1 后重试。\n\n"
+                    )
+                    return
+
+                yield "data: 下载完成，正在解压文件…\n\n"
+                await _asyncio.sleep(0.1)
 
                 # #4a ②：覆盖前把当前 src/frontend 备份成回滚点 _prev，坏更新崩溃时 entrypoint 还原。
                 prev_dir = os.path.join(repo_root, "_prev")
@@ -1181,32 +1249,14 @@ def register(mcp) -> None:
                 if inspected["version_bytes"] is not None:
                     yield f"data: 版本号已同步为 v{target_version}…\n\n"
 
-                # #4a ③：先判定并同步清单，再完成代码编译自检；只有这些可回滚步骤
-                # 全部成功后才允许 pip 改动解释器环境，避免后续失败留下半更新依赖。
-                requirements_changed = False
+                # #4a ③：先同步清单，再完成代码编译自检；只有这些可回滚步骤全部成功后
+                # 才允许 pip 改动解释器环境，避免后续失败留下半更新依赖。requirements_changed
+                # 与「pip 关闭时直接拒绝」已经在备份/写盘之前判断过了，这里只管安装。
                 install_lock = False
                 install_name = ""
                 install_bytes = None
                 try:
-                    requirements_changed = await _await_update_worker(
-                        _requirements_changed,
-                        repo_root,
-                        requirements_bytes,
-                        requirements_lock_bytes,
-                    )
                     if requirements_changed:
-                        if not _pip_install_allowed():
-                            restored = await _rollback_if_needed()
-                            if restored:
-                                yield (
-                                    "data: ERROR:新版依赖清单有变化，自动 pip 安装处于关闭状态；"
-                                    "为避免重启后缺包，已回滚本次热更新。请重建镜像，或明确设置 "
-                                    "OMBRE_UPDATE_ALLOW_PIP=1 后重试。\n\n"
-                                )
-                            else:
-                                yield "data: ERROR:依赖发生变化且自动安装关闭，回滚失败，请手动恢复 _prev。\n\n"
-                            return
-
                         install_lock = bool(
                             requirements_lock_bytes
                             and requirements_lock_bytes.strip()
@@ -1353,6 +1403,92 @@ def register(mcp) -> None:
             return JSONResponse({"ok": True, **result})
         except Exception as e:
             return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+    @mcp.custom_route(
+        "/api/maintenance/restore-archived-letters",
+        methods=["GET", "POST"],
+    )
+    async def api_restore_archived_letters(request: Request) -> Response:
+        """审计并显式恢复带强来源标记的历史误归档 Letter。
+
+        GET 永远只做 dry-run。POST 必须给出非空、受限的 ``ids`` 字符串列表；
+        维护 helper 的扫描结果不构成写授权，存储层会在桶租约内重新校验。
+        """
+        from starlette.responses import JSONResponse
+
+        def no_store_json(payload: dict, *, status_code: int = 200) -> Response:
+            return JSONResponse(
+                payload,
+                status_code=status_code,
+                headers={"Cache-Control": "no-store"},
+            )
+
+        err = sh._require_auth(request)
+        if err:
+            err.headers["Cache-Control"] = "no-store"
+            return err
+        from tools._common import restore_archived_letters
+
+        ids: list[str] | None = None
+        apply = request.method == "POST"
+        if apply:
+            try:
+                body = await sh._read_json_object(request)
+            except Exception:
+                return no_store_json(
+                    {"ok": False, "reason": "invalid_json"},
+                    status_code=400,
+                )
+            raw_ids = body.get("ids")
+            if (
+                not isinstance(raw_ids, list)
+                or not raw_ids
+                or len(raw_ids) > _ARCHIVED_LETTER_RESTORE_MAX_IDS
+            ):
+                return no_store_json(
+                    {"ok": False, "reason": "invalid_ids"},
+                    status_code=400,
+                )
+            normalized: list[str] = []
+            seen: set[str] = set()
+            for value in raw_ids:
+                if not isinstance(value, str):
+                    return no_store_json(
+                        {"ok": False, "reason": "invalid_ids"},
+                        status_code=400,
+                    )
+                bucket_id = value.strip()
+                if (
+                    not bucket_id
+                    or len(bucket_id) > _ARCHIVED_LETTER_RESTORE_ID_MAX_CHARS
+                ):
+                    return no_store_json(
+                        {"ok": False, "reason": "invalid_ids"},
+                        status_code=400,
+                    )
+                if bucket_id not in seen:
+                    seen.add(bucket_id)
+                    normalized.append(bucket_id)
+            if not normalized:
+                return no_store_json(
+                    {"ok": False, "reason": "invalid_ids"},
+                    status_code=400,
+                )
+            ids = normalized
+
+        try:
+            result = await restore_archived_letters(
+                sh.bucket_mgr,
+                ids=ids,
+                apply=apply,
+            )
+            return no_store_json({"ok": True, **result})
+        except Exception:
+            sh.logger.exception("历史归档 Letter 维护失败")
+            return no_store_json(
+                {"ok": False, "reason": "internal_error"},
+                status_code=500,
+            )
 
     @mcp.custom_route("/api/author", methods=["GET"])
     async def api_author(request: Request) -> Response:

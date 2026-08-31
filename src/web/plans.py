@@ -15,6 +15,7 @@ from starlette.responses import Response
 
 from . import _shared as sh
 from tools._common import check_content_size
+from tools.plan.core import is_letter_bucket
 
 logger = sh.logger
 
@@ -44,7 +45,7 @@ def register(mcp) -> None:
             for b in all_buckets:
                 meta = b.get("metadata", {})
                 # 过滤：只要计划类，跳过其他类型的桶
-                if meta.get("type") != "plan":
+                if meta.get("type") != "plan" or is_letter_bucket(b):
                     continue
                 # status 不一定存在（老数据），默认 active；lower() 防御大小写
                 st = (meta.get("status") or "active").lower()
@@ -56,8 +57,8 @@ def register(mcp) -> None:
                     "name": meta.get("name") or "",
                     "content": b.get("content", ""),
                     "status": st,
-                    "created_at": meta.get("created_at"),
-                    "updated_at": meta.get("updated_at"),
+                    "created_at": meta.get("created"),
+                    "updated_at": meta.get("last_active"),
                     "related_bucket": meta.get("related_bucket"),
                     "change_log": meta.get("change_log") or [],
                     "tags": meta.get("tags") or [],
@@ -127,7 +128,10 @@ def register(mcp) -> None:
             if not bucket:
                 return JSONResponse({"error": f"plan not found: {bucket_id}"}, status_code=404)
             # 双重防御：这个端点只能动 plan 桃子，别的类型不允许
-            if bucket.get("metadata", {}).get("type") != "plan":
+            if (
+                bucket.get("metadata", {}).get("type") != "plan"
+                or is_letter_bucket(bucket)
+            ):
                 return JSONResponse({"error": "bucket is not a plan"}, status_code=400)
 
             old_meta = bucket.get("metadata", {})
@@ -145,7 +149,11 @@ def register(mcp) -> None:
                     updates["status"] = new_status
                     history = append_plan_change_log(
                         history, "status",
-                        **{"from": old_status, "to": new_status},
+                        **{
+                            "from": old_status,
+                            "to": new_status,
+                            "by": "dashboard",
+                        },
                     )
             elif action == "edit":
                 new_content = body.get("content", "")
@@ -156,13 +164,16 @@ def register(mcp) -> None:
                 if size_err:
                     return JSONResponse({"error": size_err}, status_code=400)
                 updates["content"] = new_content.strip()
-                history = append_plan_change_log(history, "edit")
+                history = append_plan_change_log(history, "edit", by="dashboard")
             else:
                 return JSONResponse({"error": f"unknown action: {action}"}, status_code=400)
 
             # status 没变 且 不是 edit，成 noop。返回 200 + ok=true，不报错
             if not updates:
                 return JSONResponse({"ok": True, "noop": True})
+            # status 或正文经显式动作改变后，旧完成建议所依据的 plan 已失效。
+            # None 由 BucketManager 解释为删除 frontmatter 字段。
+            updates["resolution_suggested"] = None
             updates["change_log"] = history
             ok = await sh.bucket_mgr.update(bucket_id, **updates)
             if not ok:
@@ -181,7 +192,10 @@ def register(mcp) -> None:
             return JSONResponse({
                 "ok": True,
                 "id": bucket_id,
-                "updates": {k: v for k, v in updates.items() if k != "change_log"},
+                "updates": {
+                    k: v for k, v in updates.items()
+                    if k not in ("change_log", "resolution_suggested")
+                },
                 "cascaded_resolved": cascaded,
             })
         except ValueError as e:

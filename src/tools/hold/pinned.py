@@ -37,6 +37,9 @@ async def store_pinned(
     title: str = "",
     meaning: str = "",
     media: list | None = None,
+    explicit_domain: list[str] | None = None,
+    source_refs: list[dict] | None = None,
+    quotes: list[dict] | None = None,
 ) -> str:
     try:
         analysis = await rt.dehydrator.analyze(content)
@@ -47,9 +50,10 @@ async def store_pinned(
             "tags": [], "suggested_name": "",
         }
 
-    domain = analysis.get("domain") or ["未分类"]
-    if not isinstance(domain, list):
-        domain = ["未分类"]
+    analyzed_domain = analysis.get("domain") or ["未分类"]
+    if not isinstance(analyzed_domain, list):
+        analyzed_domain = ["未分类"]
+    final_domain = explicit_domain or analyzed_domain
     _v = analysis.get("valence", 0.5)
     _a = analysis.get("arousal", 0.3)
     final_valence = valence if 0 <= valence <= 1 else (float(_v) if _v is not None else 0.5)
@@ -71,11 +75,13 @@ async def store_pinned(
             content=content,
             tags=all_tags,
             importance=10,
-            domain=domain,
+            domain=final_domain,
             valence=final_valence,
             arousal=final_arousal,
             name=suggested_name or None,
             title=final_title,
+            source_refs=source_refs,
+            quotes=quotes,
             bucket_type="permanent",
             pinned=True,
             why_remembered=why_remembered,
@@ -93,4 +99,4 @@ async def store_pinned(
             content_changed=True,
             meaning_changed=bool(meaning),
         )
-    return f"📌钉选→{bucket_id} {','.join(str(d) for d in domain if d is not None)}"
+    return f"📌钉选→{bucket_id} {','.join(str(d) for d in final_domain if d is not None)}"

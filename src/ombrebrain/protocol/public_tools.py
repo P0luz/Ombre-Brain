@@ -98,11 +98,12 @@ class PublicToolDesignContract:
     @classmethod
     def default(cls) -> "PublicToolDesignContract":
         return cls(
-            normal_tools=frozenset({"hold", "grow", "source_read", "trace", "breath", "breath_search", "breath_advanced", "pulse", "dream", "anchor", "i", "letter", "plan"}),
+            normal_tools=frozenset({"hold", "grow", "trace", "breath", "breath_search", "breath_advanced", "pulse", "dream", "anchor", "i", "you", "letter", "plan", "feel"}),
             compatibility_public_names={
                 "release": "anchor",
                 "letter_write": "letter",
                 "letter_read": "letter",
+                "letter_lock_update": "letter",
             },
             engineering_public_aliases={
                 "remember": "hold/grow",
@@ -243,6 +244,6 @@ def _normalize_tool_key(name: str) -> str:
 
 
 def _display_tool_name(key: str) -> str:
-    if key == "i":
-        return "I"
+    if key in {"i", "you"}:
+        return key.title()
     return key

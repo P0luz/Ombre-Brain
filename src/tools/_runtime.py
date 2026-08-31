@@ -31,12 +31,15 @@ from ombrebrain.app.execution import ExecutionEnvelope
 # --- 共享对象引用，由 server.py 在启动时通过 init(...) 注入 ---
 config: Any = None
 bucket_mgr: Any = None
+deletion_requests: Any = None
 dehydrator: Any = None
 decay_engine: Any = None
 embedding_engine: Any = None
 embedding_outbox: Any = None
 import_engine: Any = None
 source_store: Any = None
+you_service: Any = None
+them_service: Any = None
 logger: Any = None
 v3_runtime: Any = None
 

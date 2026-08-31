@@ -847,6 +847,59 @@ class TestDecayEngineRunCycle:
         assert result["archived"] >= 1
 
     @pytest.mark.asyncio
+    async def test_run_cycle_preserves_anchor_and_archives_equivalent_dynamic(
+        self, decay_engine, bucket_mgr
+    ):
+        import frontmatter as fm
+
+        decay_engine.bucket_mgr = bucket_mgr
+        anchor_id = await bucket_mgr.create(
+            content="需要长期保留的关系坐标", importance=5, domain=["测试"]
+        )
+        dynamic_id = await bucket_mgr.create(
+            content="同龄的普通动态记忆", importance=5, domain=["测试"]
+        )
+        anchor_result = await bucket_mgr.set_anchor(anchor_id, True)
+        assert anchor_result["ok"] is True
+
+        old_ts = (datetime.now() - timedelta(days=365)).isoformat()
+        for bucket_id in (anchor_id, dynamic_id):
+            fpath = bucket_mgr._find_bucket_file(bucket_id)
+            post = fm.load(fpath)
+            post["created"] = old_ts
+            post["last_active"] = old_ts
+            post["activation_count"] = 1
+            if bucket_id == dynamic_id:
+                post["anchor"] = "false"
+            with open(fpath, "w", encoding="utf-8") as f:
+                f.write(fm.dumps(post))
+            assert await bucket_mgr.update(bucket_id, importance=5)
+
+        anchor_before = await bucket_mgr.get(anchor_id)
+        dynamic_before = await bucket_mgr.get(dynamic_id)
+        assert anchor_before["metadata"].get("anchor") is True
+        assert dynamic_before["metadata"].get("anchor") == "false"
+        assert decay_engine.calculate_score(anchor_before["metadata"]) < decay_engine.threshold
+        assert decay_engine.calculate_score(dynamic_before["metadata"]) < decay_engine.threshold
+
+        stats = await decay_engine.run_decay_cycle()
+
+        active_ids = {
+            bucket["id"]
+            for bucket in await bucket_mgr.list_all(include_archive=False)
+        }
+        assert anchor_id in active_ids, "anchor 不应被普通衰减周期自动归档"
+        assert dynamic_id not in active_ids, "普通低分动态桶仍应按既有规则归档"
+        anchor_after = await bucket_mgr.get(anchor_id)
+        dynamic_after = await bucket_mgr.get(dynamic_id)
+        assert anchor_after["metadata"]["type"] == "dynamic"
+        assert anchor_after["metadata"].get("anchor") is True
+        assert dynamic_after["metadata"]["type"] == "archived"
+        assert Path(dynamic_after["path"]).is_relative_to(Path(bucket_mgr.archive_dir))
+        assert stats["checked"] == 1
+        assert stats["archived"] == 1
+
+    @pytest.mark.asyncio
     async def test_run_cycle_skips_pinned(self, decay_engine, bucket_mgr):
         decay_engine.bucket_mgr = bucket_mgr
         decay_engine.threshold = 9999.0  # Force archive anything low

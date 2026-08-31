@@ -277,7 +277,7 @@ def _is_public_mcp_tool_decorator(decorator: ast.expr) -> bool:
     func = call.func if call is not None else decorator
     if not isinstance(func, ast.Attribute) or func.attr != "tool":
         return False
-    return isinstance(func.value, ast.Name) and func.value.id in {"mcp", "mcp_extra"}
+    return isinstance(func.value, ast.Name) and func.value.id == "mcp"
 
 
 def _read_adr_documents_from_repo(repo_root: str) -> dict[str, Any]:

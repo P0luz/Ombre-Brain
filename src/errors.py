@@ -31,6 +31,7 @@ import contextvars
 import json
 import logging
 import os
+import re
 import threading
 import time
 from dataclasses import dataclass
@@ -70,6 +71,94 @@ class PublicToolError(RuntimeError):
             raise ValueError("公开工具错误文案必须是单行安全文本")
         self.public_message = message
         super().__init__("public tool error")
+
+
+class ToolInputError(ValueError):
+    """入参不合法，工具在任何写入之前就停下了——一个桶都没建。
+
+    为什么需要这个类：MCP 只认异常。工具用 ``return "错误说明"`` 表达失败时，
+    客户端拿到的是一次 ``isError=False`` 的正常返回，调用方（通常是模型自己）
+    会以为写成功了继续往下走，等下次去翻，那条记忆从来没存在过。
+
+    与 PublicToolError 的分工：那个是"固定安全文案，动态正文一个字都不许进"，
+    用于必须收敛话术的失败；这个的正文本来就是要给调用方看的参数校验说明——
+    它得靠这句话知道该改哪个参数。带动态正文的场景先过 safe_error_detail()
+    脱敏，再传进来。
+
+    边界：判据是"这次调用什么都没写"，不是"错在谁"。所以除了入参不合法，
+    写入前的前置条件不成立（原文证据存储不可用、存原文时磁盘失败）同样走这里
+    ——调用方一样需要知道那条记忆没存上。反过来，主体已经成功、只是附带信息
+    没读到的降级提示（``👣 Footprint：暂时无法读取``）不属于这里，
+    那种 isError=False 才对。
+    """
+
+    def __init__(self, message: str):
+        # 折成单行：MCP 把它拼进 "Error executing tool X: ..."，换行会破坏可读性
+        text = " ".join(str(message).split())[:500]
+        super().__init__(text or "入参不合法，未做任何写入。")
+
+
+_SAFE_DETAIL_MAX = 200         # 异常正文对外截断长度（与 import 侧 _CHUNK_ERR_PREVIEW 一致）
+
+
+def safe_error_detail(exc: BaseException) -> str:
+    """把异常正文压成"可以拿给人看"的一行：保留信息，抹掉凭证，限长。
+
+    为什么需要它：工具层大量 `except Exception as e: return f"...: {e}"` 直接把
+    异常正文拼进返回给 MCP 客户端的字符串。多数时候那是本地文件系统错误，无害且
+    有助排查；但同一段代码也会兜住带 Authorization 头、api_key= 查询串的供应商
+    异常，一旦命中就把凭证原样送出去了。
+
+    与 PublicToolError 的分工：PublicToolError 走"固定安全文案"，一个字都不让
+    动态正文进去；本函数走另一条路——正文照给，但先脱敏。前者用于必须收敛成
+    统一话术的失败，后者用于"说清楚到底哪儿错了"更重要的失败。
+
+    脱敏覆盖三种常见凭证形态：``bearer <token>``、``sk-`` 开头的 key、
+    ``api_key=`` / ``token:`` 这类键值对。空正文回落到异常类名，避免返回空串。
+    """
+    detail = str(exc).strip() or type(exc).__name__
+    detail = re.sub(r"(?i)(bearer\s+)[^\s,;]+", r"\1[REDACTED]", detail)
+    detail = re.sub(r"\bsk-[A-Za-z0-9_-]{8,}\b", "[REDACTED]", detail)
+    detail = re.sub(
+        r"(?i)((?:api[_-]?key|token)\s*[=:]\s*)[^\s,;]+",
+        r"\1[REDACTED]",
+        detail,
+    )
+    return detail[:_SAFE_DETAIL_MAX]
+
+
+def llm_step_failed_error(step_zh: str, *, api_available: bool) -> PublicToolError:
+    """LLM 步骤（日记拆分 / 打标）失败时的公开文案，按"是不是真的没配 key"分岔。
+
+    为什么要分岔：grow 的两条路径原本 `except Exception` 之后一律返回
+    "API key 未配置或调用失败……请检查 OMBRE_COMPRESS_API_KEY"。但这条路上绝大
+    多数失败与 key 无关——供应商 5xx、超时，或 dehydrator 抛的"API 日记整理返回
+    空结果"（模型返回解析后 0 条有效条目）都会撞上同一句话，把人指向错误的排查
+    方向：key 明明是好的，失败前一秒调用还是 200。
+
+    api_available 由调用方传入（通常是 dehydrator.api_available，也就是
+    ``_require_api()`` 用来判断"配置到底配好没有"的同一个信号）。之所以不在这里
+    自己去取，是为了不让 errors 这个底层模块反向依赖 tools._runtime。
+
+    注意 api_available 只回答"配没配"，不回答"配得对不对"：key 填错、过期、
+    余额耗尽时它仍然是 True，调用会以 401/402 失败。所以 True 分支的文案**不能**
+    反过来打包票说"key 没问题"——那只是把原来的误导换了个方向。这里给的是一组
+    并列的可能原因（供应商故障、模型返回为空、key 失效），把判断交回给日志。
+
+    边界：真实异常正文一律不进公开文案——PublicToolError 的契约就是固定安全
+    文本，供应商正文只写日志（err_type=…）。需要把正文给出去的场景请用
+    safe_error_detail()。
+    """
+    if not api_available:
+        return PublicToolError(
+            f"脱水 API 不可用（未配置或配置有误），{step_zh}无法完成，桶未创建。"
+            "请检查 OMBRE_COMPRESS_API_KEY 与 config.yaml 的 dehydration 配置。"
+        )
+    return PublicToolError(
+        f"脱水 API 调用失败或返回无法解析的内容，{step_zh}无法完成，桶未创建。"
+        "可稍后重试；持续失败请看 server.log 里的 err_type，"
+        "再逐一排除供应商故障、模型返回为空、key 失效或余额不足。"
+    )
 
 
 # 注册表 —— 修改/新增请同时同步 rule.md §11
@@ -172,16 +261,6 @@ ERROR_CODES: dict[str, ErrorSpec] = {
         title_en="valence/arousal out of range, clamped",
         suggestion_zh="valence/arousal 必须在 [0.0, 1.0]；本次已被修正到边界值。",
     ),
-    "OB-W003": ErrorSpec(
-        code="OB-W003",
-        level="W",
-        title_zh="importance≥9 配额接近上限",
-        title_en="importance≥9 quota near cap",
-        suggestion_zh=(
-            "标为 importance≥9 的桶接近上限（22/24，硬上限 24）。"
-            "建议先用 trace(bucket_id, importance=…) 把不再核心的旧桶降级，再标新桶。"
-        ),
-    ),
     "OB-W004": ErrorSpec(
         code="OB-W004",
         level="W",
@@ -203,21 +282,22 @@ ERROR_CODES: dict[str, ErrorSpec] = {
             "迁移期间搜索降级为关键词模式，不会丢文件。"
         ),
     ),
-
-    # ---- Info：自动降级 / 轻量提示 ----
-    "OB-I001": ErrorSpec(
-        code="OB-I001",
-        level="I",
-        title_zh="importance 已自动降级（importance≥9 配额超标）",
-        title_en="importance auto-downgraded (≥9 quota exceeded)",
+    "OB-W006": ErrorSpec(
+        code="OB-W006",
+        level="W",
+        title_zh="引语超过每桶上限，超出的部分未写入",
+        title_en="quotes exceed per-bucket cap; the overflow was not written",
         suggestion_zh=(
-            "★ 这是 OB 自作主张帮你做的事 ★\n"
-            "importance≥9 的桶已达硬上限 24，本次新桶被自动降级为 importance=8。\n"
-            "建议：用 breath_advanced(importance_min=9) 重读全部「核心事项」，"
-            "重新评估每条 importance；不再核心的用 trace(bucket_id, importance=7) 降级。\n"
-            "（重新设定 importance 的责任在你，OB 不会替你判断哪条更重要。）"
+            "这条记忆被合并进了一条已有记忆，两边的引语加起来超过了每桶上限"
+            "（默认 3 条）。先记住的那几句被保留，本次多出来的没有写入。\n"
+            "上限是防止「记住几句重要的话」退化成「存原文」——原文层是只写不读的，"
+            "引语不该变成它的替代品。\n"
+            "如果这次多出来的那句确实更重要，可以用 trace(bucket_id, ...) "
+            "看一眼那条桶现在留着哪几句，再决定要不要换。"
         ),
     ),
+
+    # ---- Info：自动降级 / 轻量提示 ----
     "OB-I002": ErrorSpec(
         code="OB-I002",
         level="I",
@@ -569,6 +649,7 @@ __all__ = [
     "pop_warnings",
     "format_warnings_suffix",
     "PublicToolError",
+    "ToolInputError",
     "OBStartupError",
     "write_fatal_log",
 ]

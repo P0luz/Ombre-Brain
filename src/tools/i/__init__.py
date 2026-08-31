@@ -11,14 +11,15 @@ I 是「我写下关于我自己的认识」，而且只收沉淀下来的那部
 
 对外暴露：
 - dispatch(...) → str（参数与 server.py 中的 I tool 同名）
-- record_dream_pass / is_pending_candidate / I_CANDIDATE_TAG / I_PROMOTE_THRESHOLD
-  给 dream 侧复用——候选的状态归 I 管，dream 只负责把它摆出来看
+- record_dream_pass / dream_dates / is_pending_candidate / I_CANDIDATE_TAG /
+  I_PROMOTE_THRESHOLD 给 dream 侧复用——候选的状态归 I 管，dream 只负责摆出来看
 ========================================
 """
 
 from .core import (  # noqa: F401
     I_CANDIDATE_TAG,
     I_PROMOTE_THRESHOLD,
+    dream_dates,
     i_core as dispatch,
     is_pending_candidate,
     record_dream_pass,

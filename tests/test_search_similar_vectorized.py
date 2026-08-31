@@ -89,6 +89,48 @@ async def test_vectorized_search_preserves_content_meaning_and_tie_behavior(
 
 
 @pytest.mark.asyncio
+async def test_allowed_ids_filter_is_applied_before_hidden_vector_is_decoded(
+    tmp_path, monkeypatch
+):
+    buckets_dir = tmp_path / "buckets"
+    buckets_dir.mkdir()
+    engine = EmbeddingEngine({
+        "buckets_dir": str(buckets_dir),
+        "embedding": {
+            "enabled": True,
+            "api_key": "test-key",
+            "api_format": "openai_compat",
+            "base_url": "https://example.invalid/v1",
+            "model": "test-model",
+            "dim": 3,
+        },
+    })
+
+    async def generate(_text):
+        return [1.0, 0.0, 0.0]
+
+    monkeypatch.setattr(engine, "_generate_async", generate)
+    with sqlite3.connect(engine.db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO embeddings "
+            "(bucket_id, embedding, meaning_embedding, updated_at, content_hash) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("hidden", "{malformed-hidden-vector", None, "now", ""),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO embeddings "
+            "(bucket_id, embedding, meaning_embedding, updated_at, content_hash) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("visible", json.dumps([1.0, 0.0, 0.0]), None, "now", ""),
+        )
+
+    results = await engine.search_similar_strict(
+        "query", top_k=10, allowed_bucket_ids={"visible"}
+    )
+    assert results == [("visible", pytest.approx(1.0))]
+
+
+@pytest.mark.asyncio
 async def test_vector_search_bounds_matrix_to_sqlite_batch(tmp_path, monkeypatch):
     """A large vault must not become one giant Python-list + NumPy matrix."""
     buckets_dir = tmp_path / "buckets"

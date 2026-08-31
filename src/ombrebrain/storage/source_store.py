@@ -2,7 +2,20 @@
 
 原文按 UTF-8 内容哈希写入 ``<vault>/_sources/src_<sha256>.source``。
 文件不参与普通 Markdown 扫描、浮现或语义索引；从 2.10.1 起会随完整
-本地/GitHub 备份迁移。只有 source_read 在精确匹配桶 ID 与标题后才会读取。
+本地/GitHub 备份迁移。
+
+**谁会读它**（3.0.0 起）：
+
+- **模型没有任何回读入口。** 3.0.0 删掉了 `source_read` / `source_attach` /
+  `source_detach` / `source_restore`，原文层对 MCP 只写不读。ADR-0001 里
+  「`source_read` 是唯一公开读取入口」那句已被取代，当前行为以
+  `docs/INTERNALS.md` §3.3.1 为准。
+- **进程内部仍有两个读者**，而且都不把原文交出去：`you/service.py` 与
+  `them/service.py` 在 `_build_edges` 里读出依据桶的原文当 `protected_texts`，
+  用来挡住「把依据的原文照抄成一条认识」。读进来只用于比对，不进任何返回值。
+
+这一段写清楚是因为「没有公开读取入口」和「没有读者」是两件事：把后者当成
+前者，会让人以为动这个文件不影响任何人。
 """
 
 from __future__ import annotations
@@ -22,6 +35,7 @@ import frontmatter
 
 SOURCE_REF_RE = re.compile(r"^src_[0-9a-f]{64}$")
 MAX_SOURCE_REFS = 32
+MAX_SOURCE_LINKS = 128
 MAX_SOURCE_RANGES = 128
 HARD_MAX_SOURCE_BYTES = 10 * 1024 * 1024
 
@@ -122,12 +136,88 @@ def normalize_source_refs(value: Any) -> list[dict[str, Any]]:
     return normalized
 
 
+def normalize_source_links(value: Any) -> list[dict[str, Any]]:
+    """Validate the persistent, stable-order source binding ledger."""
+    if value in (None, ""):
+        return []
+    if not isinstance(value, list):
+        raise ValueError("source_links 必须是列表")
+    if len(value) > MAX_SOURCE_LINKS:
+        raise ValueError(f"source_links 过多（{len(value)} > {MAX_SOURCE_LINKS}）")
+    normalized: list[dict[str, Any]] = []
+    seen: set[tuple[str, tuple[tuple[int, int], ...]]] = set()
+    for item in value:
+        if not isinstance(item, dict):
+            raise ValueError("source_links 每项必须是对象")
+        ref = str(item.get("ref") or "").strip()
+        if not SOURCE_REF_RE.fullmatch(ref):
+            raise ValueError("source_links 包含非法 ref")
+        status = str(item.get("status") or "").strip().lower()
+        if status not in {"active", "detached"}:
+            raise ValueError("source_links status 必须是 active 或 detached")
+        ranges = normalize_source_ranges(item.get("ranges"))
+        key = (ref, tuple((pair[0], pair[1]) for pair in ranges))
+        if key in seen:
+            raise ValueError("source_links 包含重复绑定")
+        seen.add(key)
+        normalized.append({"ref": ref, "ranges": ranges, "status": status})
+    if len([item for item in normalized if item["status"] == "active"]) > MAX_SOURCE_REFS:
+        raise ValueError(f"活动 source_links 过多（>{MAX_SOURCE_REFS}）")
+    return normalized
+
+
+def source_links_from_metadata(metadata: Any) -> list[dict[str, Any]]:
+    """Return links without mutating legacy metadata lacking ``source_links``."""
+    metadata = metadata or {}
+    if "source_links" in metadata and metadata.get("source_links") is not None:
+        return normalize_source_links(metadata.get("source_links"))
+    return [dict(item, status="active") for item in normalize_source_refs(metadata.get("source_refs") or [])]
+
+
+def referenced_source_ids_from_metadata(metadata: Any) -> set[str]:
+    """Validate and union both evidence metadata projections.
+
+    ``source_links`` is the stable ledger while ``source_refs`` is its active
+    compatibility projection, but old exports and hand-edited migrations can
+    contain useful claims in either field.  Evidence closure must validate both
+    claimed fields instead of silently trusting whichever one is preferred.
+    """
+
+    metadata = metadata or {}
+    refs = normalize_source_refs(metadata.get("source_refs"))
+    links = normalize_source_links(metadata.get("source_links"))
+    return {item["ref"] for item in refs} | {item["ref"] for item in links}
+
+
+def active_source_refs_from_links(links: Any) -> list[dict[str, Any]]:
+    return [
+        {"ref": item["ref"], "ranges": item["ranges"]}
+        for item in normalize_source_links(links)
+        if item["status"] == "active"
+    ]
+
+
+def append_source_links(metadata: Any, refs: Any) -> list[dict[str, Any]]:
+    """Append ordinary hold/grow refs without reviving a detached binding."""
+    links = source_links_from_metadata(metadata)
+    for ref in normalize_source_refs(refs):
+        key = (ref["ref"], tuple(tuple(pair) for pair in ref["ranges"]))
+        if any((item["ref"], tuple(tuple(pair) for pair in item["ranges"])) == key for item in links):
+            continue
+        if len(links) >= MAX_SOURCE_LINKS:
+            raise ValueError(f"source_links 过多（{len(links) + 1} > {MAX_SOURCE_LINKS}）")
+        if len(active_source_refs_from_links(links)) >= MAX_SOURCE_REFS:
+            raise ValueError(f"source_refs 过多（>{MAX_SOURCE_REFS}）")
+        links.append({**ref, "status": "active"})
+    return links
+
+
 def referenced_source_ids_from_markdown(content: bytes | str) -> set[str]:
     """Return validated source IDs declared by one bucket Markdown document."""
 
-    if isinstance(content, bytes) and b"source_refs" not in content:
+    if isinstance(content, bytes) and b"source_refs" not in content and b"source_links" not in content:
         return set()
-    if not isinstance(content, bytes) and "source_refs" not in str(content):
+    if not isinstance(content, bytes) and "source_refs" not in str(content) and "source_links" not in str(content):
         return set()
     try:
         text = content.decode("utf-8") if isinstance(content, bytes) else str(content)
@@ -140,10 +230,10 @@ def referenced_source_ids_from_markdown(content: bytes | str) -> set[str]:
     except Exception as exc:
         raise ValueError("无法解析包含 source_refs 的桶 frontmatter") from exc
     try:
-        refs = normalize_source_refs((post.metadata or {}).get("source_refs") or [])
+        referenced = referenced_source_ids_from_metadata(post.metadata or {})
     except ValueError as exc:
         raise ValueError(f"桶包含非法 source_refs：{exc}") from exc
-    return {item["ref"] for item in refs}
+    return referenced
 
 
 class SourceStore:

@@ -493,6 +493,69 @@ async def test_background_indexing_never_blocks_markdown_write(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("preexisting", [False, True], ids=["create", "merge"])
+async def test_merge_or_create_returns_while_embedding_worker_is_blocked(
+    tmp_path,
+    monkeypatch,
+    preexisting,
+):
+    config = _config(tmp_path)
+    config["merge_threshold"] = 75
+    engine = BlockingEngine()
+    manager = BucketManager(config, embedding_engine=engine)
+    outbox = EmbeddingOutbox(config, manager, engine)
+    manager.attach_embedding_outbox(outbox)
+    content = "grow returns before a slow embedding provider"
+
+    existing_id = ""
+    if preexisting:
+        existing_id = await manager.create(
+            content=content,
+            defer_derived_index=True,
+        )
+        outbox.discard(existing_id)
+
+    async def no_matches(*_args, **_kwargs):
+        return []
+
+    monkeypatch.setattr(manager, "search", no_matches)
+    monkeypatch.setattr(rt, "config", config)
+    monkeypatch.setattr(rt, "bucket_mgr", manager)
+    monkeypatch.setattr(rt, "embedding_engine", engine)
+    monkeypatch.setattr(rt, "logger", MagicMock())
+
+    await outbox.start(reconcile=False)
+    try:
+        bucket_id, merged, warning = await asyncio.wait_for(
+            common.merge_or_create(
+                content=content,
+                tags=[],
+                importance=5,
+                domain=["test"],
+                valence=0.5,
+                arousal=0.3,
+                raw_merge=False,
+                source_tool="grow",
+            ),
+            timeout=0.2,
+        )
+        bucket = await manager.get(bucket_id)
+
+        assert merged is preexisting
+        assert warning == ""
+        if preexisting:
+            assert bucket_id == existing_id
+        assert bucket is not None
+        assert bucket["content"] == content
+        assert outbox.is_pending(bucket_id)
+        await asyncio.wait_for(engine.started.wait(), timeout=0.5)
+    finally:
+        engine.release.set()
+        assert await outbox.wait_until_idle(timeout=1.0)
+        await outbox.stop()
+
+
+@pytest.mark.asyncio
 async def test_retry_state_survives_restart_and_recovers(tmp_path):
     config = _config(tmp_path)
     failing = FailingEngine()

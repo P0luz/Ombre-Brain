@@ -54,9 +54,20 @@ docs/**/*
 !docs/INTERNALS.md
 !docs/MULTI_OWNER.md
 !docs/OPERATIONS.md
+# ADR 是架构决策记录，`adr_requirements` 系统诊断会在运行时目录下读 docs/adr/；
+# 此前整个 docs/ 被排除，这项诊断在任何 Docker 部署上都报 "docs/adr not found"。
+!docs/adr
+!docs/adr/*
 tests/
-tools/
-kernel/
+# tools/ 里的 vnext_preflight.py 是 `preflight_cli_diagnostics` 诊断要求的 CLI；
+# 整个 tools/ 被排除时，该诊断在任何 Docker 部署上都报 missing_files。
+# 其余运维脚本一并进镜像，便于容器内 exec 排查。
+!tools
+!tools/*
+# kernel/rust 是 vnext_preflight 的 rust_kernel_scaffold 契约检查对象（共 3 个文件、16K）；
+# 整个 kernel/ 被排除时该项恒红。镜像不编译 Rust，这里只是让契约能被校验。
+!kernel
+!kernel/**
 deploy/
 # 例外：构建期需要它下载 cloudflared（见 Dockerfile 的 COPY），必须进构建上下文
 !deploy/fetch_cloudflared.py

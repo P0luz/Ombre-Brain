@@ -67,6 +67,33 @@ def _parsed_payload(bucket_id: str):
     }
 
 
+@pytest.mark.parametrize(
+    ("id_map", "package_ids", "expected_target", "expected_status"),
+    [
+        ({"B": "B-new"}, frozenset({"A", "B"}), "B-new", "active"),
+        ({"A": "A"}, frozenset({"A", "B"}), "B", "detached"),
+        ({"A": "A"}, frozenset({"A"}), "B", "active"),
+    ],
+)
+def test_relation_target_remap_fails_closed_for_unimported_package_bucket(
+    tmp_path, id_map, package_ids, expected_target, expected_status
+):
+    import frontmatter
+
+    path = tmp_path / "a.md"
+    post = frontmatter.Post("body", relation_links=[{
+        "target_bucket_id": "B", "type": "causes", "label": "", "status": "active",
+    }])
+    path.write_text(frontmatter.dumps(post), encoding="utf-8")
+    engine = MigrateEngine({"buckets_dir": str(tmp_path)}, _BucketManager(), _Embedding())
+
+    engine._remap_imported_relation_targets({"A": str(path)}, id_map, package_ids)
+
+    link = frontmatter.load(path).metadata["relation_links"][0]
+    assert link["target_bucket_id"] == expected_target
+    assert link["status"] == expected_status
+
+
 def test_parse_reservation_is_atomic_across_threads(tmp_path):
     engine = MigrateEngine(
         {"buckets_dir": str(tmp_path)},
@@ -506,6 +533,7 @@ async def test_cancelled_apply_reaps_embedding_merge_before_workspace_cleanup(
             str(tmp_path / "published.md"),
         ),
     )
+    monkeypatch.setattr(engine, "_remap_imported_relation_targets", lambda *_args: None)
     entered = threading.Event()
     release = threading.Event()
 

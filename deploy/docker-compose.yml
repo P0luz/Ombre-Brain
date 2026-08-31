@@ -45,6 +45,11 @@ services:
       - OMBRE_EMBED_BASE_URL=${OMBRE_EMBED_BASE_URL:-}
       - OMBRE_EMBED_MODEL=${OMBRE_EMBED_MODEL:-}
       - OMBRE_DASHBOARD_PASSWORD=${OMBRE_DASHBOARD_PASSWORD:?OMBRE_DASHBOARD_PASSWORD is required}
+      # AI 一方的显示名。首选写进 vault 里的 config.yaml（重启不丢）；
+      # 这里透传只是让 .env 里的 AI_NAME 也能生效——此前未透传，导致
+      # .env.example 明明写着可以设 AI_NAME，Docker 用户却根本设不上，
+      # 带锁 Letter 因为取不到实际关系名而无法创建。
+      - AI_NAME=${AI_NAME:-}
       # Only trust the exact last-hop proxy networks configured by the operator.
       # Keep the loopback-only default; never widen this to 0.0.0.0/0.
       - "OMBRE_TRUSTED_PROXY_CIDRS=${OMBRE_TRUSTED_PROXY_CIDRS:-127.0.0.0/8,::1/128}"

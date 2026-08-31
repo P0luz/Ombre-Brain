@@ -119,7 +119,7 @@ def test_loopback_classifier_rejects_wildcard_lan_and_unknown_hosts(host: str) -
     assert is_loopback_bind_host(host) is False
 
 
-@pytest.mark.parametrize("transport", ["streamable-http", "sse"])
+@pytest.mark.parametrize("transport", ["streamable-http"])
 def test_network_mcp_without_auth_requires_a_confirmed_loopback_boundary(
     transport: str,
 ) -> None:
@@ -606,7 +606,7 @@ async def test_onboarding_apply_is_immediately_visible_as_saved_but_not_effectiv
 ) -> None:
     config_path = tmp_path / "config.yaml"
     runtime = {
-        "transport": "sse",
+        "transport": "stdio",
         "mcp_require_auth": False,
         "mcp_auth_mode": "token",
         "deployment": {
@@ -657,7 +657,7 @@ async def test_onboarding_apply_is_immediately_visible_as_saved_but_not_effectiv
     assert dashboard_payload["mcp_auth_mode"] == "oauth"
     assert dashboard_payload["mcp_auth_mode_effective"] == "token"
     assert dashboard_payload["transport"] == "streamable-http"
-    assert dashboard_payload["transport_effective"] == "sse"
+    assert dashboard_payload["transport_effective"] == "stdio"
     assert dashboard_payload["restart_required"] is True
 
 

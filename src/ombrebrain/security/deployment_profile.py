@@ -30,7 +30,7 @@ PROFILE_LOCAL = "local"
 PROFILE_PUBLIC = "public_secure"
 PROFILE_ADVANCED = "advanced"
 _PROFILE_NAMES = frozenset({PROFILE_LOCAL, PROFILE_PUBLIC, PROFILE_ADVANCED})
-_NETWORK_TRANSPORTS = frozenset({"streamable-http", "sse"})
+_NETWORK_TRANSPORTS = frozenset({"streamable-http"})
 _MCP_NETWORK_SECURITY_KEY = "_mcp_network_security"
 
 
@@ -348,8 +348,8 @@ def validate_profile_patch(patch: Mapping[str, Any]) -> list[str]:
     auth_required = _as_bool(patch.get("mcp_require_auth"), default=True)
     auth_mode = str(patch.get("mcp_auth_mode") or "oauth").strip().lower()
     public_url = str(deployment.get("public_url") or "").strip()
-    if transport not in {"streamable-http", "sse", "stdio"}:
-        issues.append("transport 必须是 streamable-http、sse 或 stdio")
+    if transport not in {"streamable-http", "stdio"}:
+        issues.append("transport 必须是 streamable-http 或 stdio")
     if profile == PROFILE_PUBLIC:
         if not auth_required:
             issues.append("公网安全模式不能关闭 OAuth")

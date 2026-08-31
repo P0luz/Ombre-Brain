@@ -905,6 +905,137 @@
   }
   #settings-view a[href^="#sec-"]:hover { transform: translateY(-1px); color: var(--accent) !important; }
 
+  /* ====== 三层认识面板：我 / 你 / 他们 ====== */
+  .self-fab .fab-globe { display:block; width:26px; height:26px; opacity:.9; }
+  .self-fab .fab-globe svg { width:100%; height:100%; display:block; }
+  .know-tabs {
+    display:flex; gap:6px; padding:0 20px 14px;
+    border-bottom:1px solid var(--border);
+  }
+  .know-tab {
+    flex:1; padding:7px 4px; border:none; border-radius:8px;
+    background:transparent; color:var(--text-dim);
+    font-size:13px; cursor:pointer; transition:all .18s;
+    font-family:inherit;
+  }
+  .know-tab .en { font-size:10px; opacity:.65; margin-left:3px; }
+  .know-tab:hover { color:var(--text); }
+  .know-tab.active {
+    background:var(--bg); color:var(--accent);
+    box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle),
+               inset -2px -2px 5px var(--shadow-light);
+  }
+  .know-pane { padding:18px 20px 28px; overflow-y:auto; flex:1; }
+  .know-state {
+    font-size:12px; color:var(--text-dim); margin-bottom:10px;
+  }
+  .know-state b { color:var(--accent); font-weight:600; }
+  .know-note {
+    font-size:12px; color:var(--text-dim); line-height:1.85; margin:14px 0 0;
+  }
+  .know-note a { color:var(--accent); text-decoration:none; border-bottom:1px dotted; }
+  .know-person-tag { font-size:11px; color:var(--text-dim); margin-top:7px; }
+
+  /* 小号行内按钮。`.btn-sm` 此前全站都在用、却从来没有定义过，于是它拿到的是
+     浏览器默认按钮样式——配上 padding 10px 的输入槽，就成了「字比按钮大」。 */
+  .btn-sm {
+    padding:9px 16px; border:none; border-radius:var(--radius-control);
+    background:var(--surface-solid); color:var(--accent);
+    font-family:inherit; font-size:12.5px; font-weight:500; line-height:1.2;
+    cursor:pointer; white-space:nowrap; flex-shrink:0;
+    transition:all .18s cubic-bezier(.4,0,.2,1);
+    box-shadow:3px 3px 7px var(--shadow-dark-subtle), -3px -3px 6px var(--shadow-light);
+  }
+  .btn-sm:hover {
+    transform:translateY(-1px);
+    box-shadow:4px 4px 9px var(--shadow-dark), -4px -4px 8px var(--shadow-light);
+  }
+  .btn-sm:active {
+    transform:translateY(0);
+    box-shadow:inset 3px 3px 6px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light);
+  }
+
+  /* 图标一律内嵌 SVG，不走 lucide 的 CDN：这个面板讲的是「它认得谁」，
+     断网时正是最该看得见的东西，不该因为外网取不到图标就变成一排方框。 */
+  .know-ico { width:15px; height:15px; flex-shrink:0; display:inline-block; }
+  .know-ico svg { width:100%; height:100%; display:block; }
+
+  /* --- 名册：按「怎么认识的」分组 --- */
+  .know-group { margin:18px 0 0; }
+  .know-group-head {
+    display:flex; align-items:center; gap:7px; margin:0 3px 9px;
+    font-size:12px; color:var(--text-dim);
+  }
+  .know-group-head b { color:var(--text); font-weight:600; }
+  .know-group-head .know-ico { color:var(--accent); }
+  .know-group-head .count {
+    margin-left:auto; font-family:'Share Tech Mono', monospace;
+    font-size:10px; color:var(--text-light); letter-spacing:.5px;
+  }
+  .know-group-note { font-size:11px; color:var(--text-light); line-height:1.6; margin:0 3px 9px; }
+
+  .know-row {
+    display:flex; align-items:center; gap:10px; width:100%;
+    padding:11px 13px; margin-bottom:7px; text-align:left;
+    border:none; border-radius:var(--radius-control);
+    background:var(--surface-solid); color:var(--text);
+    font-family:inherit; font-size:13.5px; cursor:pointer;
+    transition:all .18s cubic-bezier(.4,0,.2,1);
+    box-shadow:3px 3px 7px var(--shadow-dark-subtle), -3px -3px 6px var(--shadow-light);
+  }
+  .know-row:hover {
+    transform:translateX(2px); color:var(--accent);
+    box-shadow:4px 4px 9px var(--shadow-dark), -4px -4px 8px var(--shadow-light);
+  }
+  .know-row-name { flex:1; font-weight:500; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .know-row-sub { font-size:10.5px; color:var(--text-light); flex-shrink:0; }
+  .know-badge { width:7px; height:7px; border-radius:50%; background:var(--accent); flex-shrink:0; }
+  .know-row-arrow { color:var(--text-light); flex-shrink:0; width:13px; height:13px; }
+  .know-row-arrow svg { width:100%; height:100%; display:block; }
+
+  /* --- 单人详情：一个人一个界面 --- */
+  .know-back {
+    display:inline-flex; align-items:center; gap:5px; margin-bottom:16px;
+    background:none; border:none; padding:4px 2px; cursor:pointer;
+    color:var(--text-dim); font-family:inherit; font-size:12px;
+  }
+  .know-back:hover { color:var(--accent); }
+  .know-detail-name {
+    font-family:'Cormorant Garamond', serif; font-size:24px; font-weight:600;
+    font-style:italic; color:var(--accent); line-height:1.25; word-break:break-word;
+  }
+  .know-detail-alias { font-size:11.5px; color:var(--text-light); margin-top:3px; }
+  .know-detail-origin {
+    display:flex; align-items:center; gap:7px; margin:11px 0 0;
+    font-size:12px; color:var(--text-dim);
+  }
+  .know-detail-origin .know-ico { color:var(--accent); }
+  .know-detail-why { font-size:11.5px; color:var(--text-light); line-height:1.7; margin:7px 0 0; }
+
+  .know-field { margin-top:20px; }
+  .know-field-label {
+    font-family:'Share Tech Mono', monospace; font-size:10px; letter-spacing:.8px;
+    text-transform:uppercase; color:var(--text-light); margin-bottom:8px;
+  }
+  .know-field .know-row-form { display:flex; gap:8px; align-items:center; }
+  .know-field .know-row-form input { flex:1; min-width:0; font-size:13px; }
+  .know-field .know-hint { font-size:11px; color:var(--text-light); line-height:1.65; margin:7px 0 0; }
+
+  .know-claims { list-style:none; margin:0; padding:0; }
+  .know-claims li {
+    font-size:12.5px; line-height:1.7; color:var(--text);
+    padding:10px 12px; margin-bottom:7px; border-radius:10px;
+    background:var(--surface-solid);
+    box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light);
+  }
+  .know-claims .aspect {
+    display:block; margin-bottom:4px;
+    font-family:'Share Tech Mono', monospace; font-size:9.5px; letter-spacing:.6px;
+    color:var(--text-light);
+  }
+  .know-claims .pending { color:var(--text-light); font-size:11px; }
+  .know-empty { font-size:12px; color:var(--text-light); line-height:1.75; }
+
   /* ====== P3 设置分组子 tab / settings sub-groups ====== */
   .settings-subtabs { display: flex; gap: 6px; margin: 2px 0 14px; flex-wrap: wrap; }
   .settings-subtab {
@@ -1832,6 +1963,112 @@
     transition: opacity 0.3s;
   }
   .self-overlay.show { opacity: 1; pointer-events: auto; }
+
+  /* 多人模式名称来自环境变量；极长名称只能省略，不能反向撑宽页头。 */
+  #owner-badge {
+    min-width: 0;
+    max-width: min(220px, 100%);
+  }
+  #owner-badge-text {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  /* PC 窄窗：页头分为信息、操作两行，避免统计与标题被挤成竖排。 */
+  @media (min-width: 769px) and (max-width: 1500px) {
+    .header {
+      display: grid;
+      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-areas:
+        "title meta meta"
+        "search search actions";
+      align-items: center;
+      gap: 12px 16px;
+      padding: 20px 24px 16px;
+    }
+    .header h1 {
+      grid-area: title;
+      min-width: max-content;
+      white-space: nowrap;
+    }
+    .header-meta {
+      grid-area: meta;
+      min-width: 0;
+      justify-content: flex-end;
+      flex-wrap: wrap;
+    }
+    .header .stats { white-space: nowrap; }
+    .search-bar {
+      grid-area: search;
+      width: 100%;
+      max-width: 720px;
+      min-width: 0;
+      margin-left: 0;
+    }
+    .search-bar input {
+      width: auto;
+      min-width: 0;
+      flex: 1;
+    }
+    .header-actions {
+      grid-area: actions;
+      margin-left: 0;
+      flex-shrink: 0;
+    }
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(11, minmax(0, 1fr));
+      margin: 12px 24px 8px;
+    }
+    .tab {
+      min-width: 0;
+      max-width: none;
+      padding: 9px 10px 7px;
+    }
+    .tab-spacer { display: none; }
+  }
+
+  /* 更窄的 PC 窗口将入口稳定排成 6 + 5，避免“关于”独占一行。 */
+  @media (min-width: 769px) and (max-width: 1100px) {
+    .tabs { grid-template-columns: repeat(6, minmax(0, 1fr)); }
+  }
+
+  /* 移动端覆盖必须位于主题层之后，确保紧凑尺寸不会被桌面主题反向覆盖。 */
+  @media (max-width: 768px) {
+    .header h1 {
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+    .header .stats {
+      white-space: normal;
+      word-break: keep-all;
+    }
+    .header-actions button {
+      width: 36px !important;
+      min-width: 36px !important;
+      height: 32px !important;
+      padding: 0 !important;
+      gap: 3px !important;
+      justify-content: center;
+      font-size: 0 !important;
+    }
+    .tabs {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      margin: 8px 12px;
+      padding: 6px 8px;
+      gap: 5px;
+    }
+    .tab {
+      min-width: 0;
+      max-width: none;
+      padding: 7px 10px 5px;
+    }
+    .tab-spacer { display: none; }
+  }
 </style>
 </head>
 <body>
@@ -2234,6 +2471,15 @@
         <label>标题 <span class="en">Title</span></label>
         <input type="text" id="letter-title" placeholder="标题（可选）/ Title (optional)" />
       </div>
+      <div class="config-row">
+        <label>可见时间 <span class="en">Lock</span></label>
+        <select id="letter-lock-type" onchange="toggleLetterUnlockInput()" style="flex:0 0 180px;">
+          <option value="none">立即可读</option>
+          <option value="timed">定时解锁</option>
+          <option value="permanent">永久锁</option>
+        </select>
+        <input type="datetime-local" id="letter-unlock-date" style="display:none;flex:0 0 240px;" />
+      </div>
       <div class="config-row" style="align-items:flex-start;">
         <label style="padding-top:10px;">正文 <span class="en">Body</span></label>
         <textarea id="letter-content" placeholder="…" style="flex:1;background:var(--bg);border:1px solid var(--border);color:var(--text);padding:12px 14px;border-radius:2px;font-family:inherit;font-size:13px;line-height:1.7;min-height:180px;resize:vertical;box-shadow:inset 2px 2px 4px var(--shadow-dark-subtle), inset -2px -2px 4px var(--shadow-light);"></textarea>
@@ -2340,6 +2586,16 @@
           </span>
           <!-- 热更新持久性提示（用户反馈 #1）：Docker 下如实说明「已持久化 / 重建后会失效」 -->
           <div id="ver-persist-note" style="display:none;margin-top:10px;font-size:12px;line-height:1.5;border-radius:8px;padding:9px 12px;"></div>
+          <!-- 依赖变化时是否自动 pip install（安全加固 #2 默认关闭；这里只是把已有的
+               config.update.allow_pip_install 暴露成可点的开关，不改默认值）。 -->
+          <div style="margin-top:10px;font-size:11px;color:var(--text-dim);line-height:1.6;">
+            <label style="display:inline-flex;align-items:center;gap:6px;cursor:pointer;color:var(--text);">
+              <input type="checkbox" id="update-allow-pip" onchange="toggleUpdateAllowPip(this.checked)" />
+              热更新遇到依赖变化时自动安装（<code>pip install</code>）
+            </label>
+            <div style="margin-top:2px;">默认关闭：自动装依赖会把"谁能点热更新"放大成任意 PyPI 包的执行面。只在你信任更新来源、又不想每次依赖变化都手动重建镜像时打开；关闭时遇到依赖变化会直接拒绝更新，不改动任何文件。</div>
+            <div id="update-allow-pip-msg" style="min-height:14px;margin-top:2px;"></div>
+          </div>
         </div>
 
         <!-- 更新进度日志 -->
@@ -2350,6 +2606,24 @@
           </div>
         </div>
       </div>
+    </div>
+
+    <!-- You 只暴露这一处总开关；内部记录与审核流程不进入 Dashboard。 -->
+    <div class="config-section" id="sec-you" data-sgroup="basics">
+      <h3>你 <span class="sec-en">You</span></h3>
+      <p id="you-setting-description" style="font-size:12px;color:var(--text-dim);line-height:1.7;margin:4px 0 12px;">
+        <span style="display:block;">在长期相处中慢慢理解你</span>
+        <span style="display:block;">关闭后不再更新或使用，不影响其他功能。</span>
+      </p>
+      <div class="hw-toggle-row" style="justify-content:space-between;gap:14px;">
+        <span id="you-toggle-label">关闭</span>
+        <span class="hw-switch" id="you-enabled-sw" role="switch" tabindex="0"
+          aria-checked="false" aria-labelledby="you-toggle-label" aria-describedby="you-setting-description"
+          onclick="toggleYouSetting(this)"
+          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleYouSetting(this);}"></span>
+        <input type="checkbox" id="you-enabled" style="display:none" aria-hidden="true">
+      </div>
+      <div id="you-setting-msg" role="status" aria-live="polite" style="min-height:16px;margin-top:8px;font-size:12px;color:var(--text-dim);"></div>
     </div>
 
     <!-- ① 我 -->
@@ -2468,6 +2742,46 @@
       <div>
         <div style="font-weight:600;font-size:13px;margin-bottom:6px;">退出登录 <span class="en">Log Out</span></div>
         <button class="btn-danger" onclick="doLogout()" title="退出登录 / Log out" style="padding:0 14px;height:36px;font-size:12px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="log-out"></i> 退出登录 Log Out</button>
+      </div>
+    </div>
+
+    <!-- them 只暴露开关、每人配额、和称呼名册；认识本身不进 Dashboard。 -->
+    <div class="config-section" id="sec-them" data-sgroup="basics">
+      <h3>他们 <span class="sec-en">Them</span></h3>
+      <p id="them-setting-description" style="font-size:12px;color:var(--text-dim);line-height:1.7;margin:4px 0 12px;">
+        <span style="display:block;">在长期相处中慢慢认识你身边的人</span>
+        <span style="display:block;">你只看得到、也只改得动他们叫什么；具体的认识只属于<span class="ai-name">AI</span>。</span>
+        <span style="display:block;">关闭后不再更新或使用，不影响其他功能。</span>
+      </p>
+      <div class="hw-toggle-row" style="justify-content:space-between;gap:14px;">
+        <span id="them-toggle-label">关闭</span>
+        <span class="hw-switch" id="them-enabled-sw" role="switch" tabindex="0"
+          aria-checked="false" aria-labelledby="them-toggle-label" aria-describedby="them-setting-description"
+          onclick="toggleThemSetting(this)"
+          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleThemSetting(this);}"></span>
+        <input type="checkbox" id="them-enabled" style="display:none" aria-hidden="true">
+      </div>
+      <div id="them-setting-msg" role="status" aria-live="polite" style="min-height:16px;margin-top:8px;font-size:12px;color:var(--text-dim);"></div>
+
+      <div id="them-detail" style="display:none;margin-top:14px;">
+        <label style="display:block;font-size:12px;color:var(--text-dim);margin-bottom:6px;">
+          每个人最多记多少（token）
+        </label>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <input type="number" id="them-quota" min="200" max="4000" step="100"
+            style="width:110px;" aria-describedby="them-quota-hint">
+          <button class="btn-sm" onclick="saveThemQuota()">保存</button>
+        </div>
+        <p id="them-quota-hint" style="font-size:11px;color:var(--text-dim);margin:6px 0 0;">
+          200–4000。写满了<span class="ai-name">AI</span>会自己去合并，不会悄悄挤掉旧的。
+        </p>
+
+        <p style="font-size:11px;color:var(--text-dim);margin:14px 0 0;line-height:1.7;">
+          <span class="ai-name">AI</span>记住的人、以及你能纠正的部分，在左下角
+          <a href="#" onclick="openSelfPanel();return false;"
+             style="color:var(--accent);text-decoration:none;border-bottom:1px dotted;">那个地球</a>
+          里。这里只管开关和额度。
+        </p>
       </div>
     </div>
 
@@ -2754,10 +3068,22 @@
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">0-100，越高越难合并相似桶</div>
         <div class="config-row"><label>breath 默认桶数</label><input type="number" id="cfg-sf-breath-results" min="1" max="50" /></div>
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">1-50。AI 调用 breath() 不指定 max_results 时使用此默认值</div>
-        <div class="config-row"><label>breath 默认 token</label><input type="number" id="cfg-sf-breath-tokens" min="500" max="20000" step="500" /></div>
-        <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">500-20000。breath 单次返回总 token 上限</div>
+        <div class="config-row"><label>breath 默认 token</label><input type="number" id="cfg-sf-breath-tokens" min="500" max="40000" step="500" /></div>
+        <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">500-40000。breath 单次返回总 token 上限；40000 为安全上限，不是默认值</div>
         <div class="config-row"><label>feel 历史 token</label><input type="number" id="cfg-sf-feel-tokens" min="500" max="20000" step="500" /></div>
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">500-20000。dream / breath(domain=feel) 中新 feel 的全文预算</div>
+        <div class="config-row"><label>时区</label><input type="text" id="cfg-timezone" list="cfg-timezone-options" placeholder="Asia/Shanghai" maxlength="64" /></div>
+        <datalist id="cfg-timezone-options">
+          <option value="Asia/Shanghai"></option>
+          <option value="Asia/Tokyo"></option>
+          <option value="Asia/Singapore"></option>
+          <option value="UTC"></option>
+          <option value="Europe/London"></option>
+          <option value="Europe/Paris"></option>
+          <option value="America/New_York"></option>
+          <option value="America/Los_Angeles"></option>
+        </datalist>
+        <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">只给日期、不写时区时按它理解（如 Letter 定时锁的解锁日期）。IANA 时区名，留空 = Asia/Shanghai</div>
       </div>
     </div>
 
@@ -2851,7 +3177,7 @@
     <div class="config-section" id="sec-mcp" data-sgroup="advanced">
       <h3>MCP 配置 <span class="sec-en">MCP Setup</span></h3>
       <div style="font-size:12px;color:var(--text-dim);margin-bottom:16px;line-height:1.7;">
-        生成 Claude Desktop / claude.ai 的 MCP 连接配置。15 个工具全在一个端点 /mcp 上，只需连这一条。
+        生成 Claude Desktop / claude.ai 的 MCP 连接配置。16 个基础工具全在一个端点 /mcp 上，只需连这一条；开了 You / Them 也在同一条上。
       </div>
       <div style="margin-bottom:16px;padding:12px 14px;border:1px solid var(--border);border-radius:11px;background:var(--surface-solid);font-size:12px;line-height:1.7;">
         不确定 OAuth、端口和持久目录怎么选？
@@ -2897,7 +3223,7 @@
             <button onclick="copyMcpUrl('main')" title="复制 / Copy" style="padding:3px 8px;font-size:11px;white-space:nowrap;background:none;border:1px solid var(--border);border-radius:3px;cursor:pointer;color:var(--text-dim);"><i data-lucide="copy"></i></button>
           </div>
         </div>
-        <div style="margin-top:6px;font-size:11px;color:var(--text-light);">15 个工具已合并到单一连接器 /mcp，只需连这一条。</div>
+        <div style="margin-top:6px;font-size:11px;color:var(--text-light);">16 个基础工具已合并到单一连接器 /mcp，只需连这一条。</div>
         <div id="mcp-copy-msg" style="margin-top:4px;font-size:11px;color:var(--positive);min-height:16px;"></div>
       </div>
 
@@ -2906,14 +3232,12 @@
         <div style="font-weight:600;font-size:13px;margin-bottom:8px;">传输模式 · MCP Transport</div>
         <div id="transport-btns" style="display:flex;gap:8px;flex-wrap:wrap;align-items:center;">
           <button type="button" class="transport-btn" data-transport="streamable-http" onclick="switchTransport('streamable-http')" style="padding:7px 14px;font-size:12px;border:1px solid var(--border);background:none;border-radius:8px;cursor:pointer;font-family:inherit;color:var(--text);">Streamable HTTP</button>
-          <button type="button" class="transport-btn" data-transport="sse" onclick="switchTransport('sse')" style="padding:7px 14px;font-size:12px;border:1px solid var(--border);background:none;border-radius:8px;cursor:pointer;font-family:inherit;color:var(--text);">Legacy SSE</button>
           <button type="button" class="transport-btn" data-transport="stdio" onclick="switchTransport('stdio')" style="padding:7px 14px;font-size:12px;border:1px solid var(--border);background:none;border-radius:8px;cursor:pointer;font-family:inherit;color:var(--text);">stdio</button>
           <span id="transport-msg" style="margin-left:6px;font-size:11px;"></span>
         </div>
         <div style="margin-top:8px;font-size:11px;color:var(--text-light);line-height:1.7;">
           切换会写入 config.yaml + .env 并<b>自动重启服务</b>（约 10-30 秒）后生效。
           <b>Streamable HTTP</b>：Claude.ai 网页版 / Claude Code 远程（推荐默认）。
-          <b>Legacy SSE</b>：旧版 SSE 客户端兼容。
           <b style="color:var(--negative);">stdio</b>：⚠️ 仅本地 stdin/stdout MCP，切换后 <b>Dashboard 与所有 HTTP 服务会消失，且无法再从网页切回</b>（需在服务器改 config.yaml / 环境变量恢复）。
         </div>
       </div>
@@ -3170,6 +3494,10 @@
     <!-- Setup form -->
     <div id="auth-setup-form" style="display:none;">
       <p style="font-size:13px;color:var(--text-dim);margin-bottom:16px;">首次使用，请设置访问密码 / First time here — please set an access password</p>
+      <div id="auth-setup-remote-warning" style="display:none;text-align:left;font-size:12px;line-height:1.7;color:var(--warning,#d29922);background:rgba(210,153,34,0.12);border:1px solid rgba(210,153,34,0.4);border-radius:10px;padding:10px 12px;margin-bottom:14px;">
+        ⚠️ 检测到你不是从本机（localhost/127.0.0.1）访问的——首次设置密码的接口只信任本机连接，这里填了提交大概率会被服务端拒绝。<br>
+        请改为 SSH 登录服务器，在 <code>.env</code> 里设置 <code>OMBRE_DASHBOARD_PASSWORD</code> 后重启服务；或设置 <code>OMBRE_SETUP_TOKEN</code> 后用 <code>curl</code> 带 <code>X-Ombre-Setup-Token</code> 头远程调用一次 <code>/auth/setup</code>。
+      </div>
       <input type="password" id="auth-setup-pwd" placeholder="设置密码（至少6位）/ Password (6+ chars)" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:10px;" />
       <input type="password" id="auth-setup-pwd2" placeholder="确认密码 / Confirm password" style="display:block;width:100%;padding:10px 16px;border:1px solid var(--border);border-radius:10px;background:var(--surface-solid);color:var(--text);font-size:14px;margin-bottom:12px;" onkeydown="if(event.key==='Enter')doSetup()" />
       <details style="margin-bottom:16px;text-align:left;">
@@ -3368,6 +3696,15 @@ async function finishDashboardAuthentication() {
   return true;
 }
 
+// 只是浏览器地址栏的启发式判断，不是权威校验——服务端 auth.py 的
+// _setup_request_allowed 才是真正说了算的那道门（还要求没有代理转发头）。
+// 这里命中不了本机也提前提示，省得用户填完密码提交才被拒绝。
+function _isLikelyLoopbackHost() {
+  var h = (window.location.hostname || '').toLowerCase();
+  if (h === 'localhost' || h === '127.0.0.1' || h === '::1' || h === '[::1]') return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(h);
+}
+
 async function checkAuth() {
   var requestedGeneration = _dashboardAuthGeneration;
   try {
@@ -3381,6 +3718,8 @@ async function checkAuth() {
       document.getElementById('auth-login-form').style.display = 'none';
       document.getElementById('auth-recovery-form').style.display = 'none';
       document.getElementById('auth-overlay').style.display = 'flex';
+      var remoteWarn = document.getElementById('auth-setup-remote-warning');
+      if (remoteWarn) remoteWarn.style.display = _isLikelyLoopbackHost() ? 'none' : 'block';
       return false;
     } else if (data.authenticated) {
       document.getElementById('auth-overlay').style.display = 'none';
@@ -3412,6 +3751,11 @@ async function readAuthFailure(resp, fallback) {
     if (resp.status === 403 && error === 'Cross-origin request rejected') {
       return '反向代理来源校验失败（HTTP 403）。请让 nginx 保留 Host、X-Forwarded-Host、X-Forwarded-Proto，并配置 OMBRE_TRUSTED_PROXY_CIDRS。';
     }
+    if (resp.status === 403 && error.indexOf('local-only') !== -1) {
+      return '首次设置密码只信任本机连接（HTTP 403）。请 SSH 登录服务器，在 .env 里设置 '
+        + 'OMBRE_DASHBOARD_PASSWORD 后重启服务；或设置 OMBRE_SETUP_TOKEN 后用 curl 带 '
+        + 'X-Ombre-Setup-Token 头远程调用一次 /auth/setup。';
+    }
     return error || fallback || ('登录请求失败（HTTP ' + resp.status + '）');
   } catch (_) {
     return '登录请求失败（HTTP ' + resp.status + '）：反向代理未返回 OB 的 JSON 响应，请检查 nginx 是否完整转发 /auth/*。';
@@ -3425,8 +3769,7 @@ async function doSetup() {
   if (p1 !== p2) return showAuthError('两次密码不一致');
   const resp = await fetch('/auth/setup', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({password: p1}) });
   if (!resp.ok) {
-    const d = await resp.json().catch(() => ({}));
-    return showAuthError(d.error || '设置失败');
+    return showAuthError(await readAuthFailure(resp, '设置失败'));
   }
   // 可选：同时保存安全问题
   const q = (document.getElementById('auth-setup-q')?.value || '').trim();
@@ -4197,6 +4540,449 @@ async function loadSamplingSettings() {
   }
 }
 
+var _youStateRevision = 0;
+var _youToggleBusy = false;
+
+function renderYouSetting(enabled, message, isError) {
+  setHwSwitch('you-enabled', !!enabled);
+  var label = document.getElementById('you-toggle-label');
+  var status = document.getElementById('you-setting-msg');
+  var control = document.getElementById('you-enabled-sw');
+  if (label) label.textContent = enabled ? '开启' : '关闭';
+  if (status) {
+    status.textContent = message || '';
+    status.style.color = isError ? 'var(--negative)' : 'var(--text-dim)';
+  }
+  if (control) {
+    control.setAttribute('aria-disabled', _youToggleBusy ? 'true' : 'false');
+    control.style.pointerEvents = _youToggleBusy ? 'none' : '';
+    control.style.opacity = _youToggleBusy ? '.65' : '';
+  }
+}
+
+async function loadYouSetting() {
+  try {
+    var response = await authFetch('/api/settings/you');
+    if (!response) return;
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '加载失败');
+    _youStateRevision = Number(data.state_revision) || 0;
+    renderYouSetting(data.enabled === true, '', false);
+  } catch (error) {
+    renderYouSetting(false, '加载失败', true);
+  }
+}
+
+async function toggleYouSetting(control) {
+  if (_youToggleBusy || !control) return;
+  var desired = control.getAttribute('aria-checked') !== 'true';
+  _youToggleBusy = true;
+  renderYouSetting(desired, '保存中…', false);
+  try {
+    var response = await authFetch('/api/settings/you', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        enabled: desired,
+        state_revision: _youStateRevision,
+      }),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    _youStateRevision = Number(data.state_revision) || 0;
+    renderYouSetting(data.enabled === true, '', false);
+  } catch (error) {
+    await loadYouSetting();
+    var status = document.getElementById('you-setting-msg');
+    if (status) {
+      status.textContent = error && error.message ? error.message : '保存失败';
+      status.style.color = 'var(--negative)';
+    }
+  } finally {
+    _youToggleBusy = false;
+    var current = document.getElementById('you-enabled');
+    renderYouSetting(current ? current.checked : false,
+      document.getElementById('you-setting-msg')?.textContent || '',
+      document.getElementById('you-setting-msg')?.style.color === 'var(--negative)');
+  }
+}
+
+
+var _themStateRevision = 0;
+var _themToggleBusy = false;
+var _themPeople = [];
+// 空串 = 名册视图；非空 = 正在看这个人自己那一页。
+var _themPersonId = '';
+// AI 的显示名（/api/config 的 ai_name）。人类介意被叫「它」，所以面板里
+// 一律用名字称呼，而不是代词。
+var _aiName = '';
+
+function renderThemSetting(enabled, message, isError) {
+  setHwSwitch('them-enabled', !!enabled);
+  var label = document.getElementById('them-toggle-label');
+  var status = document.getElementById('them-setting-msg');
+  var control = document.getElementById('them-enabled-sw');
+  var detail = document.getElementById('them-detail');
+  if (label) label.textContent = enabled ? '开启' : '关闭';
+  if (status) {
+    status.textContent = message || '';
+    status.style.color = isError ? 'var(--negative)' : 'var(--text-dim)';
+  }
+  if (control) {
+    control.setAttribute('aria-disabled', _themToggleBusy ? 'true' : 'false');
+    control.style.pointerEvents = _themToggleBusy ? 'none' : '';
+    control.style.opacity = _themToggleBusy ? '.65' : '';
+  }
+  // 关掉之后连名册都不该留在页面上：它是关于具体的人的。
+  if (detail) detail.style.display = enabled ? 'block' : 'none';
+}
+
+async function loadThemSetting() {
+  try {
+    var response = await authFetch('/api/settings/them');
+    if (!response) return;
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '加载失败');
+    _themStateRevision = Number(data.state_revision) || 0;
+    var quota = document.getElementById('them-quota');
+    if (quota) quota.value = Number(data.max_tokens_per_person) || 1500;
+    renderThemSetting(data.enabled === true, '', false);
+    if (data.enabled === true) await loadThemPeople();
+  } catch (error) {
+    renderThemSetting(false, '加载失败', true);
+  }
+}
+
+async function toggleThemSetting(control) {
+  if (_themToggleBusy || !control) return;
+  var desired = control.getAttribute('aria-checked') !== 'true';
+  _themToggleBusy = true;
+  renderThemSetting(desired, '保存中…', false);
+  try {
+    var response = await authFetch('/api/settings/them', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({enabled: desired, state_revision: _themStateRevision}),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    _themStateRevision = Number(data.state_revision) || 0;
+    renderThemSetting(data.enabled === true, '', false);
+    if (data.enabled === true) await loadThemPeople();
+  } catch (error) {
+    await loadThemSetting();
+    var status = document.getElementById('them-setting-msg');
+    if (status) {
+      status.textContent = error && error.message ? error.message : '保存失败';
+      status.style.color = 'var(--negative)';
+    }
+  } finally {
+    _themToggleBusy = false;
+  }
+}
+
+async function saveThemQuota() {
+  var input = document.getElementById('them-quota');
+  var status = document.getElementById('them-setting-msg');
+  if (!input) return;
+  try {
+    var response = await authFetch('/api/settings/them', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        enabled: true,
+        state_revision: _themStateRevision,
+        max_tokens_per_person: Number(input.value),
+      }),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    _themStateRevision = Number(data.state_revision) || 0;
+    input.value = Number(data.max_tokens_per_person) || 1500;
+    if (status) { status.textContent = '已保存'; status.style.color = 'var(--text-dim)'; }
+  } catch (error) {
+    if (status) {
+      status.textContent = error && error.message ? error.message : '保存失败';
+      status.style.color = 'var(--negative)';
+    }
+  }
+}
+
+async function loadThemPeople() {
+  var box = document.getElementById('them-people-list');
+  if (!box) return;
+  try {
+    var response = await authFetch('/api/them/people');
+    if (!response) return;
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '加载失败');
+    _themPeople = data.people || [];
+    renderThemView();
+  } catch (error) {
+    box.innerHTML = '<p class="know-empty" style="color:var(--negative);">名册加载失败</p>';
+  }
+}
+
+// 图标全部内嵌。这个面板讲的是「它认得谁」，断网时正是最该看得见的东西，
+// 不该因为 CDN 上的图标库取不到就退化成一排方框或 emoji。
+var _ICO = {
+  // 听你说的：对话气泡——这些人是从你嘴里认识的
+  heard: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"'
+       + ' stroke-linecap="round" stroke-linejoin="round">'
+       + '<path d="M20.5 11.6a8 8 0 0 1-8.6 8 8.7 8.7 0 0 1-3.7-.8L3.5 20.5l1.8-4.6'
+       + 'a8 8 0 0 1 6.6-12.3 8 8 0 0 1 8.6 8z"></path></svg>',
+  // 自己遇到的：眼睛——第一手见过
+  met:   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"'
+       + ' stroke-linecap="round" stroke-linejoin="round">'
+       + '<path d="M2 12s3.6-6.8 10-6.8S22 12 22 12s-3.6 6.8-10 6.8S2 12 2 12z"></path>'
+       + '<circle cx="12" cy="12" r="2.8"></circle></svg>',
+  right: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"'
+       + ' stroke-linecap="round" stroke-linejoin="round"><path d="m9 5 7 7-7 7"></path></svg>',
+  left:  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"'
+       + ' stroke-linecap="round" stroke-linejoin="round"><path d="m15 5-7 7 7 7"></path></svg>',
+};
+
+// AI 的显示名。人类介意被称作「它」，所以面板里的每一句都用名字。
+function aiName() { return _aiName || 'AI'; }
+
+// 静态文案里的 <span class="ai-name"> 占位统一填名字。
+function applyAiName() {
+  var name = aiName();
+  var nodes = document.querySelectorAll('.ai-name');
+  for (var i = 0; i < nodes.length; i++) nodes[i].textContent = name;
+}
+
+// 提示写在面板自己身上。原先写的是设置页那个 them-setting-msg，
+// 而面板正盖在设置页上面——人在面板里操作，反馈落在了看不见的地方。
+function themMsg(text, bad) {
+  var el = document.getElementById('them-pane-msg');
+  if (!el) el = document.getElementById('them-setting-msg');
+  if (!el) return;
+  el.textContent = text || '';
+  el.style.color = bad ? 'var(--negative)' : 'var(--text-dim)';
+}
+
+// 名册 / 单人，两个视图切一个。
+function renderThemView() {
+  var 名册 = document.getElementById('them-roster');
+  var 单人 = document.getElementById('them-person-view');
+  if (!名册 || !单人) return;
+  if (_themPersonId) {
+    名册.style.display = 'none';
+    单人.style.display = '';
+    renderThemPersonView();
+  } else {
+    单人.style.display = 'none';
+    名册.style.display = '';
+    renderThemPeople();
+  }
+}
+
+function openThemPerson(personId) {
+  _themPersonId = personId;
+  themMsg('');
+  renderThemView();
+}
+
+function backToThemRoster() {
+  _themPersonId = '';
+  themMsg('');
+  renderThemView();
+}
+
+function renderThemPeople() {
+  var box = document.getElementById('them-people-list');
+  if (!box) return;
+  if (!_themPeople.length) {
+    box.innerHTML = '<p class="know-empty">还没有记住任何人。</p>';
+    return;
+  }
+  // 分组的依据不是「谁登记的」，是**怎么认识的**：听你说的 vs 自己遇到的。
+  // 这两种混在一张名单里就会张冠李戴，而人只有看得见才纠得了。
+  var 听说的 = [], 遇到的 = [];
+  for (var i = 0; i < _themPeople.length; i++) {
+    (_themPeople[i].origin === 'human' ? 听说的 : 遇到的).push(_themPeople[i]);
+  }
+  var 名 = esc(aiName());
+  box.innerHTML =
+      themGroupHtml('heard', '你告诉 ' + 名 + ' 的', 听说的,
+        名 + ' 没见过这些人，写下的每一句都来自你的转述——记岔了只有你认得出来。')
+    + themGroupHtml('met', 名 + ' 自己遇到的', 遇到的,
+        '第一手的印象。内容只属于 ' + 名 + '，你只看得到称呼。');
+}
+
+function themGroupHtml(kind, 标题, 人们, 说明) {
+  if (!人们.length) return '';
+  var h = '<div class="know-group"><div class="know-group-head">'
+        + '<span class="know-ico">' + _ICO[kind] + '</span><b>' + 标题 + '</b>'
+        + '<span class="count">' + 人们.length + ' 人</span></div>'
+        + '<p class="know-group-note">' + 说明 + '</p>';
+  for (var i = 0; i < 人们.length; i++) {
+    var p = 人们[i];
+    var 未读 = (p.pending_notes || []).length;
+    var 副 = kind === 'heard'
+      ? ((p.claims || []).length ? (p.claims.length + ' 条') : '还没记下')
+      : '';
+    h += '<button class="know-row" onclick="openThemPerson(\'' + esc(p.person_id) + '\')">'
+       + '<span class="know-row-name">' + esc((p.names || [])[0] || '（没有称呼）') + '</span>'
+       + (未读 ? '<span class="know-badge" title="' + 未读 + ' 条留言还没被读到"></span>' : '')
+       + (副 ? '<span class="know-row-sub">' + 副 + '</span>' : '')
+       + '<span class="know-row-arrow">' + _ICO.right + '</span>'
+       + '</button>';
+  }
+  return h + '</div>';
+}
+
+function renderThemPersonView() {
+  var box = document.getElementById('them-person-view');
+  if (!box) return;
+  var p = null;
+  for (var i = 0; i < _themPeople.length; i++) {
+    if (_themPeople[i].person_id === _themPersonId) p = _themPeople[i];
+  }
+  if (!p) { backToThemRoster(); return; }
+  var 听说的 = p.origin === 'human';
+  var 名 = esc(aiName());
+  var 别名 = (p.names || []).slice(1);
+
+  var h = '<button class="know-back" onclick="backToThemRoster()">'
+        + '<span class="know-row-arrow">' + _ICO.left + '</span>名册</button>'
+        + '<div class="know-detail-name">'
+        + esc((p.names || [])[0] || '（没有称呼）') + '</div>';
+  if (别名.length) {
+    h += '<div class="know-detail-alias">也叫：' + esc(别名.join('、')) + '</div>';
+  }
+  h += '<div class="know-detail-origin"><span class="know-ico">'
+     + _ICO[听说的 ? 'heard' : 'met'] + '</span><b>'
+     + (听说的 ? '你告诉 ' + 名 + ' 的' : 名 + ' 自己遇到的') + '</b></div>'
+     + '<p class="know-detail-why">'
+     + (听说的
+        ? 名 + ' 没见过这个人，关于他的一切都是你转述的。所以这一页你看得见全文——'
+          + '记岔的地方只有你认得出来。'
+        : '第一手的印象，' + 名 + ' 自己写下的。内容不出这层边界，你只看得到称呼。')
+     + '</p>';
+
+  h += '<div class="know-field"><div class="know-field-label">称呼</div>'
+     + '<div class="know-row-form">'
+     + '<input type="text" id="them-names-' + esc(p.person_id) + '"'
+     + ' value="' + esc((p.names || []).join('、')) + '"'
+     + ' aria-label="称呼，多个用顿号分开">'
+     + '<button class="btn-sm" onclick="saveThemNames(\'' + esc(p.person_id) + '\')">保存</button>'
+     + '</div>'
+     + '<p class="know-hint">多个称呼用顿号分开。改完 ' + 名
+     + ' 会在下一次回想时被告知一次新旧对照——正文一个字不动，那些句子是 ' + 名 + ' 写的。</p>'
+     + '</div>';
+
+  if (听说的) {
+    var claims = p.claims || [];
+    h += '<div class="know-field"><div class="know-field-label">'
+       + 名 + ' 从你说的话里记下的</div>';
+    if (claims.length) {
+      h += '<ul class="know-claims">';
+      for (var j = 0; j < claims.length; j++) {
+        h += '<li><span class="aspect">' + esc(claims[j].aspect || '') + '</span>'
+           + esc(claims[j].content)
+           + (claims[j].lifecycle === 'candidate'
+              ? '<span class="pending"> · 还在确认中</span>' : '')
+           + '</li>';
+      }
+      h += '</ul>';
+    } else {
+      h += '<p class="know-empty">还没有。一句话要在不同的日子里反复站得住，'
+         + 名 + ' 才会真正记下来。</p>';
+    }
+    h += '</div>';
+
+    h += '<div class="know-field"><div class="know-field-label">留话纠错</div>'
+       + '<div class="know-row-form">'
+       + '<input type="text" id="them-note-' + esc(p.person_id) + '"'
+       + ' placeholder="认错人了？还是哪句记岔了？">'
+       + '<button class="btn-sm" onclick="saveThemNote(\'' + esc(p.person_id) + '\')">留言</button>'
+       + '</div>';
+    var pending = (p.pending_notes || []).length;
+    if (pending) {
+      h += '<p class="know-hint">还有 ' + pending + ' 条没被读到，下次回想时一起给。</p>';
+    }
+    h += '<p class="know-hint">这是提醒，不是命令——信不信、改不改由 ' + 名
+       + ' 自己定。你写的这些不占 ' + 名 + ' 的记忆额度。</p></div>';
+  }
+  box.innerHTML = h;
+}
+
+async function saveThemNames(personId) {
+  var input = document.getElementById('them-names-' + personId);
+  if (!input) return;
+  var names = input.value.split(/[、,，]/).map(function (n) { return n.trim(); })
+    .filter(function (n) { return n; });
+  var current = null;
+  for (var i = 0; i < _themPeople.length; i++) {
+    if (_themPeople[i].person_id === personId) current = _themPeople[i];
+  }
+  try {
+    var response = await authFetch('/api/them/people', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({
+        person_id: personId,
+        names: names,
+        revision: current ? current.revision : 0,
+      }),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    themMsg('称呼已改，' + aiName() + '下次回想时会被告知一次');
+    await loadThemPeople();
+  } catch (error) {
+    themMsg(error && error.message ? error.message : '保存失败', true);
+  }
+}
+
+async function saveThemNote(personId) {
+  var input = document.getElementById('them-note-' + personId);
+  if (!input || !input.value.trim()) return;
+  try {
+    var response = await authFetch('/api/them/note', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({person_id: personId, text: input.value.trim()}),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '留言失败');
+    input.value = '';
+    themMsg('留言已记下，下次回想时给' + aiName() + '一次');
+    await loadThemPeople();
+  } catch (error) {
+    themMsg(error && error.message ? error.message : '留言失败', true);
+  }
+}
+
+async function addThemPerson() {
+  var input = document.getElementById('them-new-name');
+  if (!input || !input.value.trim()) return;
+  var names = input.value.split(/[、,，]/).map(function (n) { return n.trim(); })
+    .filter(function (n) { return n; });
+  try {
+    var response = await authFetch('/api/them/people/new', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({names: names}),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '登记失败');
+    input.value = '';
+    themMsg('登记好了');
+    await loadThemPeople();
+  } catch (error) {
+    themMsg(error && error.message ? error.message : '登记失败', true);
+  }
+}
+
 async function saveSamplingSettings() {
   const msg = document.getElementById('sampling-msg');
   msg.style.color = 'var(--text-dim)';
@@ -4475,12 +5261,24 @@ function selectAllCurrentPage(checked) {
   syncBucketSelectionUi();
 }
 
+function isKnownErasableTestBucket(id) {
+  var bucket = (allBuckets || []).find(function(item) { return item.id === id; });
+  return !!(bucket && bucket.erasable_test_data);
+}
+
 async function runBucketBatch(action) {
   var ids = Array.from(selectedBucketIds);
   if (!ids.length) return alert('请先选择记忆桶。');
   var labels = {forget:'主动遗忘', resolve:'沉底', archive:'归档'};
   if (!confirm('确认对 ' + ids.length + ' 条记忆执行“' + labels[action] + '”？')) return;
-  var res = await authFetch('/api/buckets/batch', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids:ids, action:action})});
+  var reason = '';
+  var allKnownTests = ids.every(isKnownErasableTestBucket);
+  if (action === 'archive' && !allKnownTests) {
+    reason = prompt('Why should these memories be archived? A reason is required.');
+    if (reason === null) return;
+    if (!reason.trim()) return alert('Archive reason is required.');
+  }
+  var res = await authFetch('/api/buckets/batch', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({ids:ids, action:action, reason:reason})});
   if (!res) return;
   var data = await readJsonSafe(res);
   if (!res.ok) return alert(data.error || '批量操作失败');
@@ -4544,6 +5342,8 @@ function activateDashboardTab(tab) {
         refreshEnvConfig(),
         loadGithubStatus(),
         loadSamplingSettings(),
+        loadYouSetting(),
+        loadThemSetting(),
         loadEnvVars(),
         loadHostVault(),
         loadLocalEmbStatus()
@@ -4771,7 +5571,8 @@ function _paintBuckets() {
     // iter 1.8: dont_surface = 主动遗忘（仍在磁盘） / first_of_kind = 首次出现的标签组合
     // 图标：feel→计算表情、letter→信封、pinned→可发光的钉、其余沿用原逻辑
     var iconCls = 'icon', iconHtml;
-    if (b.dont_surface)        iconHtml = '<i data-lucide="eye-off"></i>';
+    if (b.letter_locked)       iconHtml = '<i data-lucide="lock-keyhole"></i>';
+    else if (b.dont_surface)   iconHtml = '<i data-lucide="eye-off"></i>';
     else if (b.pinned)       { iconHtml = '<i data-lucide="pin"></i>'; iconCls = 'icon pin-ic'; }
     else if (b.type === 'feel')   iconHtml = feelFace(b.valence, b.arousal);
     else if (b.type === 'letter') iconHtml = '<i data-lucide="mail"></i>';
@@ -4897,6 +5698,25 @@ async function showDetail(id) {
     var meta = b.metadata || {};
     // content 是可无损写回的原始 Markdown；display_content 仅供详情展示。
     var displayContent = typeof b.display_content === 'string' ? b.display_content : (b.content || '');
+    if (b.letter_locked) {
+      panel.classList.add('letter-mode');
+      panel.classList.remove('anchor-mode');
+      var lockUntil = meta.lock_type === 'timed' && meta.unlock_date
+        ? '<div class="field"><label>解锁时间 / Unlock</label>' + esc(String(meta.unlock_date).replace('T', ' ').slice(0, 19)) + '</div>'
+        : '';
+      content.innerHTML =
+        '<h2><i data-lucide="lock-keyhole" style="width:18px;height:18px;vertical-align:-3px;"></i> ' + esc(meta.name || '一封上锁的信') + '</h2>' +
+        '<div class="detail-meta letter-lock-meta">' +
+          '<div class="field"><label>ID</label>' + esc(id) + '</div>' +
+          '<div class="field"><label>写信人 / Writer</label>' + esc(meta.writer_name || meta.author || '—') + '</div>' +
+          '<div class="field"><label>日期 / Date</label>' + esc(meta.letter_date || meta.created || '—') + '</div>' +
+          '<div class="field"><label>锁类型 / Lock</label>' + esc(meta.lock_type || '—') + '</div>' +
+          lockUntil +
+        '</div>' +
+        '<div class="detail-content">' + esc(displayContent || '这封信尚未向你开放。') + '</div>';
+      if (window.lucide) lucide.createIcons();
+      return true;
+    }
     var safeValence = safeNumber(meta.valence, 0.5, 0, 1);
     var safeArousal = safeNumber(meta.arousal, 0.3, 0, 1);
     var safeModelValence = meta.model_valence == null
@@ -4917,6 +5737,13 @@ async function showDetail(id) {
     var triggerHtml = meta.triggered_by ? ('<div class="field"><label>源 bucket</label><a href="#" data-bucket-id="' + escAttr(meta.triggered_by) + '" onclick="showDetail(this.dataset.bucketId);return false" style="color:var(--accent);text-decoration:underline;font-size:11px;">' + esc(meta.triggered_by) + ' →</a></div>') : '';
     // iter 1.9 D2: 反向链——这条触发了哪些 feel
     var triggeredFeelsHtml = '';
+    var deletionRequest = b.deletion_request || null;
+    var deletionRequestHtml = '';
+    if (deletionRequest && deletionRequest.status === 'pending') {
+      deletionRequestHtml = '<div style="margin:10px 0;padding:10px 14px;border-left:3px solid var(--negative);background:var(--surface-solid);">删除申请待 AI 决定 / Deletion pending: ' + esc(deletionRequest.human_reason || '') + ' <button data-bucket-id="' + escAttr(id) + '" onclick="withdrawBucketDeletion(this.dataset.bucketId)" class="icon-btn">撤回 / Withdraw</button></div>';
+    } else if (deletionRequest && deletionRequest.status === 'rejected') {
+      deletionRequestHtml = '<div style="margin:10px 0;padding:10px 14px;border-left:3px solid var(--accent);background:var(--surface-solid);">删除申请被拒绝 / Rejected' + (deletionRequest.ai_reason ? ': ' + esc(deletionRequest.ai_reason) : '') + '</div>';
+    }
     if (b.triggered_feels && b.triggered_feels.length) {
       triggeredFeelsHtml = '<div style="margin:14px 0;padding:10px 14px;border-left:3px solid var(--accent);background:var(--surface-solid);">' +
         '<div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">这条触发了 ' + b.triggered_feels.length + ' 条 feel：</div>' +
@@ -4952,13 +5779,13 @@ async function showDetail(id) {
         triggerHtml +
       '</div>' +
       triggeredFeelsHtml +
+      deletionRequestHtml +
       '<div class="detail-actions" style="display:flex;gap:8px;flex-wrap:wrap;margin:12px 0;">' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketPin(this.dataset.bucketId)" class="icon-btn">' + (meta.pinned ? '<i data-lucide="pin-off"></i> 取消钉选' : '<i data-lucide="pin"></i> 钉选') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketAnchor(this.dataset.bucketId)" class="icon-btn" title="anchor = 坐标系，不主动浮现，硬上限 24">' + (meta.anchor ? '<i data-lucide="anchor"></i> 释放 anchor' : '<i data-lucide="anchor"></i> 设为 anchor') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketResolve(this.dataset.bucketId)" class="icon-btn">' + (meta.resolved ? '<i data-lucide="rotate-ccw"></i> 取消已解决' : '<i data-lucide="check"></i> 标记已解决') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketForget(this.dataset.bucketId)" class="icon-btn">' + (meta.dont_surface ? '<i data-lucide="eye"></i> 重新允许浮现' : '<i data-lucide="eye-off"></i> 主动遗忘') + '</button>' +
         '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketArchive(this.dataset.bucketId)" class="icon-btn"><i data-lucide="archive"></i> 归档</button>' +
-        '<button data-bucket-id="' + escAttr(id) + '" onclick="bucketDelete(this.dataset.bucketId)" class="icon-btn" style="color:#b85c3c;"><i data-lucide="trash-2"></i> 删除到档案</button>' +
       '</div>' +
       '<div class="detail-content">' + esc(displayContent) + '</div>' +
       renderEditForm(id, Object.assign({}, meta, {_content_for_edit: b.content}));
@@ -5079,27 +5906,27 @@ async function bucketResolve(id) {
 }
 
 async function bucketArchive(id) {
-  if (!confirm('确认归档此桶？归档后将从浮现/搜索中隐藏，但文件仍保留在 archive/ 目录。\n\nArchive this bucket? It will be hidden from surfacing/search, but the file stays in archive/.')) return;
+  if (!confirm('确认申请归档此桶？需填写理由并由 AI 审批；批准后它将从浮现/搜索中隐藏，文件仍保留在 archive/ 目录并标记为已删除。\n\nRequest archive? AI approval is required. The file remains in archive/ with a deletion marker.')) return;
+  var reason = '';
+  if (!isKnownErasableTestBucket(id)) {
+    reason = prompt('为什么要归档这条记忆？必须填写理由，由 AI 审批。 / Why should this memory be archived? AI approval is required.');
+    if (reason === null) return;
+    if (!reason.trim()) { alert('Archive reason is required.'); return; }
+  }
   try {
-    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/archive', { method: 'POST' });
+    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/archive', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({reason: reason}) });
     if (!res.ok) throw new Error(await res.text());
     closeDetail();
     loadBuckets();
   } catch (e) { alert('归档失败: ' + e.message); }
 }
 
-async function bucketDelete(id) {
-  if (!confirm('这会把此记忆桶移入删除档案，并从日常界面隐藏；文件仍保留在 archive/ 中。继续？\n\nThis moves the bucket to the delete archive and hides it from everyday views; the file stays in archive/. Continue?')) return;
+async function withdrawBucketDeletion(id) {
   try {
-    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '?confirm=true', { method: 'DELETE' });
+    var res = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/deletion-request/withdraw', {method:'POST'});
     if (!res.ok) throw new Error(await res.text());
-    closeDetail();
-    // 「放下」：让这条记忆轻轻消散，而不是直接消失
-    var sel = (window.CSS && CSS.escape) ? CSS.escape(id) : id;
-    var row = document.querySelector('.bucket-row[data-id="' + sel + '"]');
-    if (row) { row.classList.add('dissolving'); setTimeout(loadBuckets, 600); }
-    else { loadBuckets(); }
-  } catch (e) { alert('删除失败: ' + e.message); }
+    await showDetail(id); loadBuckets();
+  } catch (e) { alert('撤回失败 / Withdrawal failed: ' + e.message); }
 }
 
 function closeDetail() {
@@ -7056,6 +7883,9 @@ async function loadOwnerBadge(cfg) {
       if (!res) return;
       cfg = await res.json();
     }
+    // 顺手取 AI 的显示名：面板里的文案要用名字称呼它，不用「它」。
+    _aiName = (cfg.ai_name || '').trim();
+    applyAiName();
     var badge = document.getElementById('owner-badge');
     if (!badge) return;
     var count = parseInt(cfg.owner_count, 10) || 1;
@@ -7148,7 +7978,8 @@ async function loadConfig() {
     var sf = cfg.surfacing || {};
     document.getElementById('cfg-sf-breath-results').value = sf.breath_max_results || 20;
     document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 10000;
-    document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 6000;
+    document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 15000;
+    document.getElementById('cfg-timezone').value = cfg.timezone || 'Asia/Shanghai';
     document.getElementById('config-readonly').innerHTML =
       'Transport（已保存）: <strong>' + esc(cfg.transport) + '</strong>'
       + '<br>Transport（当前生效）: <strong>' + esc(cfg.transport_effective || cfg.transport) + '</strong>'
@@ -7443,8 +8274,9 @@ async function saveConfig(persist) {
     surfacing: {
       breath_max_results: parseInt(document.getElementById('cfg-sf-breath-results').value) || 20,
       breath_max_tokens: parseInt(document.getElementById('cfg-sf-breath-tokens').value) || 10000,
-      feel_max_tokens: parseInt(document.getElementById('cfg-sf-feel-tokens').value) || 6000,
+      feel_max_tokens: parseInt(document.getElementById('cfg-sf-feel-tokens').value) || 15000,
     },
+    timezone: (document.getElementById('cfg-timezone').value || '').trim(),
     persist: persist,
   };
   var status = document.getElementById('config-status');
@@ -7529,6 +8361,8 @@ loadVersionBadge();
     }
 
     var info = await loadDeployInfo();
+    var allowPipBox = document.getElementById('update-allow-pip');
+    if (allowPipBox) allowPipBox.checked = !!info.update_allow_pip_install;
     var deployEl = document.getElementById('ver-deploy-info');
     if (deployEl) {
       deployEl.textContent = [
@@ -7580,6 +8414,33 @@ loadVersionBadge();
     el.style.display = '';
   }
 
+  window.toggleUpdateAllowPip = async function(checked) {
+    var box = document.getElementById('update-allow-pip');
+    var msg = document.getElementById('update-allow-pip-msg');
+    if (msg) { msg.style.color = 'var(--text-dim)'; msg.textContent = '保存中…'; }
+    try {
+      var r = await authFetch('/api/update-settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ allow_pip_install: checked }),
+      });
+      var d = r ? await r.json() : {};
+      if (d.ok) {
+        if (_deployInfo) _deployInfo.update_allow_pip_install = d.allow_pip_install;
+        if (msg) {
+          msg.style.color = 'var(--positive)';
+          msg.textContent = d.allow_pip_install ? '已开启，立即生效，无需重启。' : '已关闭。';
+        }
+      } else {
+        if (box) box.checked = !checked;
+        if (msg) { msg.style.color = 'var(--negative)'; msg.textContent = d.error || '保存失败'; }
+      }
+    } catch (e) {
+      if (box) box.checked = !checked;
+      if (msg) { msg.style.color = 'var(--negative)'; msg.textContent = e.message; }
+    }
+  };
+
   window.doHotUpdate = async function() {
     var btn = document.getElementById('btn-hot-update');
     var logWrap = document.getElementById('ver-update-log');
@@ -7599,7 +8460,8 @@ loadVersionBadge();
     if (logBox)  logBox.textContent = '';
     if (doneEl)  doneEl.style.display = 'none';
 
-    var log = function(line) { if (logBox) logBox.textContent += line + '\n'; };
+    var baseLog = '';
+    var log = function(line) { baseLog += line + '\n'; if (logBox) logBox.textContent = baseLog; };
 
     try {
       // 热更新不是可重试写操作，不能走会对瞬时 502/503/504 自动重试的
@@ -7650,15 +8512,19 @@ loadVersionBadge();
       }
 
       if (restarting) {
-        // 轮询 /api/version 直到服务恢复
+        // 轮询 /api/version 直到服务恢复。等待提示原地刷新省略号（1~3 个循环），
+        // 不再每次追加新行——之前每 2 秒挂一行「等待服务恢复…」，60 秒内能刷出
+        // 30 行，日志框疯狂向下滚动，体验很差（用户反馈：卡在这一步"很掉san"）。
         var newVer = null;
+        var dotCount = 0;
         for (var i = 0; i < 30; i++) {
           await new Promise(function(res) { setTimeout(res, 2000); });
           try {
             var vr = await fetch(BASE + '/api/version');
             if (vr.ok) { var vd = await vr.json(); newVer = vd.version; break; }
           } catch(_) {}
-          log('等待服务恢复…');
+          dotCount = (dotCount % 3) + 1;
+          if (logBox) logBox.textContent = baseLog + '等待服务恢复' + '.'.repeat(dotCount);
         }
         if (newVer) {
           log('服务已恢复，新版本：v' + newVer);
@@ -8184,7 +9050,8 @@ async function loadImportResults(options) {
         </div>
         <p style="font-size:13px;margin:6px 0;white-space:pre-wrap;">${esc(b.content)}</p>
         <div style="font-size:11px;color:var(--text-dim);margin-bottom:6px;">${esc((b.tags||[]).map(t=>'#'+t).join(' '))}</div>
-        <div style="display:flex;gap:8px;flex-wrap:wrap;">
+        ${b.letter_item ? '<div style="font-size:12px;color:var(--text-dim);">请在「信」页管理 / Manage in Letters</div>' : ''}
+        <div style="display:${b.letter_item ? 'none' : 'flex'};gap:8px;flex-wrap:wrap;">
           <button data-bucket-id="${escAttr(b.id)}" onclick="openImportedBucketEditor(this.dataset.bucketId)" class="icon-btn" title="编辑完整记忆 / Edit full memory"><svg class="icon" aria-hidden="true"><use href="#i-edit"></use></svg> 编辑</button>
           <button data-bucket-id="${escAttr(b.id)}" onclick="reviewAction(this.dataset.bucketId,'pin')" class="icon-btn" title="固定为永久记忆"><i data-lucide="pin"></i> 固定</button>
           <button data-bucket-id="${escAttr(b.id)}" onclick="reviewAction(this.dataset.bucketId,'important')" class="icon-btn" title="标为重要"><i data-lucide="star"></i> 重要</button>
@@ -8243,9 +9110,15 @@ async function detectPatterns() {
 
 async function reviewAction(bid, action) {
   try {
+    var reason = '';
+    if (action === 'delete') {
+      reason = prompt('为什么要删除这条记忆？必须填写理由。 / Why should this memory be deleted?');
+      if (reason === null) return;
+      if (!reason.trim()) throw new Error('Deletion reason is required.');
+    }
     const response = await fetch(BASE + '/api/import/review', {
       method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ decisions: [{ bucket_id: bid, action }] })
+      body: JSON.stringify({ decisions: [{ bucket_id: bid, action, reason }] })
     });
     const result = await readJsonSafe(response);
     if (!response.ok || !result || result.applied !== 1 || result.errors) {
@@ -9283,18 +10156,24 @@ async function loadLetters() {
 }
 
 function _renderLetter(l) {
-  // 用户侧显示 user_name；AI 侧（及任意自定义署名）原样显示存储的 author 值。
-  const who = l.author === 'user' ? (l.user_name || 'user') : (l.author || 'AI');
+  const who = l.writer_name || (l.author === 'user' ? (l.user_name || l.author) : l.author);
   const accentColor = l.author !== 'user' ? 'var(--accent)' : 'var(--text-dim)';
+  const lockLabel = l.lock_type === 'timed'
+    ? `定时锁${l.unlock_date ? ' · ' + esc(String(l.unlock_date).replace('T', ' ').slice(0, 16)) + ' 解锁' : ''}`
+    : (l.lock_type === 'permanent' ? '永久锁 · 当前不可查看' : '立即可读');
   return `<article style="background:var(--surface);border:1px solid var(--border);border-radius:2px;padding:18px 22px;box-shadow:4px 4px 10px var(--shadow-dark-subtle), -4px -4px 10px var(--shadow-light);" data-id="${escAttr(l.id)}">
     <div style="font-size:11px;color:var(--text-dim);letter-spacing:0.15em;display:flex;justify-content:space-between;margin-bottom:8px;">
       <span style="color:${accentColor};font-weight:600;">${esc(who)}</span><span>${esc(l.date || '')}</span>
     </div>
-    ${l.title ? `<div style="font-family:'Cormorant Garamond', serif;font-size:17px;font-weight:600;margin-bottom:8px;color:var(--text);">${esc(l.title)}</div>` : ''}
-    <div style="white-space:pre-wrap;font-size:14px;line-height:1.75;color:var(--text);">${esc(l.content || '')}</div>
+    <div style="font-size:11px;color:${l.locked ? 'var(--accent)' : 'var(--text-dim)'};margin-bottom:8px;">${lockLabel}</div>
+    ${l.deletion_request && l.deletion_request.status === 'pending' ? `<div style="font-size:12px;color:var(--negative);margin-bottom:8px;">删除申请待决定 / Deletion pending: ${esc(l.deletion_request.human_reason || '')}</div>` : ''}
+    ${l.deletion_request && l.deletion_request.status === 'rejected' ? `<div style="font-size:12px;color:var(--accent);margin-bottom:8px;">删除申请被拒绝 / Rejected${l.deletion_request.ai_reason ? ': ' + esc(l.deletion_request.ai_reason) : ''}</div>` : ''}
+    ${l.locked ? '<div style="font-size:13px;color:var(--text-dim);padding:10px 0;">这封信尚未向你开放。</div>' : `${l.title ? `<div style="font-family:'Cormorant Garamond', serif;font-size:17px;font-weight:600;margin-bottom:8px;color:var(--text);">${esc(l.title)}</div>` : ''}<div style="white-space:pre-wrap;font-size:14px;line-height:1.75;color:var(--text);">${esc(l.content || '')}</div>`}
     <div style="margin-top:12px;display:flex;gap:8px;justify-content:flex-end;font-size:11px;">
-      <button data-letter-id="${escAttr(l.id)}" onclick="editLetter(this.dataset.letterId)" title="编辑" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;"><i data-lucide="pencil" style="width:13px;height:13px;"></i></button>
-      <button data-letter-id="${escAttr(l.id)}" onclick="deleteLetter(this.dataset.letterId)" title="删除" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--accent);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;"><i data-lucide="trash-2" style="width:13px;height:13px;"></i></button>
+      ${!l.locked ? `<button data-letter-id="${escAttr(l.id)}" onclick="editLetter(this.dataset.letterId)" title="编辑" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;"><i data-lucide="pencil" style="width:13px;height:13px;"></i></button>` : ''}
+      ${l.lock_owner ? `<button data-letter-id="${escAttr(l.id)}" onclick="manageLetterLock(this.dataset.letterId)" title="修改锁状态" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="lock-keyhole" style="width:13px;height:13px;"></i> 锁</button>` : ''}
+      ${l.lock_upgrade_available ? `<button data-letter-id="${escAttr(l.id)}" onclick="convertLegacyLetter(this.dataset.letterId)" title="转换为 AI 可管理锁的新格式" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--text-dim);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;gap:4px;"><i data-lucide="refresh-cw" style="width:13px;height:13px;"></i> 转换</button>` : ''}
+      ${l.deletion_request && l.deletion_request.status === 'pending' ? `<button data-letter-id="${escAttr(l.id)}" onclick="withdrawLetterDeletion(this.dataset.letterId)" title="撤回删除申请">撤回 / Withdraw</button>` : `<button data-letter-id="${escAttr(l.id)}" onclick="deleteLetter(this.dataset.letterId)" title="删除" style="padding:4px 9px;background:transparent;border:1px solid var(--border);color:var(--accent);border-radius:2px;cursor:pointer;display:inline-flex;align-items:center;"><i data-lucide="trash-2" style="width:13px;height:13px;"></i></button>`}
     </div>
   </article>`;
 }
@@ -9309,7 +10188,16 @@ async function sendLetter() {
     title: document.getElementById('letter-title').value,
     date: document.getElementById('letter-date').value,
     content: document.getElementById('letter-content').value,
+    lock_type: document.getElementById('letter-lock-type').value,
   };
+  if (body.lock_type === 'timed') {
+    const rawUnlock = document.getElementById('letter-unlock-date').value;
+    if (!rawUnlock) {
+      status.style.color = 'var(--negative)'; status.textContent = '请选择解锁时间';
+      return;
+    }
+    body.unlock_date = new Date(rawUnlock).toISOString();
+  }
   if (!body.content.trim()) {
     status.style.color = 'var(--negative)'; status.textContent = '内容为空';
     return;
@@ -9325,6 +10213,9 @@ async function sendLetter() {
       status.innerHTML = _SV.ok + ' 已寄出 · ' + esc(d.id);
       document.getElementById('letter-content').value = '';
       document.getElementById('letter-title').value = '';
+      document.getElementById('letter-lock-type').value = 'none';
+      document.getElementById('letter-unlock-date').value = '';
+      toggleLetterUnlockInput();
       loadLetters();
     } else {
       status.style.color = 'var(--negative)';
@@ -9338,7 +10229,7 @@ async function sendLetter() {
 
 async function editLetter(id) {
   const l = _lettersCache.find(x => x.id === id);
-  if (!l) { alert('未找到该信件 / Letter not found'); return; }
+  if (!l || l.locked) { alert('这封信当前不可编辑 / Letter unavailable'); return; }
   const newTitle = prompt('标题（留空则不改）：', l.title || '');
   if (newTitle === null) return;
   const newDate = prompt('日期 YYYY-MM-DD（留空则不改）：', l.date || '');
@@ -9362,15 +10253,49 @@ async function editLetter(id) {
   } catch (e) { alert(e.message); }
 }
 
-async function deleteLetter(id) {
-  if (!confirm('这会把这封信移入删除档案；文件仍保留在 archive/ 中。继续？\n\nThis moves the letter to the delete archive; the file stays in archive/. Continue?')) return;
-  if (!confirm('再次确认：这不是物理抹除。 / Confirm again: this is not a physical erase.')) return;
+async function manageLetterLock(id) {
+  const l = _lettersCache.find(x => x.id === id);
+  if (!l) { alert('未找到该信件 / Letter not found'); return; }
+  const next = prompt('新的锁状态：none / timed / permanent', l.lock_type || 'none');
+  if (next === null) return;
+  const lockType = next.trim().toLowerCase();
+  if (!['none', 'timed', 'permanent'].includes(lockType)) { alert('锁状态无效'); return; }
+  const body = {lock_type: lockType};
+  if (lockType === 'timed') {
+    const raw = prompt('解锁时间（带时区的 ISO 8601，例如 2026-08-12T20:00:00+08:00）：', l.unlock_date || '');
+    if (raw === null) return;
+    body.unlock_date = raw.trim();
+  }
+  if (!confirm('确认只修改这封信的锁状态？原稿不会改变。')) return;
   try {
-    const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id) + '?confirm=true', { method: 'DELETE' });
+    const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id), {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
     const d = await r.json();
-    if (d.ok) { alert('已删除到档案 / Moved to archive'); loadLetters(); }
+    if (d.ok) { alert('已更新 / Updated'); loadLetters(); }
+    else { alert(d.error || '更新失败'); }
+  } catch (e) { alert(e.message); }
+}
+
+async function deleteLetter(id) {
+  const reason = prompt('为什么要删除这封信？必须填写理由。 / Why should this letter be deleted?');
+  if (reason === null) return;
+  if (!reason.trim()) { alert('必须填写删除理由。 / Deletion reason is required.'); return; }
+  try {
+    const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id) + '?confirm=true', { method: 'DELETE', headers: {'Content-Type':'application/json'}, body: JSON.stringify({reason}) });
+    const d = await r.json();
+    if (d.ok) { alert(d.deleted ? '已移入档案 / Moved to archive' : '删除申请已提交 / Deletion request submitted'); loadLetters(); }
     else { alert(d.error || '删除失败'); }
   } catch (e) { alert(e.message); }
+}
+
+async function withdrawLetterDeletion(id) {
+  try {
+    const r = await fetch(BASE + '/api/bucket/' + encodeURIComponent(id) + '/deletion-request/withdraw', {method:'POST'});
+    if (!r.ok) throw new Error(await r.text());
+    loadLetters();
+  } catch (e) { alert('撤回失败 / Withdrawal failed: ' + e.message); }
 }
 
 // ── E/F 级错误自动弹窗 ────────────────────────────────────────
@@ -9445,6 +10370,43 @@ function refreshAuthenticatedActiveView() {
   if (!target) target = document.querySelector('.tab.active');
   if (target) return activateDashboardTab(target);
   return Promise.resolve([]);
+}
+
+async function convertLegacyLetter(id) {
+  const l = _lettersCache.find(x => x.id === id);
+  if (!l || !l.lock_upgrade_available) { alert('这封信不需要转换 / Conversion unavailable'); return; }
+  if (!confirm('转换后，这封历史 Letter 的锁控制权将永久交给当前 AI。\n\n正文、标题和创建时间不会改变；当前仍保持公开。确认继续？')) return;
+  await _submitConvertLegacyLetter(id, '');
+}
+
+// AI_NAME 未配置时后端会拒绝转换（需要一个「实际关系名」才能确定锁的归属，
+// 见 web/letters.py 的 convert_to_lockable 分支）。这里不改那道检查，只是让
+// 用户能当场填一个名字重试——只用于这一次转换请求，不写入全局配置。
+async function _submitConvertLegacyLetter(id, aiName) {
+  try {
+    const body = {convert_to_lockable: true};
+    if (aiName) body.ai_name = aiName;
+    const r = await fetch(BASE + '/api/letter/' + encodeURIComponent(id), {
+      method: 'PATCH', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify(body),
+    });
+    const d = await r.json();
+    if (d.ok) { alert('已转换为新版 Letter，锁控制权已交给当前 AI。'); loadLetters(); return; }
+    if (!aiName && r.status === 400 && (d.error || '').indexOf('无法转换历史 Letter') === 0) {
+      const typed = (prompt(
+        '当前未配置 AI_NAME，无法确定这封信锁的实际归属名。\n\n'
+        + '请输入这次转换要用的实际关系名（仅用于这一次转换，不会修改全局配置）：'
+      ) || '').trim();
+      if (typed) { await _submitConvertLegacyLetter(id, typed); return; }
+      return;
+    }
+    alert(d.error || '转换失败');
+  } catch (e) { alert(e.message); }
+}
+
+function toggleLetterUnlockInput() {
+  const type = document.getElementById('letter-lock-type').value;
+  document.getElementById('letter-unlock-date').style.display = type === 'timed' ? '' : 'none';
 }
 
 // ── 给作者反馈 ──────────────────────────────────────────────
@@ -9601,12 +10563,22 @@ async function syncExistingHuman() {
 <div class="self-panel" id="self-panel">
   <div class="self-panel-header">
     <div>
-      <div class="self-panel-title">我</div>
-      <div class="self-panel-subtitle">Self &nbsp;/&nbsp; I</div>
+      <div class="self-panel-title" id="know-title">我</div>
+      <div class="self-panel-subtitle" id="know-subtitle">Self &nbsp;/&nbsp; I</div>
     </div>
     <button class="self-panel-close" onclick="closeSelfPanel()" title="关闭">
       <i data-lucide="x" style="width:16px;height:16px;"></i>
     </button>
+  </div>
+  <!-- 三层认识共用一个入口：它对自己、对你、对别人。
+       开关仍留在「设置」里——这里放的是内容，不是配置。 -->
+  <div class="know-tabs" role="tablist">
+    <button class="know-tab active" data-know="i" role="tab"
+      onclick="switchKnowTab('i')">我 <span class="en">I</span></button>
+    <button class="know-tab" data-know="you" role="tab"
+      onclick="switchKnowTab('you')">你 <span class="en">You</span></button>
+    <button class="know-tab" data-know="them" role="tab"
+      onclick="switchKnowTab('them')">他们 <span class="en">Them</span></button>
   </div>
   <div class="self-panel-filters" id="self-filters">
     <button class="self-filter-btn active" data-aspect="" onclick="setSelfFilter(this)">全部</button>
@@ -9621,14 +10593,153 @@ async function syncExistingHuman() {
   <div class="self-panel-body" id="self-panel-body">
     <div class="self-panel-empty">加载中… / Loading…</div>
   </div>
+
+  <!-- 你 You：人类只看得到开关状态。它写下的认识不出这个边界（rule.md 13.2）。 -->
+  <div class="know-pane" id="know-pane-you" style="display:none;">
+    <div class="know-state" id="you-pane-state">加载中…</div>
+    <p class="know-note">
+      <b class="ai-name">AI</b> 在长期相处里慢慢理解你。<br><br>
+      <b>记下了什么，你看不到。</b>那些句子是写给自己的——不是画像，也不是报告。
+      这里只有一个开关。<br><br>
+      要开或要关，去<a href="#" onclick="gotoSetting('sec-you');return false;">设置 · 常规</a>。
+    </p>
+  </div>
+
+  <!-- 他们 Them：名册在这里（内容），开关与配额在设置里（配置）。 -->
+  <div class="know-pane" id="know-pane-them" style="display:none;">
+    <div class="know-state" id="them-pane-state">加载中…</div>
+    <div class="know-group-note" id="them-pane-msg" role="status" aria-live="polite"
+      style="margin:0 3px;"></div>
+    <!-- 视图一：名册。按「怎么认识的」分组，点一个人进他自己那一页。 -->
+    <div id="them-roster" style="display:none;">
+      <div class="know-row-form" style="display:flex;gap:8px;margin:14px 0 6px;">
+        <input type="text" id="them-new-name" placeholder="登记一个你认识的人"
+          style="flex:1;min-width:0;" aria-label="登记一个你认识的人">
+        <button class="btn-sm" onclick="addThemPerson()">登记</button>
+      </div>
+      <p class="know-group-note">多个称呼用顿号分开，例如「张三、老张」。</p>
+      <div id="them-people-list"></div>
+      <p class="know-note">
+        <b>听别人描述一个人</b>和<b>自己认识一个人</b>是两码事，所以分开摆。
+        点开一个人可以改称呼；你说过的那些人，还能留话纠错。
+      </p>
+    </div>
+
+    <!-- 视图二：单人。一个人一页——称呼、来源、以及（只有你说过的那些人）正文。 -->
+    <div id="them-person-view" style="display:none;"></div>
+
+    <p class="know-note" id="them-pane-off" style="display:none;">
+      <b class="ai-name">AI</b> 还没开始认识你身边的人。<br><br>
+      要开，去<a href="#" onclick="gotoSetting('sec-them');return false;">设置 · 常规</a>。
+    </p>
+  </div>
 </div>
 
-<button class="self-fab" id="self-fab" onclick="openSelfPanel()" title="我是谁">
-  <span class="fab-label">I</span>
+<button class="self-fab" id="self-fab" onclick="openSelfPanel()" title="记得的：我 · 你 · 他们">
+  <span class="fab-globe" aria-hidden="true">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.3"
+         stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="12" cy="12" r="9"></circle>
+      <path d="M3 12h18"></path>
+      <path d="M12 3a13.5 13.5 0 0 1 0 18a13.5 13.5 0 0 1 0-18z"></path>
+    </svg>
+  </span>
   <span class="fab-dot"></span>
 </button>
 
 <script>
+
+// ====== 三层认识面板：我 / 你 / 他们 ======
+// 一个入口装它的三层认识。开关仍在「设置」里——这里放内容，不放配置。
+var _knowTab = 'i';
+var _knowTitles = {
+  i:    ['我',   'Self &nbsp;/&nbsp; I'],
+  you:  ['你',   'You'],
+  them: ['他们', 'Them'],
+};
+
+function switchKnowTab(which) {
+  _knowTab = which;
+  document.querySelectorAll('.know-tab').forEach(function (t) {
+    t.classList.toggle('active', t.getAttribute('data-know') === which);
+  });
+  var 标题 = _knowTitles[which] || _knowTitles.i;
+  document.getElementById('know-title').textContent = 标题[0];
+  document.getElementById('know-subtitle').innerHTML = 标题[1];
+
+  // 「我」那格复用原有的 filters + body，另外两格各自一个 pane。
+  document.getElementById('self-filters').style.display = which === 'i' ? '' : 'none';
+  document.getElementById('self-panel-body').style.display = which === 'i' ? '' : 'none';
+  document.getElementById('know-pane-you').style.display = which === 'you' ? '' : 'none';
+  document.getElementById('know-pane-them').style.display = which === 'them' ? '' : 'none';
+
+  if (which === 'i') loadSelfEntries();
+  if (which === 'you') loadYouPane();
+  if (which === 'them') loadThemPane();
+  if (window.lucide) lucide.createIcons();
+}
+
+// 从面板跳到设置里对应的那一段，并把它高亮出来。
+function gotoSetting(sectionId) {
+  closeSelfPanel();
+  if (typeof showView === 'function') showView('settings');
+  var el = document.getElementById(sectionId);
+  if (!el) return;
+  if (typeof showSettingsGroup === 'function') {
+    showSettingsGroup(el.getAttribute('data-sgroup') || 'basics');
+  }
+  el.scrollIntoView({behavior: 'smooth', block: 'center'});
+  el.style.transition = 'box-shadow .4s';
+  el.style.boxShadow = '0 0 0 2px var(--accent-glow)';
+  setTimeout(function () { el.style.boxShadow = ''; }, 1800);
+}
+
+async function loadYouPane() {
+  // 复用 loadYouSetting，不自己再开一次请求：
+  // You 的请求面被 test_you_frontend_contract 锁着，只允许那两处
+  // （读状态 + 提交开关）。多开一个只读调用也会把它顶红——
+  // 那条断言守的是「别在 You 上偷偷加端点」，方向是对的。
+  var box = document.getElementById('you-pane-state');
+  try {
+    await loadYouSetting();
+    var sw = document.getElementById('you-enabled');
+    box.innerHTML = (sw && sw.checked) ? '<b>已开启</b>　它在慢慢理解你。' : '未开启。';
+  } catch (e) {
+    box.textContent = '状态读不到。';
+  }
+}
+
+async function loadThemPane() {
+  var 状态 = document.getElementById('them-pane-state');
+  var 名册 = document.getElementById('them-roster');
+  var 单人 = document.getElementById('them-person-view');
+  var 关 = document.getElementById('them-pane-off');
+  themMsg('');
+  // 面板可能先于设置页被打开，那时还没人取过 ai_name。文案里全是名字，
+  // 缺了就会满屏「AI」，所以这里补一次。
+  if (!_aiName) { try { await loadOwnerBadge(); } catch (e) { /* 名字取不到不挡名册 */ } }
+  applyAiName();
+  try {
+    var r = await authFetch('/api/settings/them');
+    var d = await readJsonSafe(r);
+    if (!r || !r.ok) throw new Error(d.error || '读不到');
+    _themStateRevision = Number(d.state_revision) || 0;
+    if (d.enabled) {
+      状态.innerHTML = '<b>已开启</b>　每人最多记 ' + (d.max_tokens_per_person || 1500) + ' token。';
+      关.style.display = 'none';
+      // 每次进这一格都回到名册：上次停在谁那一页，不该是下次打开时的起点。
+      _themPersonId = '';
+      await loadThemPeople();
+    } else {
+      状态.textContent = '';
+      名册.style.display = 'none'; 单人.style.display = 'none'; 关.style.display = '';
+    }
+  } catch (e) {
+    状态.textContent = '状态读不到。';
+    名册.style.display = 'none'; 单人.style.display = 'none'; 关.style.display = 'none';
+  }
+}
+
 // ====== Self / I panel ======
 let _selfEntries = [];
 let _selfAspectFilter = '';
@@ -9636,8 +10747,7 @@ let _selfAspectFilter = '';
 async function openSelfPanel() {
   document.getElementById('self-panel').classList.add('open');
   document.getElementById('self-overlay').classList.add('show');
-  await loadSelfEntries();
-  if (window.lucide) lucide.createIcons();
+  switchKnowTab(_knowTab);
 }
 
 function closeSelfPanel() {

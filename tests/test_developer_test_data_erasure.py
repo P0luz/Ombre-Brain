@@ -3,6 +3,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from errors import ToolInputError
+
 import tools._runtime as rt
 from ombrebrain.policy.formal_invariants import FormalInvariantChecker
 from tools.trace.core import trace_core
@@ -56,11 +58,13 @@ async def test_trace_hard_delete_refuses_normal_plan_without_archiving(bucket_mg
     plan_path = Path(before["path"])
     _install_trace_runtime(bucket_mgr)
 
-    result = await trace_core(
-        plan_id,
-        hard_delete=True,
-        delete_reason="reported cleanup request",
-    )
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_core(
+            plan_id,
+            hard_delete=True,
+            delete_reason="reported cleanup request",
+        )
+    result = str(excinfo.value)
 
     after = await bucket_mgr.get(plan_id)
     assert "普通记忆桶（包括 plan）不可被 trace 物理删除" in result
@@ -93,26 +97,29 @@ async def test_test_data_cleanup_requires_reason_and_rejects_conflicting_modes(
     assert missing == {"ok": False, "error": "missing_delete_reason"}
     assert test_path.exists()
 
-    missing_via_trace = await trace_core(test_id, hard_delete=True)
-    assert "必须提供非空 delete_reason" in missing_via_trace
+    with pytest.raises(ToolInputError) as 缺理由:
+        await trace_core(test_id, hard_delete=True)
+    assert "必须提供非空 delete_reason" in str(缺理由.value)
     assert test_path.exists()
 
-    too_long = await trace_core(
-        test_id,
-        hard_delete=True,
-        delete_reason="x" * 501,
-    )
-    assert "不能超过 500 个字符" in too_long
+    with pytest.raises(ToolInputError) as 理由过长:
+        await trace_core(
+            test_id,
+            hard_delete=True,
+            delete_reason="x" * 501,
+        )
+    assert "不能超过 500 个字符" in str(理由过长.value)
     assert test_path.exists()
 
-    conflicting = await trace_core(
-        test_id,
-        delete=True,
-        hard_delete=True,
-        delete_reason="gateway test cleanup",
-    )
-    assert "参数冲突" in conflicting
-    assert "未删除、未归档" in conflicting
+    with pytest.raises(ToolInputError) as 冲突:
+        await trace_core(
+            test_id,
+            delete=True,
+            hard_delete=True,
+            delete_reason="gateway test cleanup",
+        )
+    assert "参数冲突" in str(冲突.value)
+    assert "未删除、未归档" in str(冲突.value)
     assert test_path.exists()
     assert await bucket_mgr.get(test_id) is not None
 

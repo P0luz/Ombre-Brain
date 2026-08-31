@@ -48,8 +48,9 @@ async def test_default_breath_hides_all_digested_surface_classes(
         content="Digested ordinary memory must stay hidden.",
         importance=10,
     )
+    # 3.2.0 起：核心准则不可被消化。这条从"必须隐藏"翻成"必须在场"。
     pinned_id = await bucket_mgr.create(
-        content="Digested pinned memory must stay hidden.",
+        content="Digested pinned memory must stay visible.",
         pinned=True,
     )
     resolved_id = await bucket_mgr.create(
@@ -73,11 +74,22 @@ async def test_default_breath_hides_all_digested_surface_classes(
 
     assert visible_id in result
     assert ordinary_id not in result
-    assert pinned_id not in result
     assert resolved_id not in result
     assert "Digested ordinary memory" not in result
-    assert "Digested pinned memory" not in result
     assert "Digested resolved memory" not in result
+
+    # ⚠️ 3.2.0 有意推翻 2.8.4 的这一条：pinned 桶带着 digested 时仍然浮现。
+    #
+    # 2.8.4 的立场是 digested 属于用户显式指令（trace(digested=1) 得手动调），
+    # 该压过 pinned。3.2.0 的立场是：pinned 是核心准则、始终在场才是它存在的
+    # 意义——用 digested 让一条核心准则闭嘴，其实是在用一个标记掩盖另一个标记
+    # 的错误。不想让它一直在场，那它本来就不该是核心准则。
+    #
+    # 代价说清楚：让核心准则安静下来的唯一办法变成 trace(bucket_id, pinned=0)。
+    # 触发这次反转的真实场景：12 条核心准则里 2 条带 digested，breath() 只回
+    # 10 条，旁边还有普通桶——看起来像被挤掉，实际是压根没进候选。
+    assert pinned_id in result
+    assert "Digested pinned memory" in result
 
 
 @pytest.mark.asyncio
@@ -207,11 +219,15 @@ def test_dream_candidate_and_core_pools_hide_digested_memory():
     }
     buckets = [visible_recent, digested_recent, visible_core, digested_core]
 
+    # 普通记忆的 digested 依然生效：dream 的候选池不该被消化过的内容占位。
     assert [row["id"] for row in collect_candidates(buckets, 48)] == [
         "visible-recent"
     ]
-    assert [row["id"] for row in collect_core_context(buckets)] == [
-        "visible-core"
+    # 但核心准则池不同——3.2.0 起 permanent 不因 digested 消失。
+    # dream 是回顾，回顾时看不到自己的核心准则，那这场回顾就没有坐标系。
+    assert sorted(row["id"] for row in collect_core_context(buckets)) == [
+        "digested-core",
+        "visible-core",
     ]
 
 

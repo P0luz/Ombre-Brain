@@ -28,6 +28,8 @@ Docker/Zeabur 的持久卷统一挂载 `/app/buckets`，配置路径为 `/app/bu
 - 本地导出的 ZIP 同样是未加密的敏感资产；应加密保管或放入可信存储，并在传输后清理不再需要的临时副本。
 - `embeddings.db`、BM25 缓存和脱水缓存都是可重建的派生数据。
 - `.embedding_outbox.json` 只保存待索引 ID、内容哈希和重试状态，不复制记忆正文。
+- `<buckets_dir>/.you/you.sqlite3` 是“你 / You”首次开启后才创建的派生认识库，保存作用域、Claim、跨日重申收据和 Projection；自动派生时代的旧快照可能额外带无消费者的 `outbox` 表。关闭开关会立即移除 `You` MCP 工具并拒绝读写/撤回，但不删除既有状态，也不影响其余 MCP 工具。
+- `<buckets_dir>/.them/them.sqlite3` 是“其他人 / them”首次开启后才创建的独立派生认识库，保存作用域、按人分份的名册与 Claim；它与 You 分库，没有 Projection 或 outbox。关闭开关会移除 `Them` MCP 工具并保留既有状态。人类可见的称呼、可见转述与一次性纠错提示也随该库备份。
 - `config.yaml`、`.env`、API Key、OAuth/Tunnel token 不进入本地记忆导出包。
 
 ## 写入与恢复保证
@@ -36,9 +38,12 @@ Docker/Zeabur 的持久卷统一挂载 `/app/buckets`，配置路径为 `/app/bu
 2. 连续 provider 故障会打开全局熔断，避免每条待办都重复撞击同一个故障端点；冷却后自动恢复，也可在 Dashboard 手动补齐。
 3. Obsidian、Git 或手工修改 Markdown 后，BucketManager 会按配置的轮询间隔发现文件集合/mtime/size 变化，刷新内存与 BM25，并只对正文变化重新排队向量。
 4. 本地导出对正在使用的 SQLite 调用 backup API，得到事务一致快照；不会直接复制可能处于 WAL 写入中的数据库文件。
-5. v2.10.1 起，新导出会同时包含 `buckets/*.md`、`sources/src_<sha256>.source` 和 `backup_manifest.json`，逐文件记录字节数与 SHA-256。恢复预检要求清单与 ZIP 内容完全一致，并校验证据文件名哈希、UTF-8、大小和路径。
+5. v2.10.1 起，新导出会同时包含 `buckets/*.md`、`sources/src_<sha256>.source` 和 `backup_manifest.json`，逐文件记录字节数与 SHA-256。创建过模块库的实例还会包含事务一致的 `you/you.sqlite3` 和/或 `them/them.sqlite3`；GitHub 备份中的对应路径为 `.you/you.sqlite3` 与 `.them/them.sqlite3`。恢复预检要求清单与归档/远端文件集合一致，并校验每个成员的大小与 SHA-256。
 6. 迁移执行时先安装全部已校验证据，再写入引用它们的桶。v2.10.0 旧包缺证据时仍可恢复事件桶，但界面会明确提示这些原文不可核对，不会伪装成完整证据恢复。
 7. 当前版本创建的新本地/GitHub 备份会交叉检查桶的 `source_refs`；任一引用缺文件或格式非法时整次备份失败。GitHub 恢复先把全部远端 blob 暂存并验证，再安装全部证据，最后才覆盖 Markdown。
+8. You 与 them 快照在导出和恢复前都会只读执行 SQLite `PRAGMA quick_check`，核对固定表/索引、唯一模块状态、完整 Scope，并反序列化每条记录检查作用域一致性；任一检查失败都拒绝发布该快照。
+9. 本地记忆包迁移只有在所有桶按原 ID 完整导入时才安装 You / them 快照；出现 `skip`、`keep_both` 或其他 ID 变化时会记录“快照未恢复”，并保留当前模块库。安装采用同目录临时文件 + `fsync` + `os.replace`，完成后重新同步各自工具；同步失败时把对应模块按关闭处理。
+10. GitHub 恢复会在写入 vault 前验证 `.you/you.sqlite3` 与 `.them/them.sqlite3`，但当前 Web 恢复处理只主动刷新 `You` 的运行时门禁，没有刷新 `Them`。恢复包含 them 的仓库后应重启服务，再让 MCP 客户端刷新工具列表；磁盘上的 `.them/them.sqlite3` 在重启前已经恢复，但当前进程可能仍使用旧开关缓存/工具显隐。
 
 清单只能发现残缺或意外篡改，不能证明备份由谁创建。需要来源认证时，应在可信存储或带签名的发布/备份系统中保管 ZIP。
 
@@ -71,8 +76,10 @@ python tools/check_buckets.py --json
 2. 准备一个全新的临时 vault/测试实例，不要直接覆盖唯一的生产目录。
 3. 在迁移页面上传 ZIP。新包应显示“备份清单与 SHA-256 校验通过”；无清单旧包会显示“未验证”，有原文引用但缺证据的 v2.10.0 包会显示兼容性警告。
 4. 检查 bucket 数、冲突决策和 embedding 模型/维度，再执行导入。
-5. 导入完成后运行 `python tools/check_buckets.py`，并用 `breath_search(query=...)` 抽查可检索性；若测试包含原文证据，再用准确桶 ID + 标题调用一次 `source_read(scope="event")`，确认事件范围可读且未带出范围外文字。
+5. 导入完成后运行 `python tools/check_buckets.py`，并用 `breath_search(query=...)` 抽查可检索性；若测试包含原文证据，检查 `<vault>/_sources/` 下的 `.source` 文件已随导入落盘（3.0.0 起没有回读工具，原文只能从磁盘核对）。
 6. 确认 outbox 待处理数最终回到 0。模型离线时允许保持 pending，但 Markdown 必须完整可读。
+7. 若备份包含 You / them，登录 Dashboard 检查两个独立开关；本地记忆包迁移会自动同步门禁，GitHub 恢复包含 them 时按上节说明重启服务。让 MCP 客户端重新获取工具列表：两个都关为 16 个基础工具，只开一个为 17 个，两个都开为 18 个；新增项应分别只有 `You` / `Them`。
+8. You 没有 Dashboard 条目浏览入口；them 可用名册核对人名与来源分组，但不要把人类看不到的第一手 Claim 正文当作恢复验收项。
 
 导入冲突的语义：
 
@@ -90,6 +97,12 @@ python tools/check_buckets.py --json
 | ZIP 上传被拒绝 | 本地 vault 未写入 | 按错误修复损坏、路径穿越、重复项或清单不一致，重新导出 |
 | SQLite quick_check 失败 | Markdown 真源通常仍在 | 先备份 Markdown，移走损坏的派生库，再重建向量；不要删除 Markdown |
 | outbox 长时间不下降 | 记忆正文仍安全 | 查看熔断状态、最近错误、Key/模型/维度和 provider 连通性 |
+| You 开关保存失败或开启后工具列表没有 `You` | 系统保持关闭或立即回退为关闭；其余 MCP 工具不受影响 | 查看服务日志与 `<buckets_dir>/.you/` 的写入权限；修复后重新开启，并让 MCP 客户端刷新工具列表或重连 |
+| MCP 客户端在关闭 You 后仍尝试调用旧工具 | 服务端返回 `Unknown tool: You`，不会读取或返回派生认识 | 让客户端重新获取工具列表或重连；不要为兼容旧缓存保留一个可调用的空壳工具 |
+| them 开关保存失败或开启后工具列表没有 `Them` | 系统保持关闭或立即回退为关闭；You 与其余 MCP 工具不受影响 | 查看服务日志与 `<buckets_dir>/.them/` 的写入权限；修复后重新开启，并让 MCP 客户端刷新工具列表或重连 |
+| MCP 客户端在关闭 them 后仍尝试调用旧工具 | 服务端返回未知工具，不会读取或返回 them 认识 | 让客户端重新获取工具列表或重连；不要保留关闭态空壳工具 |
+| GitHub 恢复显示 them 已导入，但当前工具清单/开关仍是恢复前状态 | `.them/them.sqlite3` 已写入，当前 Web 路径未刷新 `ThemToolGate` 与状态缓存 | 重启 Ombre，再刷新 Dashboard 与 MCP 工具列表；重启前不要继续编辑 them 名册 |
+| You / them 快照在 ZIP 或 GitHub 恢复时被拒绝 | 模块库不会发布；本地记忆包迁移保留当前模块状态，GitHub 整次预检失败时不写入本地 vault | 按错误检查 `quick_check`、schema、Scope、清单 SHA-256 与路径；不要手工绕过验证覆盖 SQLite |
 | nginx 下输入正确 Dashboard 密码却提示密码错误 | v2.10.1 及更早版本会把代理返回的 HTML、空响应或网关错误统一回退为“密码错误” | 升级到 2.10.2+ 后按页面显示的真实类型处理；同时检查 `/auth/login` 状态码、下方完整 nginx 转发头和 `OMBRE_TRUSTED_PROXY_CIDRS`。若返回 200 但会话未建立，核对 `X-Forwarded-Proto` 与 `Set-Cookie` |
 | 编辑记忆、热更新或重启提示 `Cross-origin request rejected` | 写请求被来源防护拒绝，原数据未改动；这不是 CORS 缺失 | 优先手动升级到 2.7.1+；nginx 必须保留公网 authority，传入 `X-Forwarded-Proto: https`，并让应用精确信任最后一跳代理 CIDR。不要添加 CORS 头或改写浏览器 `Origin` |
 | Polaris 报 `Failed to fetch`，`/health` 为 200，但 `OPTIONS /mcp` 为 401 且无 CORS 头 | 2.8.1 及更早版本中 CORS 位于 MCP 鉴权内层，静态 Token 模式错误拦截了不携带 Token 的浏览器预检 | 升级到 2.8.2+ 并重建/重启服务；确认预检返回 200，且响应包含 `Access-Control-Allow-Origin`、允许 `POST` 和客户端使用的 Token 请求头 |
@@ -177,7 +190,7 @@ docker compose -f deploy/docker-compose.yml up -d --build --force-recreate
 
 `entrypoint.sh` 本身来自镜像，不在 Dashboard 热更新覆盖范围内。升级到带有新播种逻辑的版本时必须先拉取/重建镜像一次，不能只点击 Dashboard 更新。
 
-Dashboard 热更新会限制下载包、成员数、单文件大小、总解压量和压缩率。建立 `_prev` 回滚点失败时不会继续覆盖；逐文件写入采用原子替换。依赖变化以正式发布使用的 `requirements.lock.txt` 为准，旧更新包缺少锁文件时才回退 `requirements.txt`；真实依赖变化且未显式开启 `OMBRE_UPDATE_ALLOW_PIP=1` 时，热更新会回滚并要求重建镜像，避免“代码更新成功但重启后缺包”。
+Dashboard 热更新会限制下载包、成员数、单文件大小、总解压量和压缩率。建立 `_prev` 回滚点失败时不会继续覆盖；逐文件写入采用原子替换。依赖变化以正式发布使用的 `requirements.lock.txt` 为准，旧更新包缺少锁文件时才回退 `requirements.txt`；真实依赖变化且未显式开启 `OMBRE_UPDATE_ALLOW_PIP=1`（或 Dashboard 「热更新」面板里的等效开关）时，热更新会在写入任何文件前直接拒绝并要求重建镜像，避免”代码更新成功但重启后缺包”——2.16.2 起这道检查提前到下载/解析完依赖清单之后、真正覆盖 src/frontend 之前，不会再出现”先备份写文件、再整体回滚”的多余一轮。
 
 已经停留在 2.8.4、且出现“新版依赖清单有变化”回滚提示的实例，可以直接重新点击官方 `main` 热更新。官方 GitHub 归档通过 `.gitattributes` 排除仅供开发者使用的宽松 `requirements.txt`，同时保留带 hash 的 `requirements.lock.txt`；旧更新器会跳过错误的源清单比较，新更新器接管后则继续按发布锁判断。自建镜像/镜像站若重新打包了根级 `requirements.txt`，仍应重建镜像，或仅在明确理解风险时临时设置 `OMBRE_UPDATE_ALLOW_PIP=1`。
 

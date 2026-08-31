@@ -45,9 +45,87 @@ def _save_github_config_to_disk(gh_cfg: dict) -> None:
     atomic_update_config_yaml(lambda save_config: save_config.__setitem__("github_sync", gh_cfg))
 
 
+def _should_back_up_before_import(relative_path: str) -> bool:
+    """这个文件会被 GitHub 导入覆盖吗？会，就必须先备份。
+
+    判据只有一条：**导入会写它。** 导入写四类东西——
+    Markdown、`_sources/` 下的原文证据、以及 `.you` / `.them` 两个模块库
+    （见 `github_sync` 的安装循环与 `_MODULE_SNAPSHOT_PATHS`）。
+
+    原先这里只打包 `*.md`。于是导入中途失败时，调用方拿着一个自称
+    「导入前备份」的 zip，里面却没有原文证据、也没有两个模块的库——
+    而那三样已经被覆盖了。上层还会因为备份失败就中止导入、理由写着
+    「为避免覆盖后无法找回记忆」，也就是说它**把这个 zip 当成了完整回滚点**。
+    一个不完整的回滚点比没有回滚点更危险：人会依着它去做不可逆的操作。
+    """
+    normalized = relative_path.replace(os.sep, "/")
+    if normalized.endswith(".md"):
+        return True
+    if normalized.startswith("_sources/"):
+        return True
+    # SQLite 的 -wal / -shm 必须跟主库一起备份：只还原主库而丢掉 WAL，
+    # 恢复出来的是一个状态不自洽的库。
+    for module_path in (".you/you.sqlite3", ".them/them.sqlite3"):
+        if normalized == module_path or normalized.startswith(module_path + "-"):
+            return True
+    return False
+
+
+def _rollback_from_backup(buckets_dir: str, backup_zip: str) -> dict:
+    """导入失败后，把备份里的文件写回原位。
+
+    ## 为什么需要它
+
+    导入是一个文件一个文件装的：装到第 50 个失败，前 49 个已经落盘，
+    原先只是把失败计进 `errors` 就返回 `ok: false`。于是本地变成
+    「一半是远端的、一半是旧的」——而调用方看到的只是一句失败，
+    很容易以为什么都没发生。
+
+    ## 它不做什么
+
+    **不删除本次导入新增的文件。** 那些文件导入前不存在，按理也该清掉才算
+    回到原状，但「删掉本地某个文件」这个动作一旦判断错就不可逆，
+    而判断依据（它到底是这次导入带来的，还是导入期间模型自己写下的）
+    并不可靠。所以这里只还原被覆盖的，新增的原样留着并如实报告数量，
+    由人来决定——**宁可留下多余的，不可删错一条记忆。**
+    """
+    还原 = 0
+    失败: list[str] = []
+    try:
+        with zipfile.ZipFile(backup_zip) as z:
+            成员 = [n for n in z.namelist() if not n.endswith("/")]
+            for name in 成员:
+                目标 = os.path.abspath(os.path.join(buckets_dir, name))
+                # 防目录穿越：备份是本地生成的，但它也可能被人动过手脚
+                if not 目标.startswith(os.path.abspath(buckets_dir) + os.sep):
+                    失败.append(f"{name}: 路径越界")
+                    continue
+                try:
+                    os.makedirs(os.path.dirname(目标), exist_ok=True)
+                    with z.open(name) as src, open(目标, "wb") as dst:
+                        dst.write(src.read())
+                    还原 += 1
+                except Exception as exc:
+                    失败.append(f"{name}: {type(exc).__name__}")
+    except Exception as exc:
+        logger.error(f"[github] rollback failed to open backup: {exc}")
+        return {"ok": False, "restored": 还原, "error": f"备份读不开：{type(exc).__name__}"}
+
+    if 失败:
+        logger.error(f"[github] rollback incomplete: {len(失败)} file(s) failed")
+    return {
+        "ok": not 失败,
+        "restored": 还原,
+        "failed": 失败[:10],
+        "failed_count": len(失败),
+    }
+
+
 def _pre_import_backup(buckets_dir: str) -> str:
-    """导入前把当前所有 .md 打成 zip 存到 <buckets_dir>/.import_backups/。
-    返回 zip 路径（失败返回 "" —— 备份失败不应阻断恢复，但会在结果里如实标注）。"""
+    """导入前把**所有会被导入覆盖的文件**打成 zip 存到 <buckets_dir>/.import_backups/。
+
+    返回 zip 路径（失败返回 "" —— 备份失败不应阻断恢复，但会在结果里如实标注）。
+    """
     try:
         bdir = os.path.join(buckets_dir, ".import_backups")
         os.makedirs(bdir, exist_ok=True)
@@ -59,9 +137,10 @@ def _pre_import_backup(buckets_dir: str) -> str:
                 if os.path.basename(root) == ".import_backups":
                     continue
                 for fn in files:
-                    if fn.endswith(".md"):
-                        full = os.path.join(root, fn)
-                        z.write(full, os.path.relpath(full, buckets_dir))
+                    full = os.path.join(root, fn)
+                    relative = os.path.relpath(full, buckets_dir)
+                    if _should_back_up_before_import(relative):
+                        z.write(full, relative)
         return zpath
     except Exception as e:
         logger.warning(f"[github] pre-import backup failed: {e}")
@@ -294,6 +373,69 @@ def register(mcp) -> None:
                 }, status_code=409)
             # 2) 从 GitHub 拉回。GitHubSync 内部再与定时 sync 共用同一把锁。
             result = await sh.github_sync_instance.import_from_github(buckets_dir)
+            # 导入不是事务：失败时前面已经装进去的文件仍留在磁盘上。
+            # 有备份就按备份还原，让「失败」真的等于「什么都没变」。
+            if not result.get("ok") and backup:
+                回滚 = _rollback_from_backup(buckets_dir, backup)
+                result["rolled_back"] = 回滚
+                if 回滚.get("ok"):
+                    result["error"] = (
+                        f"{result.get('error') or '导入失败'}；"
+                        f"已按导入前的备份还原本地（{回滚['restored']} 个文件）。"
+                        "本次导入若新增过文件，不会被删除。"
+                    )
+                else:
+                    # 回滚也失败——这是最坏的一档，必须说得明明白白，
+                    # 绝不能因为「我们尝试过回滚」就把它说成已经恢复。
+                    result["error"] = (
+                        f"{result.get('error') or '导入失败'}；"
+                        f"**自动还原没有完成**（成功 {回滚['restored']} 个，"
+                        f"失败 {回滚.get('failed_count', 0)} 个）。"
+                        f"本地目前可能是新旧混合状态，请用备份手动恢复：{backup}"
+                    )
+            if result.pop("you_restored", False):
+                try:
+                    state = sh.you_service.status()
+                    sh.you_tool_gate.sync(state.enabled)
+                except Exception:
+                    state = sh.you_service.status()
+                    if state.enabled:
+                        try:
+                            sh.you_service.set_enabled(
+                                False,
+                                expected_revision=state.state_revision,
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        sh.you_tool_gate.sync(False)
+                    except Exception:
+                        pass
+                    result["ok"] = False
+                    result["error"] = "恢复后的 You 开关未能生效，已按关闭处理"
+            # them 与 you 同构，同样要在恢复后把工具门对回磁盘上的状态。
+            # 少了这一段，`github_sync` 明明返回了 `them_restored`，却没有任何人消费：
+            # 磁盘上的开关已经变了，当前进程的工具清单还停在旧状态，要重启才对得上。
+            if result.pop("them_restored", False):
+                try:
+                    state = sh.them_service.status()
+                    sh.them_tool_gate.sync(state.enabled)
+                except Exception:
+                    state = sh.them_service.status()
+                    if state.enabled:
+                        try:
+                            sh.them_service.set_enabled(
+                                False,
+                                expected_revision=state.state_revision,
+                            )
+                        except Exception:
+                            pass
+                    try:
+                        sh.them_tool_gate.sync(False)
+                    except Exception:
+                        pass
+                    result["ok"] = False
+                    result["error"] = "恢复后的 them 开关未能生效，已按关闭处理"
             result["pre_import_backup"] = backup
             # 3) 让 bucket_mgr 的 BM25 索引失效（导入直写磁盘，绕过了 bucket_mgr 的脏标记）
             try:

@@ -12,7 +12,7 @@ from github_sync import GitHubSync
 def gh(monkeypatch):
     inst = GitHubSync(token="t", repo="owner/repo", branch="main", path_prefix="ombre")
     # 让 _collect_files 返回非空，避免走「无文件」的提前返回分支
-    monkeypatch.setattr(inst, "_collect_files", lambda d: {"a.md": b"x"})
+    monkeypatch.setattr(inst, "_collect_files", lambda d, extra=None: {"a.md": b"x"})
     return inst
 
 

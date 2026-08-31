@@ -184,7 +184,7 @@ async def test_search_breath_filters_terminal_states_but_keeps_dont_surface(deca
     assert "Tombstone query memory" in result
     assert "Archived query memory" in result
     assert "restore=True" in result
-    assert bucket_mgr.touched == ["visible", "hidden"]
+    assert bucket_mgr.touched == []
 
 
 @pytest.mark.asyncio

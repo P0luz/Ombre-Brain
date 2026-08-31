@@ -8,7 +8,8 @@ import zipfile
 from pathlib import Path
 
 import pytest
-from starlette.responses import StreamingResponse
+import yaml
+from starlette.responses import JSONResponse, StreamingResponse
 
 import web._shared as sh
 import web.meta as meta
@@ -380,9 +381,11 @@ async def test_legacy_runtime_without_lock_updates_when_installed_versions_match
 
 
 @pytest.mark.asyncio
-async def test_changed_release_lock_with_pip_disabled_rolls_back_everything(
+async def test_changed_release_lock_with_pip_disabled_rejects_before_touching_disk(
     monkeypatch, tmp_path
 ):
+    """依赖变化又不让装 pip 时，检查提前到备份/写盘之前，压根不该碰任何文件——
+    不是「写完再回滚」。"""
     repo = tmp_path / "repo"
     (repo / "src").mkdir(parents=True)
     (repo / "frontend").mkdir()
@@ -434,6 +437,8 @@ async def test_changed_release_lock_with_pip_disabled_rolls_back_everything(
     assert (repo / "requirements.lock.txt").read_text(encoding="utf-8") == "package==1\n"
     assert restarted.is_set() is False
     assert not meta._UPDATE_JOB_LOCK.locked()
+    # 拒绝发生在备份步骤之前：不该有 _prev 回滚点被创建过。
+    assert not (repo / "_prev").exists()
 
 
 @pytest.mark.asyncio
@@ -631,3 +636,200 @@ async def test_asgi_send_failure_releases_unstarted_stream(monkeypatch):
     next_reservation = meta._UpdateJobReservation()
     assert next_reservation.acquire()
     next_reservation.release()
+
+
+class _JsonRequest:
+    def __init__(self, body, method="POST"):
+        self._body = body
+        self.method = method
+
+    async def json(self):
+        return self._body
+
+
+@pytest.mark.asyncio
+async def test_update_settings_endpoint_persists_and_takes_effect_immediately(
+    monkeypatch, tmp_path
+):
+    monkeypatch.setattr(sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(sh, "config", {"update": {"channel": "branch"}})
+    monkeypatch.setattr(sh, "version", "2.16.1")
+    monkeypatch.setenv("OMBRE_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    monkeypatch.delenv("OMBRE_UPDATE_ALLOW_PIP", raising=False)
+    mcp = _MCP()
+    meta.register(mcp)
+    settings_handler = mcp.routes[("POST", "/api/update-settings")]
+    info_handler = mcp.routes[("GET", "/api/update-info")]
+
+    before = json.loads((await info_handler(object())).body)
+    assert before["update_allow_pip_install"] is False
+    assert meta._pip_install_allowed() is False
+
+    saved = json.loads(
+        (await settings_handler(_JsonRequest({"allow_pip_install": True}))).body
+    )
+    assert saved == {"ok": True, "allow_pip_install": True}
+
+    # 立即在运行态生效，不需要重启。
+    assert meta._pip_install_allowed() is True
+    after = json.loads((await info_handler(object())).body)
+    assert after["update_allow_pip_install"] is True
+
+    # 真的落盘了，不是只改了内存。
+    on_disk = yaml.safe_load((tmp_path / "config.yaml").read_text(encoding="utf-8"))
+    assert on_disk["update"]["allow_pip_install"] is True
+
+    off = json.loads(
+        (await settings_handler(_JsonRequest({"allow_pip_install": False}))).body
+    )
+    assert off == {"ok": True, "allow_pip_install": False}
+    assert meta._pip_install_allowed() is False
+
+
+@pytest.mark.asyncio
+async def test_update_settings_endpoint_rejects_missing_field(monkeypatch):
+    monkeypatch.setattr(sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(sh, "config", {})
+    mcp = _MCP()
+    meta.register(mcp)
+    handler = mcp.routes[("POST", "/api/update-settings")]
+
+    response = await handler(_JsonRequest({}))
+    assert response.status_code == 400
+
+
+@pytest.mark.asyncio
+async def test_archived_letter_maintenance_get_is_authenticated_dry_run(
+    monkeypatch,
+):
+    import tools._common as common
+
+    calls = []
+
+    async def fake_restore(manager, *, ids=None, apply=False):
+        calls.append((manager, ids, apply))
+        return {
+            "candidate_count": 1,
+            "candidate_ids": ["letter-1"],
+            "excluded_count": 0,
+            "exclusions": [],
+        }
+
+    manager = object()
+    monkeypatch.setattr(sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(sh, "bucket_mgr", manager)
+    monkeypatch.setattr(common, "restore_archived_letters", fake_restore)
+    mcp = _MCP()
+    meta.register(mcp)
+
+    response = await mcp.routes[
+        ("GET", "/api/maintenance/restore-archived-letters")
+    ](_JsonRequest(None, method="GET"))
+
+    assert response.status_code == 200
+    assert response.headers["Cache-Control"] == "no-store"
+    assert json.loads(response.body) == {
+        "ok": True,
+        "candidate_count": 1,
+        "candidate_ids": ["letter-1"],
+        "excluded_count": 0,
+        "exclusions": [],
+    }
+    assert calls == [(manager, None, False)]
+
+
+@pytest.mark.asyncio
+async def test_archived_letter_maintenance_post_requires_bounded_exact_ids(
+    monkeypatch,
+):
+    import tools._common as common
+
+    calls = []
+
+    async def fake_restore(manager, *, ids=None, apply=False):
+        calls.append((manager, ids, apply))
+        return {
+            "requested_count": len(ids or []),
+            "restored_count": len(ids or []),
+            "unchanged_count": 0,
+            "failed_count": 0,
+            "results": [
+                {"id": bucket_id, "reason": "restored"}
+                for bucket_id in (ids or [])
+            ],
+        }
+
+    manager = object()
+    monkeypatch.setattr(sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(sh, "bucket_mgr", manager)
+    monkeypatch.setattr(common, "restore_archived_letters", fake_restore)
+    mcp = _MCP()
+    meta.register(mcp)
+    handler = mcp.routes[("POST", "/api/maintenance/restore-archived-letters")]
+
+    invalid_bodies = (
+        None,
+        [],
+        "letter-1",
+        {},
+        {"ids": "letter-1"},
+        {"ids": []},
+        {"ids": [""]},
+        {"ids": ["letter-1", 1]},
+        {"ids": ["same-id"] * 101},
+    )
+    for body in invalid_bodies:
+        response = await handler(_JsonRequest(body))
+        assert response.status_code == 400
+    assert calls == []
+
+    response = await handler(
+        _JsonRequest({"ids": ["letter-1", "letter-1", "letter-2"]})
+    )
+
+    assert response.status_code == 200
+    payload = json.loads(response.body)
+    assert payload["ok"] is True
+    assert payload["requested_count"] == 2
+    assert payload["results"] == [
+        {"id": "letter-1", "reason": "restored"},
+        {"id": "letter-2", "reason": "restored"},
+    ]
+    assert calls == [(manager, ["letter-1", "letter-2"], True)]
+
+
+@pytest.mark.asyncio
+async def test_archived_letter_maintenance_stops_before_helper_on_auth_or_json_error(
+    monkeypatch,
+):
+    import tools._common as common
+
+    async def forbidden_helper(*_args, **_kwargs):
+        pytest.fail("认证或 JSON 失败时不得进入维护 helper")
+
+    monkeypatch.setattr(common, "restore_archived_letters", forbidden_helper)
+    monkeypatch.setattr(sh, "bucket_mgr", object())
+
+    denied = JSONResponse({"ok": False}, status_code=401)
+    monkeypatch.setattr(sh, "_require_auth", lambda _request: denied)
+    denied_mcp = _MCP()
+    meta.register(denied_mcp)
+    denied_response = await denied_mcp.routes[
+        ("GET", "/api/maintenance/restore-archived-letters")
+    ](_JsonRequest(None, method="GET"))
+    assert denied_response.status_code == 401
+    assert denied_response.headers["Cache-Control"] == "no-store"
+
+    class BrokenJsonRequest(_JsonRequest):
+        async def json(self):
+            raise ValueError("malformed JSON")
+
+    monkeypatch.setattr(sh, "_require_auth", lambda _request: None)
+    malformed_mcp = _MCP()
+    meta.register(malformed_mcp)
+    malformed_response = await malformed_mcp.routes[
+        ("POST", "/api/maintenance/restore-archived-letters")
+    ](BrokenJsonRequest(None))
+    assert malformed_response.status_code == 400
+    assert malformed_response.headers["Cache-Control"] == "no-store"
+    assert json.loads(malformed_response.body)["reason"] == "invalid_json"

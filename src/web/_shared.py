@@ -47,6 +47,7 @@ from ombrebrain.app.execution import ExecutionEnvelope
 from ombrebrain.policy.update_policy import evaluate_update_manifest as _evaluate_update_manifest
 
 logger = logging.getLogger("ombre_brain")
+deletion_requests = None
 
 # --- 运行环境探测（Docker vs 裸机）---
 # 本地向量化要按宿主类型分流：Docker 里 ollama 是独立容器（连 ombre-ollama），
@@ -173,6 +174,10 @@ import_engine = None
 migrate_engine = None
 github_sync_instance = None
 v3_runtime = None
+you_service = None
+you_tool_gate = None
+them_service = None
+them_tool_gate = None
 
 
 def init(cfg: dict) -> None:

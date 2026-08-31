@@ -32,14 +32,15 @@
 
 ## HTTP、MCP 与鉴权
 
-- `OMBRE_TRANSPORT`：`stdio`、`sse` 或 `streamable-http`。
+- `OMBRE_TRANSPORT`：`stdio` 或 `streamable-http`（legacy SSE 传输已于 2026-08-09 下线）。
 - `OMBRE_PORT`：容器或裸机监听端口。
 - `OMBRE_BIND_HOST`：进程实际监听地址；容器/PaaS 通常需要 `0.0.0.0`，裸机仅限本机访问时应设为 `127.0.0.1`。
 - `OMBRE_MCP_REQUIRE_AUTH`：是否要求 MCP 鉴权。
 - `OMBRE_MCP_AUTH_MODE`：`oauth`、`token` 或 `hybrid`。`hybrid` 保留 OAuth 动态注册，同时让 `Authorization: Bearer` 也接受预置静态 Token；关闭鉴权仍由 `OMBRE_MCP_REQUIRE_AUTH=false` 控制。
 - `OMBRE_MCP_TOKEN`：静态 Token / OAuth + 静态 Token 共存模式的预置密钥。
 - `OMBRE_ALLOW_INSECURE_MCP`：Dashboard / 部署向导保存非回环免鉴权组合、以及内置 Tunnel 免鉴权启动时的高风险确认。直接设置 `OMBRE_MCP_REQUIRE_AUTH=false` 会按明确配置生效；该变量不再是启动期暗中改写鉴权开关的条件。
-- `OMBRE_DASHBOARD_PASSWORD`：Dashboard 密码。
+- `OMBRE_DASHBOARD_PASSWORD`：Dashboard 密码。部署到能被公网/远程访问的机器前建议直接设置此项——首次访问 Dashboard 时弹出的"设置密码"表单只信任本机回环连接（见 `OMBRE_SETUP_TOKEN`），提前设好这个变量能跳过那道限制，远程也能直接登录。
+- `OMBRE_SETUP_TOKEN`：首次设置密码的远程覆盖口令。默认只有从 `127.0.0.1`/`localhost` 直连（且没有反向代理转发头）的请求才能调用 `/auth/setup`；设置此变量后，远程请求带上请求头 `X-Ombre-Setup-Token: <此变量的值>` 也可以完成首次设置（Dashboard 网页本身不发这个头，需要手动 `curl` 调用一次）。适合"已经部署到云服务器、还没来得及先设 `OMBRE_DASHBOARD_PASSWORD`"这种场景的补救；密码设置成功后这个 token 就不再需要。
 - `OMBRE_DASHBOARD_SESSION_DAYS`：Dashboard 登录会话天数。
 - `OMBRE_TRUSTED_PROXY_CIDRS`：直接连接 OB 的最后一跳可信反向代理 CIDR；不是公网客户端 IP 或域名，禁止使用 `0.0.0.0/0`。官方 Compose 模板会从 `.env` 透传该值，修改后需要重新创建容器。
 
@@ -57,7 +58,7 @@
 
 - `OMBRE_ALLOW_CUSTOM_UPDATE_REPO`：允许自定义更新仓库。
 - `OMBRE_ALLOW_UNTRUSTED_MIRROR`：允许未受信任镜像源。
-- `OMBRE_UPDATE_ALLOW_PIP`：允许热更新执行 pip。
+- `OMBRE_UPDATE_ALLOW_PIP`：允许热更新在依赖清单变化时自动执行 `pip install`（安全加固 #2：默认关闭，自动装依赖会把"谁能点热更新"放大成任意 PyPI 包的执行面）。默认关闭时遇到依赖变化会在写入任何文件前直接拒绝更新（不会写文件再回滚）。Dashboard「热更新」面板里也有一个等效开关（写 `config.yaml` 的 `update.allow_pip_install`，立即生效不需要重启），效果与设置本变量相同，二者取其一即可，不用两个都配。
 - `OMBRE_FORCE_CODE_RESEED`：下次启动强制从镜像重播代码；使用后应移除。
 - `OMBRE_IMAGE_ROOT`：镜像内置代码根目录。
 - `OMBRE_BOOTSTRAP_ONLY`：仅执行启动引导和诊断。
@@ -75,7 +76,13 @@
 - `OMBRE_MING_VAULT_DIR`、`OMBRE_HONG_VAULT_DIR`：示例多所有者数据目录。
 - `OMBRE_MING_PASSWORD`、`OMBRE_HONG_PASSWORD`：示例多所有者密码。
 - `OMBRE_MING_MCP_TOKEN`、`OMBRE_HONG_MCP_TOKEN`：多所有者 Compose 中每个实例各自的静态 MCP Token；不要让多个 owner 共用同一密钥。
-- `AI_NAME`：AI 显示名称。
+- `AI_NAME`：AI 显示名称（letter 署名、prompt、面向用户的文案）。
+  **优先级：`config.yaml` 的 `ai_name` → 本变量 → 回退 `"AI"`。**
+  自 3.0.0 起首选写进 `config.yaml`：它随 vault 一起持久化，Docker 下容器
+  重建/重启都不会丢；本变量则依赖 compose 逐个透传。`config.yaml` 里默认留空，
+  表示「没配」，此时行为与旧版一致。
+  > 3.0.0 之前 `deploy/docker-compose.yml` 并未透传本变量，导致 Docker 用户
+  > 实际设不上 AI 显示名，带锁 Letter 因取不到实际关系名而无法创建；现已补上透传。
 
 ## v1.x 兼容变量
 

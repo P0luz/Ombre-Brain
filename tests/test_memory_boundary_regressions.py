@@ -22,7 +22,7 @@ class _Logger:
 
 
 @pytest.mark.asyncio
-async def test_plan_resolution_keyword_fallback_reaches_related_plan_beyond_cap(
+async def test_plan_resolution_keyword_match_records_suggestion_without_closing(
     monkeypatch,
 ):
     plans = [
@@ -75,14 +75,55 @@ async def test_plan_resolution_keyword_fallback_reaches_related_plan_beyond_cap(
         "Zeabur 模板已经发布完成", source_bucket_id="event-1"
     )
 
-    assert manager.updated == [(
-        "plan-related",
-        {
-            "status": "resolved",
-            "resolution_reason": "模板已经发布",
-            "resolved_by": "event-1",
-        },
-    )]
+    assert len(manager.updated) == 1
+    bucket_id, changes = manager.updated[0]
+    assert bucket_id == "plan-related"
+    assert set(changes) == {"resolution_suggested"}
+    suggestion = changes["resolution_suggested"]
+    assert suggestion["reason"] == "模板已经发布"
+    assert suggestion["confidence"] == 0.95
+    assert suggestion["suggested_by"] == "plan_resolution_judge"
+    assert suggestion["source_bucket_id"] == "event-1"
+    assert suggestion["ts"]
+
+
+@pytest.mark.asyncio
+async def test_unmatched_active_plan_is_not_judged_or_closed(monkeypatch):
+    plan = {
+        "id": "plan-unmatched",
+        "content": "完全无关的开放计划",
+        "metadata": {"type": "plan", "status": "active"},
+    }
+
+    class Manager:
+        def __init__(self):
+            self.updated = []
+
+        async def list_all(self, include_archive=False):
+            assert include_archive is False
+            return [plan]
+
+        async def search(self, _query, limit=None, vector_scores=None):
+            assert limit >= 1
+            assert vector_scores == {}
+            return []
+
+        async def update(self, bucket_id, **changes):
+            self.updated.append((bucket_id, changes))
+
+    class Judge:
+        async def judge_plan_resolution(self, _plan_text, _new_event_text):
+            pytest.fail("未命中检索的 plan 不应交给 LLM 判断")
+
+    manager = Manager()
+    monkeypatch.setattr(rt, "bucket_mgr", manager, raising=False)
+    monkeypatch.setattr(rt, "embedding_engine", None, raising=False)
+    monkeypatch.setattr(rt, "dehydrator", Judge(), raising=False)
+    monkeypatch.setattr(rt, "logger", _Logger(), raising=False)
+
+    await common.check_plan_resolution("刚完成另一件不相关的事")
+
+    assert manager.updated == []
 
 
 @pytest.mark.asyncio
@@ -128,9 +169,18 @@ async def test_hold_analysis_failure_preserves_exact_content(monkeypatch):
     )
 
     assert captured["content"] == original
+    assert captured["domain"] == ["未分类"]
     assert captured["raw_merge"] is True
     assert captured["source_tool"] == "hold"
     assert "正文已逐字保存，未做任何压缩" in result
+
+    captured.clear()
+    await hold_core.store_core(
+        original, extra_tags=[], importance=5,
+        valence=-1, arousal=-1, why_remembered="",
+        explicit_domain=["人工域"],
+    )
+    assert captured["domain"] == ["人工域"]
 
 
 @pytest.mark.asyncio

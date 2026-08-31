@@ -34,3 +34,11 @@ jieba>=0.42.1
 # 本地 Ollama 安装包 .tar.zst 安全解压
 zstandard>=0.22.0
 
+# IANA 时区库。**不是可选项**：`zoneinfo` 只查系统 tzdata，而 python:*-slim
+# 这类镜像和 Windows 都没有它。缺了的后果是静默的——`utils.get_tzinfo()` 在
+# ZoneInfo 抛异常时兜底成固定 +08:00，于是配 `timezone: "America/New_York"`
+# 的用户会拿到东八区的解锁时间，而且没有任何提示；Dashboard 那边则会把
+# 每一个时区名（包括 UTC）都判成「无法识别」。
+# 带上这个纯数据包就与宿主机无关了。
+tzdata>=2024.1
+

@@ -10,7 +10,7 @@ decay_engine.py — 记忆衰减引擎，模拟人类遗忘曲线
 - 打分公式（改进版艾宾浩斯 + 情感坐标）：
     Score = Importance × (activation_count^0.3) × e^(-λ×days) × emotion_weight
 - 情感权重 = base + arousal × arousal_boost；唤醒度高的记忆衰减得慢
-- pinned / protected 桶不参与衰减、不被归档
+- anchor / pinned / protected 桶不参与衰减、不被归档
 - ensure_started() 幂等启动后台循环；可被测试 monkeypatch 成 noop
 
 不做什么（边界）：
@@ -27,7 +27,7 @@ import asyncio
 import logging
 from datetime import datetime
 
-from utils import parse_iso_datetime
+from utils import parse_bool, parse_iso_datetime
 
 logger = logging.getLogger("ombre_brain.decay")
 
@@ -300,16 +300,22 @@ class DecayEngine:
         for bucket in buckets:
             meta = bucket.get("metadata", {})
 
-            # Skip permanent / pinned / protected / feel / i / plan / letter buckets
-            # 跳过固化桶、钉选/保护桶、feel 桶和 i（自我认知）桶
+            # Skip anchor / permanent / pinned / protected / feel / i / plan / letter buckets
+            # 跳过 anchor、固化桶、钉选/保护桶、feel 桶和 i（自我认知）桶
             # i 桶承诺永不衰减（tools/i/core.py 注释）——必须在此显式排除
+            # anchor 是 dynamic 桶上的 bool 标记，不锁高 importance，必须显式排除
             # plan / letter 同样必须在此排除：calculate_score() 对它们恒定返回
             # _SCORE_FEEL，本来就不会被下面的归档阈值判定动到，但下面的自动结案
             # 分支跑在 calculate_score() 之前、不看 type，会直接把 plan/letter
             # 也 resolved=True——plan 的生命周期只能由 status 字段驱动，letter
             # 承诺永久保留原样，两者都不该被这条「重要度低+超期未解决」的通用
             # 自动结案逻辑碰。
-            if meta.get("type") in ("permanent", "feel", "i", "plan", "letter") or meta.get("pinned") or meta.get("protected"):
+            if (
+                meta.get("type") in ("permanent", "feel", "i", "plan", "letter")
+                or meta.get("pinned")
+                or meta.get("protected")
+                or parse_bool(meta.get("anchor"), default=False)
+            ):
                 continue
 
             checked += 1

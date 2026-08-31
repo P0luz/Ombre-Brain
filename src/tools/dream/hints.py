@@ -7,14 +7,17 @@ tools/dream/hints.py — dream 的连接提示、结晶提示与 I 候选碰撞�
 
 - 连接提示：在 recent 桶里找余弦相似度最高的一对（>0.5）→ 提示
   「这两个似乎有关联，不替你下结论，你自己想」
-- 结晶提示：扫所有 feel，发现某条 feel 与 ≥2 条其它 feel 相似度
-  >0.7 → 提示「你已经写过 N 条相似的 feel，可以考虑 hold(pinned=True)
-  升级它」
+- 结晶提示：低频触发——扫所有 feel，只有凑够 5 条互相相似（>0.7）的
+  feel 聚成一簇才提示「你已经写过 N 条相似的 feel，可以考虑
+  hold(pinned=True) 升级它」，避免每次 dream 都刷同一条提示
 - I 候选碰撞材料：把每条待沉淀的「我觉得……」和语义上最挨着的几条记忆
   摆在一起——支持它的、反驳它的、跟它撞车的其它候选，都只是材料
 
 关键行为：
 - 都依赖 embedding_engine.enabled；未启用时返回空串 / 空材料并明说
+- protected 只防衰减：连接、结晶、I 候选及碰撞材料一律不读取其正文
+- I 候选不受普通近期窗口限制；否则候选一旦老于 window_hours，就再也无法
+  获得三次跨日见证。仍排除 pinned / resolved / protected
 - 任意异常都吞掉，只 warning，不影响 dream 主流程
 - 只读已落盘向量，不发新的 embedding 请求
 
@@ -24,15 +27,20 @@ tools/dream/hints.py — dream 的连接提示、结晶提示与 I 候选碰撞�
 - 不替模型决定，只给「不替你下结论」的提示
 
 对外暴露：build_connection_hint(recent) / build_crystal_hint(all_buckets)
-         / collect_self_candidates(all_buckets)
+         / collect_self_candidates(all_buckets, window_hours)
 ========================================
 """
 
 from dataclasses import dataclass, field
 
-from ..i import I_PROMOTE_THRESHOLD, is_pending_candidate
+from ..i import I_PROMOTE_THRESHOLD, dream_dates, is_pending_candidate
 from .. import _runtime as rt
-from utils import strip_wikilinks
+from ..plan.core import is_letter_bucket
+from utils import parse_bool, strip_wikilinks
+
+# 结晶提示低频触发：不是随便 2 条相似就提示，要凑够一簇 5 条（自己 + 4 条
+# 相似 feel）才值得打断一次；避免同一批 feel 每场梦都刷同样的提示。
+_CRYSTAL_CLUSTER_MIN = 5
 
 # 对照池上限：正式 I 条目和其它候选永远全量参与碰撞，普通记忆只取最近这么多条。
 # get_embedding 每条一次 sqlite 查询，全库几千条会让 dream 明显变慢，而更老的
@@ -44,6 +52,11 @@ _COLLISION_MIN_SIM = 0.35
 
 
 async def build_connection_hint(recent: list) -> str:
+    # 调用方通常已过滤 protected；这里再次收口，避免未来复用时把受保护正文带入提示。
+    recent = [
+        b for b in recent
+        if not parse_bool((b.get("metadata") or {}).get("protected"), default=False)
+    ]
     if not (rt.embedding_engine and rt.embedding_engine.enabled and len(recent) >= 2):
         return ""
     try:
@@ -77,8 +90,15 @@ async def build_crystal_hint(all_buckets: list) -> str:
     if not (rt.embedding_engine and rt.embedding_engine.enabled):
         return ""
     try:
-        feels = [b for b in all_buckets if b["metadata"].get("type") == "feel"]
-        if len(feels) < 3:
+        feels = [
+            b for b in all_buckets
+            if b["metadata"].get("type") == "feel"
+            and not is_letter_bucket(b)
+            and not parse_bool(
+                (b.get("metadata") or {}).get("protected"), default=False
+            )
+        ]
+        if len(feels) < _CRYSTAL_CLUSTER_MIN:
             return ""
         feel_embeddings: dict = {}
         for f in feels:
@@ -92,7 +112,7 @@ async def build_crystal_hint(all_buckets: list) -> str:
                     sim = rt.embedding_engine._cosine_similarity(femb, oemb)
                     if sim > 0.7:
                         similar_feels.append(oid)
-            if len(similar_feels) >= 2:
+            if len(similar_feels) >= _CRYSTAL_CLUSTER_MIN - 1:
                 feel_bucket = next((f for f in feels if f["id"] == fid), None)
                 if feel_bucket and not feel_bucket["metadata"].get("pinned"):
                     content_preview = strip_wikilinks(feel_bucket["content"][:80])
@@ -121,8 +141,8 @@ class SelfCandidate:
 class SelfReview:
     """dream 里的 I 候选段。
 
-    ``rendered_ids`` 由 output.py 在实际渲染出某条候选后回写，dream 的
-    dispatch 只给这些候选记「被见证过一次」——没被看见的不算经历过。
+    ``rendered_ids`` 由 output.py 回写真正出现在最终文本中的候选（近期正文、
+    候选主块或碰撞材料），dream 的 dispatch 只给它们记「被见证过一次」。
     """
 
     candidates: list[SelfCandidate] = field(default_factory=list)
@@ -136,12 +156,23 @@ def _timestamp_key(bucket: dict) -> str:
     return str(meta.get("last_active") or meta.get("created") or "")
 
 
-async def collect_self_candidates(all_buckets: list) -> SelfReview:
+async def collect_self_candidates(all_buckets: list, window_hours: int) -> SelfReview:
     """收集待沉淀的 I 候选，并为每条取几条语义上最挨着的对照材料。
 
+    I 候选需要三次跨日见证才能升级，因此不能复用普通记忆的近期窗口；
+    否则过期候选会永久卡住。``window_hours`` 只约束普通 dream 记忆，保留
+    在参数中是为了维持调用契约。候选仍排除 pinned / resolved / protected。
     材料只是材料：支持、反驳、撞车都可能，这里不做任何判定。
     """
-    pending = [b for b in all_buckets if is_pending_candidate(b)]
+    pending = [
+        b for b in all_buckets
+        if is_pending_candidate(b) and not is_letter_bucket(b)
+        and not parse_bool(
+            (b.get("metadata") or {}).get("protected"), default=False
+        )
+        and not (b.get("metadata") or {}).get("pinned", False)
+        and not (b.get("metadata") or {}).get("resolved", False)
+    ]
     if not pending:
         return SelfReview()
 
@@ -150,11 +181,7 @@ async def collect_self_candidates(all_buckets: list) -> SelfReview:
         candidates=[
             SelfCandidate(
                 bucket=b,
-                passes=[
-                    str(d)[:10]
-                    for d in ((b.get("metadata") or {}).get("i_dream_dates") or [])
-                    if str(d).strip()
-                ],
+                passes=dream_dates(b.get("metadata") or {}),
             )
             for b in pending
         ]
@@ -170,12 +197,22 @@ async def collect_self_candidates(all_buckets: list) -> SelfReview:
         pool = [
             b for b in all_buckets
             if b["id"] not in pending_ids
+            and not is_letter_bucket(b)
             and (b.get("metadata") or {}).get("type") == "i"
+            and not (b.get("metadata") or {}).get("pinned", False)
+            and not parse_bool(
+                (b.get("metadata") or {}).get("protected"), default=False
+            )
         ]
         ordinary = [
             b for b in all_buckets
             if b["id"] not in pending_ids
+            and not is_letter_bucket(b)
             and (b.get("metadata") or {}).get("type") not in ("i", "letter")
+            and not (b.get("metadata") or {}).get("pinned", False)
+            and not parse_bool(
+                (b.get("metadata") or {}).get("protected"), default=False
+            )
         ]
         ordinary.sort(key=_timestamp_key, reverse=True)
         pool.extend(ordinary[:_COLLISION_POOL_RECENT])

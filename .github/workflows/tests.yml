@@ -24,14 +24,19 @@ jobs:
           python-version: '3.12'
           cache: 'pip'
 
+      - name: Verify hot-update manifest
+        run: python deploy/gen_update_manifest.py --check
+
       - name: Install lockfile tool
         run: |
           python -m pip install "uv==$UV_VERSION"
 
       - name: Verify dependency lockfiles
         # 固定到当前发布锁首次生成时的索引快照；升级依赖时需显式推进并重生成两份锁。
+        # 2026-08-09：推进到 2026-08-01，只为吃到 cryptography 50.0.0（修复 PYSEC-2026-3552，
+        # 旧快照 2026-07-12 早于该版本发布日 2026-07-31，pip-audit 永远卡在 49.0.0 上）。
         env:
-          UV_EXCLUDE_NEWER: '2026-07-12T04:13:06Z'
+          UV_EXCLUDE_NEWER: '2026-08-01T00:00:00Z'
         run: |
           rm -f requirements.lock.txt requirements-dev.lock.txt
           uv pip compile requirements.txt --universal --python-version 3.12 --generate-hashes --output-file requirements.lock.txt
@@ -79,6 +84,19 @@ jobs:
         run: python -m pytest tests/test_llm_quality.py -v --asyncio-mode=auto
 
       - name: Start isolated Docker MCP stack
+        # AI_NAME 必须给一个非泛化值：letter_write 创建带锁 Letter 时要求写信人
+        # 有「实际关系名」，"ai"/"assistant"/"claude" 等通用占位会被 tools/plan/core.py
+        # 的 _is_actual_relation_name 判定为不合法而拒绝创建（这是设计如此的准入门槛，
+        # 不是 bug）——不给这个变量，test_letter_time_lock_write_read_and_owner_unlock_in_real_container
+        # 会在这道拒绝上失败。用 "张三"：单测里（test_letter_time_lock.py、
+        # test_breath_hook_security.py 等）早已用它做 AI_NAME 测试夹具，
+        # test_web_api_docker_integration.py 也硬编码断言 writer_name == "张三"，
+        # 换别的名字这条集成测试会跟着失败。
+        #
+        # OMBRE_HOOK_ALLOW_PUBLIC=1：test_web_api_docker_integration.py 专门验证
+        # 「显式打开 public 模式后 /breath-hook 允许匿名访问」这条路径（见
+        # web/hooks.py _is_hook_request_authorized）。容器是仅 127.0.0.1 可达、
+        # 用完即删的 CI 隔离实例，开这个不影响任何真实部署的默认鉴权。
         run: |
           docker network create ob-ci-net
           docker volume create ob-ci-data
@@ -96,6 +114,8 @@ jobs:
             -e OMBRE_MCP_REQUIRE_AUTH=false \
             -e OMBRE_BIND_ADDRESS=127.0.0.1 \
             -e OMBRE_SETUP_TOKEN=docker-audit-setup-token \
+            -e AI_NAME=张三 \
+            -e OMBRE_HOOK_ALLOW_PUBLIC=1 \
             ombre-brain-ci:local
           for attempt in $(seq 1 60); do
             curl --fail --silent http://127.0.0.1:18084/health && break
@@ -106,7 +126,7 @@ jobs:
             sleep 1
           done
 
-      - name: Run 15-tool Docker MCP integration suite
+      - name: Run Docker MCP integration suite
         env:
           OMBRE_DOCKER_INTEGRATION_URL: http://127.0.0.1:18084/mcp
           OMBRE_DOCKER_EXPECT_COMPRESSION_PROVIDER: "1"

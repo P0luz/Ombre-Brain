@@ -102,6 +102,36 @@ def test_preview_structured_memory_json_requires_no_llm():
     assert preview["requires_llm"] is False
 
 
+def test_preview_claude_conversations_uses_claude_parser():
+    from import_memory import preview_import
+
+    raw = json.dumps([
+        {
+            "uuid": "conversation-1",
+            "name": "茶话题",
+            "chat_messages": [
+                {
+                    "sender": "human",
+                    "text": "我喜欢乌龙茶。",
+                    "created_at": "2024-01-01T00:00:00Z",
+                },
+                {
+                    "sender": "assistant",
+                    "text": "我记住了。",
+                    "created_at": "2024-01-01T00:00:01Z",
+                },
+            ],
+        }
+    ], ensure_ascii=False)
+
+    preview = preview_import(raw, filename="conversations.json")
+
+    assert preview["ok"] is True
+    assert preview["detected_format"] == "claude_json"
+    assert preview["turns_count"] == 2
+    assert preview["sample_turns"][0]["role"] == "human"
+
+
 def test_preview_structured_memory_json_reports_exact_invalid_item():
     from import_memory import preview_import
 

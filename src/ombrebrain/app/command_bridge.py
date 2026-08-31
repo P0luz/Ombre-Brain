@@ -33,7 +33,7 @@ def _kind_from_envelope(envelope: ExecutionEnvelope) -> CommandKind:
         return CommandKind.HOLD
     if "breath" in joined or "search" in joined:
         return CommandKind.BREATH
-    if "trace" in joined or "anchor" in joined or "release" in joined:
+    if "trace" in joined or "anchor" in joined or "release" in joined or "letter_lock_update" in joined:
         return CommandKind.TRACE
     if "decay" in joined:
         return CommandKind.DECAY

@@ -17,6 +17,7 @@ from starlette.responses import Response
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from tools._common import check_query_size
+from tools.plan.core import letter_lock_state
 from . import _shared as sh
 
 logger = sh.logger
@@ -31,7 +32,12 @@ except ImportError:  # pragma: no cover
 _SEMANTIC_DISABLED_NOTE = "语义索引暂不可用，本次仅使用关键词/BM25"
 
 
-async def _semantic_scores_for_dashboard(query: str, top_k: int) -> tuple[dict[str, float], str]:
+async def _semantic_scores_for_dashboard(
+    query: str,
+    top_k: int,
+    *,
+    allowed_bucket_ids: set[str] | None,
+) -> tuple[dict[str, float], str]:
     """显式跑一次向量查询，失败时给出可读原因。
 
     跟 tools/breath/search.py 的 _semantic_scores 同一个套路——如果不显式跑
@@ -44,8 +50,20 @@ async def _semantic_scores_for_dashboard(query: str, top_k: int) -> tuple[dict[s
         return {}, _SEMANTIC_DISABLED_NOTE
     try:
         strict_search = getattr(engine, "search_similar_strict", None)
-        if callable(strict_search):
+        if callable(strict_search) and allowed_bucket_ids is not None:
+            pairs = await strict_search(
+                query,
+                top_k=top_k,
+                allowed_bucket_ids=allowed_bucket_ids,
+            )
+        elif callable(strict_search):
             pairs = await strict_search(query, top_k=top_k)
+        elif allowed_bucket_ids is not None:
+            pairs = await engine.search_similar(
+                query,
+                top_k=top_k,
+                allowed_bucket_ids=allowed_bucket_ids,
+            )
         else:
             pairs = await engine.search_similar(query, top_k=top_k)
         return {bucket_id: float(score) for bucket_id, score in pairs}, ""
@@ -87,14 +105,35 @@ def register(mcp) -> None:
         if query_error:
             return JSONResponse({"error": query_error}, status_code=400)
         try:
+            list_all = getattr(sh.bucket_mgr, "list_all", None)
+            if callable(list_all):
+                all_buckets = await list_all(include_archive=False)
+                allowed_bucket_ids = {
+                    str(bucket.get("id")) for bucket in all_buckets
+                    if not letter_lock_state(bucket, "human")["locked"]
+                }
+            else:  # pragma: no cover - 兼容极简第三方 manager
+                allowed_bucket_ids = None
             vector_scores, semantic_notice = await _semantic_scores_for_dashboard(
-                query, top_k=50
+                query,
+                top_k=50,
+                allowed_bucket_ids=allowed_bucket_ids,
             )
-            matches = await sh.bucket_mgr.search(
-                query, limit=10, vector_scores=vector_scores
-            )
+            if allowed_bucket_ids is None:
+                matches = await sh.bucket_mgr.search(
+                    query, limit=50, vector_scores=vector_scores
+                )
+            else:
+                matches = await sh.bucket_mgr.search(
+                    query,
+                    limit=50,
+                    vector_scores=vector_scores,
+                    allowed_bucket_ids=allowed_bucket_ids,
+                )
             result = []
             for b in matches:
+                if letter_lock_state(b, "human")["locked"]:
+                    continue
                 if not _SURFACE_POLICY.evaluate_bucket(b, mode="search").allowed:
                     continue
                 meta = b.get("metadata", {})
@@ -107,6 +146,8 @@ def register(mcp) -> None:
                     "arousal": meta.get("arousal", 0.3),
                     "content_preview": strip_wikilinks(b.get("content", ""))[:200],
                 })
+                if len(result) >= 10:
+                    break
             response = JSONResponse(result)
             # 响应体保持纯数组不变（前端 Array.isArray(results) 依赖这个形状），
             # 语义检索是否降级改用响应头传递——不破坏现有调用方，同时让「离线要
@@ -133,6 +174,10 @@ def register(mcp) -> None:
             return err
         try:
             all_b = await sh.bucket_mgr.list_all(include_archive=False)
+            all_b = [
+                b for b in all_b
+                if not letter_lock_state(b, "human")["locked"]
+            ]
             seen: set[frozenset] = set()
             pairs: list[dict] = []
             index = {b["id"]: b for b in all_b}
@@ -183,6 +228,10 @@ def register(mcp) -> None:
             mode = "concept"
         try:
             all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
+            all_buckets = [
+                b for b in all_buckets
+                if not letter_lock_state(b, "human")["locked"]
+            ]
 
             if mode == "embedding":
                 # 旧的桶→桶相似度图（保留）
@@ -311,6 +360,8 @@ def register(mcp) -> None:
             all_buckets = await sh.bucket_mgr.list_all(include_archive=False)
             results = []
             for bucket in all_buckets:
+                if letter_lock_state(bucket, "human")["locked"]:
+                    continue
                 if not _SURFACE_POLICY.evaluate_bucket(bucket, mode="spontaneous").allowed:
                     continue
                 meta = bucket.get("metadata", {})
@@ -361,6 +412,8 @@ def register(mcp) -> None:
             w_sum = sum(w.values())
 
             for bucket in all_buckets:
+                if letter_lock_state(bucket, "human")["locked"]:
+                    continue
                 meta = bucket.get("metadata", {})
                 bid = bucket["id"]
                 try:

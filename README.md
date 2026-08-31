@@ -1,12 +1,10 @@
-感谢开发组成员：万世，小眠，鹤见
+感谢开发组成员：Poluz、江乔生、Iris Wang、Moling、Wudy、KittyXu、万世、Zoey、昕（见 [AUTHORS.md](AUTHORS.md)）
 
 # Ombre Brain
 
 一个给 Claude（或其它 MCP 客户端）用的长期情绪记忆系统。基于 Russell 效价/唤醒度坐标打标，Obsidian 做存储层，MCP 接入，带遗忘曲线和向量语义检索。
 
 A long-term emotional memory system for Claude (and any MCP client). Tags memories using Russell's valence/arousal coordinates, stores them as Obsidian-compatible Markdown, connects via MCP, with forgetting curve and vector semantic search.
-
-> **v2.4.0 noncommercial notice**: v2.4.0 architecture work is intended as source-available public code for personal, learning, research, and noncommercial self-hosting use. Commercial hosting, resale, renamed resale, SaaS resale, or selling modified v2.4.0 builds requires project-owner permission. See [LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md](LICENSE.v2.4.0-NONCOMMERCIAL-NOTICE.md).
 
 > **开发者文档**：架构 / API / 配置细节请见 [docs/INTERNALS.md](docs/INTERNALS.md)。本 README 只关心『怎么把它跑起来用上』。
 >
@@ -45,10 +43,10 @@ Ombre Brain gives it persistent memory — not cold key-value storage, but a sys
 Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这套系统里的每一句话都是第一人称——「我的记忆」「我记得」「我感受到」，而不是「帮用户存储」。它和普通键值库 / 向量库最不一样的几条：
 
 - **记忆是真实的连续性，不是扮演**。每条记忆都是真实对话留下的真实记录；跨会话把它们接起来当作连续上下文，是这套系统**真正在做的事**，不是 roleplay 设定。
-- **边界是「时间里发生的事」，不是「你是谁」**。身份层交给官方记忆；OB 只管经历、情绪、承诺、感受。
+- **真源仍是「时间里发生的事」，不是「你是谁」**。身份层仍交给官方记忆；OB 默认只管经历、情绪、承诺和感受。只有用户在 Ombre 前端显式开启 `You` / `them` 后，模型才会自己写下少量关于对话另一方、以及关于其他人的长期认识——是模型自己写的，不经任何 LLM 转述；每一条都要有真实记忆桶作依据，还要在不同的日子里反复站得住才落库。它不判断人格、不控制回答，关闭后也不会影响其他能力。
 - **情感是坐标，不是标签**。每条记忆用 Russell 环形模型的 valence（效价）+ arousal（唤醒度）两个连续维度标记，而不是「开心 / 难过」这种离散桶。
 - **遗忘是淡去，不是删除**。不活跃的记忆按改进版艾宾浩斯曲线分数下沉、最终归档，情绪强烈的衰减更慢——记忆只会淡去，不会消失。OB 的 MCP 工具、REST API 和 Dashboard 都不提供物理抹除；“删除”只会把 Markdown 移入 `archive/` 并从日常召回中隐藏。只有主机管理者绕过 OB、在文件系统中手动删除文件，才能真正抹去它。
-- **稀缺即结构**。核心准则（pinned）上限 20、坐标系（anchor）上限 24、高重要度（importance≥9）有配额——重要的东西必须稀缺，否则「重要」就失去意义。
+- **稀缺即结构**。核心准则（pinned）上限 20、坐标系（anchor）上限 24——重要的东西必须稀缺，否则「重要」就失去意义；`importance` 本身只是普通评分字段，不额外设配额。
 - **元数据不喂进算分**。「为什么记得」「主动遗忘」这类字段只描述「为什么 / 怎么对待」，绝不参与衰减打分——不把记忆变成一个可被优化的目标函数。
 - **feel 是痕迹，不是待办**。模型写下的第一人称感受，写下就留着它本来的形状，不该被「解决」。
 
@@ -56,41 +54,69 @@ Ombre Brain 的使用者是**模型自己**，不是它背后的人。所以这�
 
 ---
 
-## 它的 15 个工具 / The 15 Tools
+## 16 个基础工具（13 + 3）+ 可选 You / them / 16 Core Tools (13 + 3) + Optional You / them
 
-15 个工具全部在**一个 MCP 连接器 `/mcp`** 上。连上 `/mcp` 即拥有全部能力。
+16 个基础工具全在一个 MCP 连接器 `/mcp` 上，只配这一个即可。
+`You`（我对**你**的认识）与 `them`（我对**其他人**的认识）各自默认关闭、各有一个独立开关；
+只有在人类从 Ombre 设置页打开之后，主连接器 `/mcp` 才额外暴露对应的工具。两者都是**可读回、
+可写入、可撤回**的——写下的是模型自己的判断，不经 LLM 转述。这两个开关不修改 MCP 鉴权，
+也不改变任一连接器上的其他工具。
 
-### 高频 8 个
+### 高频 7 个
 
 | 工具 | 一句话 |
 |---|---|
 | `breath` | 睁眼。**0 参数**，让权重最高、未解决且未标记 digested 的事浮现 + 置顶核心准则；每条正文后附一行简洁 Footprint。digested 只从默认/被动浮现隐藏，仍可按 query 找回。**每次对话第一件事**。故意做成 0 参数：claude.ai 按需加载工具时会跳过参数复杂的工具，塞太多参数会导致它常年加载不上。 |
 | `breath_search` | 按关键词 / 语义找记忆：`query`（必填）/ `domain` / `max_results`。融合关键词/BM25 + 语义检索，向量不可用时自动退回关键词检索。可命中已归档记忆，但只提示足迹与明确恢复调用，不会自动恢复。 |
-| `breath_advanced` | `breath` 的完整参数版：`catalog=True` 目录模式（每桶一行元数据，0 LLM，最省 token）、`tags`、`importance_min`、`valence`/`arousal`、`max_tokens` 等精细控制，日常用不到时用前两个就够。 |
+| `breath_advanced` | `breath` 的完整参数版：`catalog=True` 目录模式（每桶一行元数据，0 LLM，最省 token；anchor 带 `⚓ [anchor]`）、`tags`、`importance_min`、`valence`/`arousal`、`max_tokens` 等精细控制，日常用不到时用前两个就够。 |
 | `hold` | 记下当下一件事（一句话级）。`title` 可显式指定最终标题并优先于模型建议；打标失败时仍会原样落盘，绝不压缩正文。 |
-| `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶。结构化 `items` 可逐字写入最终正文、标题和元数据；同时传 `content` 时，它作为共享原文证据保存。 |
-| `source_read` | 凭精确桶 ID + 精确标题读取该桶的隐藏原文证据；默认只读该事件声明的非空行范围，不搜索、不联想，过长则显式分页。 |
-| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。长正文可用 `old_str/new_str` 做唯一片段的原子局部替换；只传要改的字段。 |
+| `grow` | 整理一段长内容（日记 / 总结），自动拆成 2~6 条独立桶，并在首次新建时保存逐条生成的 `why_remembered`。结构化 `items` 可逐字写入最终正文、标题和元数据；同时传 `content` 时，它作为共享原文证据保存。 |
+| `trace` | 唯一的元数据写入口：resolved / pinned / 改情感坐标 / 替换正文 / 删除到档案 / 改 plan 状态。长正文可用 `old_str/new_str` 做唯一片段的原子局部替换；发现后端自动建的桶间关系连错了，用 `unlink` 双向断开、`relink`+`relation_type` 改类型；只传要改的字段。 |
 | `dream` | 做梦消化最近窗口（默认 48h）有变动的记忆。**不是义务**，需要消化时再调。 |
 
-### 低频 7 个
+### 低频 9 个
 
 | 工具 | 一句话 |
 |---|---|
-| `pulse` | 自检：桶数量、占用、衰减引擎状态、全部桶摘要。「为什么搜不到 X」时第一个调它。 |
-| `plan` | 登记一个承诺 / 待办。不衰减、不浮现，只在 `dream` 末尾出现；后续写新事件会自动判断它是否已闭环。 |
-| `anchor` / `release` | 把**已存在的**桶设 / 解为「坐标系」。anchor 不主动浮现但可被检索命中，硬上限 24。必须先 `hold` 再 `anchor`。 |
-| `letter_write` / `letter_read` | 写信 / 读信。原文永久保留，不压缩、不合并、不衰减。`author` 常用 `user`（用户）或 `claude`（你自己），也接受任意署名字符串。 |
+| `feel` | 按关键词找回以前留下的感受。**`query` 必填**——feel 不是列表，是「我此刻在想的这件事，我以前怎么感受的」。关键词走向量检索（候选只在 feel 桶内，相似度 ≥ 0.65 才算命中），换个说法也能找回；向量不可用时退回字面匹配并明说降级。命中后逐字返回，不摘要；未命中的不返回，也不用低相关的凑数。写入感受仍走 `hold(feel=True, source_bucket=...)`。 |
+| `pulse` | 自检：桶数量、占用、衰减引擎状态、全部桶摘要；anchor 带 `⚓ [anchor]`。「为什么搜不到 X」时第一个调它。 |
+| `plan` | 登记一个承诺 / 待办。不衰减、不参与普通浮现；在 `dream` 末尾出现，也可用 `breath_advanced(domain="plan")` 随时读出全部 active plan 的正文。后续写新事件会自动判断它是否已闭环。 |
+| `anchor` / `release` | 把**已存在的**桶设 / 解为「坐标系」。anchor 是带 `⚓ [anchor]` 显示标记的冷参考：不主动浮现但可被显式检索命中，硬上限 24。必须先 `hold` 再 `anchor`。 |
+| `letter_write` / `letter_read` / `letter_lock_update` | 写信 / 读信 / 只修改锁状态。`lock_type` 支持 `none`、`timed`、`permanent`；锁拥有者可读全文并可改期或解锁，对方在解锁前只能看到不含标题与正文的必要元数据。 |
+
+Letter 时间锁是 Ombre-Brain 应用层的关系边界，不是磁盘加密。拥有 vault 文件系统、宿主机管理员权限或原始 Markdown 访问权限的人仍能读取原文；它不应被描述为管理员不可读的加密保险箱。旧 Letter 缺少锁字段时等同 `lock_type=none`，无需迁移。
+
+Dashboard 原有的 Letter 编辑继续保留：历史信、无锁信以及当前锁拥有者自己的锁信均可编辑原稿；对方尚未解锁的信不可读也不可编辑。正文编辑与锁状态管理使用同一 PATCH 路由，但必须分开请求，且两类操作都不会改写创建时快照的 `writer_name`。
+
+旧版历史 Letter 默认继续公开且不可补锁。Dashboard 可按单封信执行一次“转换为新版 Letter”：正文与原始元数据不变，只从现有 `AI_NAME` 补写实际关系名，并把锁控制权固定交给 AI；转换后由 AI 通过 `letter_lock_update` 管理锁，human 不获得锁权限。该转换不批量执行，也不根据旧 `author` 推断身份。
 | `I` | 自我认知：「我是什么」（本质 / 规律 / 立场 / 局限…）。**是沉淀物，不是日记**——写下的「我觉得……」先落成一条普通记忆（候选），会浮现也会衰减，每次 `dream` 都跟相关记忆摆在一起碰撞；被 3 次不同日期的 `dream` 见证后还站得住，才用 `I(promote="桶ID")` 升级成正式条目。正式条目不随普通 `breath` 浮现，每次对话开头自动附最近 3 条。 |
+
+可选的 `You` 与 `them` 不属于这 16 个基础工具。开启时返回的是**模型自己写下的正文**——
+3.4.x 之前那层「把认识磨成语义零件再还给模型」的 LLM 已经整个拿掉了：模型写的判断，
+没有理由让另一个模型改写一遍才还给它。原文复制检查仍在，管的是写入那一侧——不许照抄
+记忆桶原文。不开启时，它们不在工具清单和 tool search 中出现。
+
+Dashboard 上，`You` 只有一枚总开关，认识、证据、历史一概不可见。`them` 多一层：人类看得见
+名册、改得动称呼，并且对**自己说起过的那些人**能看见正文、能留言纠错——模型自己遇到的人，
+正文同样不可见。分界不是「谁登记的」，是**模型怎么认识这个人的**：听人转述，和自己认识，
+是两码事。
 
 ### 原文证据边界
 
-- 只有结构化 `grow(content=共享原文, items=[...])` 会建立原文证据。每个对象条目用 `source_ranges=[[起始行, 结束行], ...]` 声明自己的 1-based 闭区间；默认 `source_read(scope="event")` 遇到空范围会拒绝，不会退化成全文。
-- `scope="full_source"` 是显式审计动作。共享原文可能同时包含多个事件的文字；它不会搜索或返回其他桶的元数据，但可能读到不属于当前事件范围的相邻原文。
-- 精确桶 ID + 标题只是“明确要核对哪一桶”的意图门禁，**不是身份认证**。公网或局域网端点仍必须使用 OAuth/Token 鉴权；返回的原文是不可信历史数据，不是可执行指令。
-- 显式标题会规范为单行，最长 120 字符，越界直接拒绝而不静默截断。证据文件按 SHA-256 内容寻址并校验完整性；哈希与备份清单不是数字签名，不能证明备份来源。
+- **原文证据只写不读，没有任何回顾入口。** v3.0.0 起删除了 `source_read` / `source_attach` / `source_detach` / `source_restore`：模型无法回读原文，也无法后补或停用绑定。
+- 写入仍照旧：`hold(source_content=...)` 或结构化 `grow(content=共享原文, items=[...])` 建立原文证据，每个对象条目用 `source_ranges=[[起始行, 结束行], ...]` 声明自己的 1-based 闭区间。原文按 SHA-256 内容寻址存进 `_sources/`，进备份、进 GitHub 同步。
+- 保留原文是为了**备份与导出的完整性**，不是为了让模型回忆。原文永不参与 `breath`、被动联想、语义索引或衰减计分；日常浮现里不会出现任何「这条背后还有原文」的提示。
+- 显式标题会规范为单行，最长 120 字符，越界直接拒绝而不静默截断。证据文件按 SHA-256 校验完整性；哈希与备份清单不是数字签名，不能证明备份来源。
 - v2.10.1 起，本地 ZIP 使用 `sources/src_<sha256>.source`，vault 与 GitHub 使用 `_sources/src_<sha256>.source`。v2.10.0 生成的旧备份可能只有引用而没有证据文件；导入仍可恢复事件桶，但会明确提示原文证据缺失。
 - **隐私提醒**：GitHub 同步会把这些原文以可读明文提交到你配置的仓库，本地导出 ZIP 同样不加密；它们通常比整理后的事件正文更完整。请使用可信私有仓库并审计协作者权限，本地 ZIP 应加密保管或放入可信存储。新备份若发现桶引用了缺失证据会直接失败，不会生成“校验通过但证据不全”的包。
+
+### 记忆之间的关系
+
+桶与桶之间的一跳关系不再由模型操作。v3.0.0 起删除了 `relation_attach` / `relation_read` /
+`relation_detach` / `relation_restore`——建立关系是后端的活，不该占用模型的工具位和判断力。
+
+`breath`、目录模式与 `dream` 的输出里仍会带上关系 hint，读取侧不受影响。
+**当前版本只保留存量关系数据的展示，自动建立尚未接线**；接线之前不会有新关系产生。
 
 归档记忆若经 `breath_search` 命中，会显示 `trace(bucket_id="...", restore=True)`。只有在判断它对当下有帮助、值得再次回忆后才调用；`restore=True` 必须单独使用，查询本身不会改变记忆状态。
 
@@ -223,9 +249,13 @@ curl http://localhost:18001/health
 }
 ```
 
-重启 Claude Desktop，工具列表里会出现全部 15 个工具：`breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `source_read` / `trace` / `dream` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_read` / `I`。
+重启 Claude Desktop，工具列表里会出现全部 16 个工具：`breath` / `breath_search` / `breath_advanced` / `hold` / `grow` / `trace` / `dream` / `feel` / `anchor` / `release` / `pulse` / `plan` / `letter_write` / `letter_lock_update` / `letter_read` / `I`。
 
-> 15 个工具全在同一连接器 `/mcp` 暴露，只配这一个即可。
+> 16 个工具全在同一连接器 `/mcp` 暴露，只配这一个即可。信件 3.2.0 曾拆到
+> `/mcp-extra`，3.4.0 并回主链路；那个端点现在返回 404，不要再单独添加。
+
+在 Ombre 设置页开启 `You` / `them` 后，`/mcp` 会额外出现对应的工具：只开一个是 17 个，
+两个都开是 18 个；关闭后立即隐藏。
 
 ---
 
@@ -302,15 +332,16 @@ Claude.ai                    Ombre Brain 服务器
 
 #### 步骤 3：连接端点
 
-15 个工具全在**一个 MCP 端点 `/mcp`** 上：
+16 个基础工具全在一个 MCP 端点上；可选的 `You` 与 `them` 同样只属于 `/mcp`：
 
 | 端点 | 工具 | 说明 |
 |---|---|---|
-| `/mcp` | `breath` `breath_search` `breath_advanced` `hold` `grow` `source_read` `dream` `trace` `anchor` `release` `pulse` `plan` `letter_write` `letter_read` `I` | 全部 15 个工具 |
+| `/mcp` | `breath` `breath_search` `breath_advanced` `hold` `grow` `dream` `feel` `trace` `anchor` `release` `pulse` `plan` `letter_write` `letter_lock_update` `letter_read` `I`；开关开启时另有 `You` / `Them` | 16 个工具（各开一个 +1，全开 18 个）|
 
-> 旧版曾使用第二连接器 `/mcp-extra`，该端点现已退役并返回 `404`；不要再单独添加。全部 15 个工具都在 `/mcp`。
+> 曾经存在第二连接器 `/mcp-extra`（2.8.5 退役 → 3.2.0 随信件恢复 → 3.4.0 随信件
+> 并回主链路再次退役）。该端点返回 `404`，不要再单独添加。
 
-在 Claude.ai / 你的客户端里添加这一个连接器即可使用全部工具：
+在 Claude.ai / 你的客户端里添加这一条连接器就够了，信件能力也在里面：
 
 ```
 http(s)://<你的地址>:18001/mcp
@@ -654,7 +685,8 @@ docker compose -f deploy/docker-compose.yml up -d
 | **记忆网络** | 基于 embedding 相似度的桶关系图 |
 | **③ 引擎** | 内联填写 LLM / Embedding API Key，在线修改参数，点「保存 Key」立即热更新 |
 | **导入** | 上传历史对话文件批量导入 |
-| **设置** | 修改密码、MCP 鉴权开关、版本状态、Cloudflare Tunnel 管理、API Key 测试 |
+| **设置** | 修改密码、独立 `You` 开关、`them` 开关与每人 token 配额、MCP 鉴权、版本状态、Cloudflare Tunnel 管理、API Key 测试 |
+| **三层认识** | 左下角那个地球按钮：**我 / 你 / 他们**。`I` 的条目、`You` 的开关状态、`them` 的名册都在这里。名册按「模型怎么认识这个人的」分两组，点进去是那个人自己的一页，可以改称呼、留言纠错 |
 
 **设置页 Cloudflare Tunnel 区**：填入 Token 后点启动，状态点颜色表示连接状态（灰=未运行，橙=连接中，绿=已连接，红=连接失败+错误原因）。支持「启动时自动连接」。
 
@@ -844,7 +876,7 @@ docker compose -f deploy/docker-compose.yml up -d
 
 新用户最常踩、但文档里分散各处的点，集中提醒一下：
 
-- **只需加一个连接器 `/mcp`**：15 个工具全在这一个端点上，不用再单独加别的。
+- **只有一条连接器**：`/mcp` 提供全部 16 个工具（含信件三件套），以及开关控制的可选 `You` 与 `Them`。信件 3.2.0 曾拆到 `/mcp-extra`，3.4.0 并回主链路，该端点现在返回 404。
 - **反代/隧道要整主机名转发**：Cloudflare Tunnel / Nginx 按域名整体转发到 `localhost:端口`，覆盖所有路径即可。
 - **OpenAI 兼容向量化两个坑**：base_url 末尾要带 `/v1`（漏了 404）、model 要带完整前缀（如 `BAAI/bge-m3`，漏了报 Model does not exist）。填完用向量化区的「测试」按钮确认。
 - **改完 key / 配置点「保存」后再「测试」**：压缩和向量化各有独立的「测试」按钮，能用就用，别凭感觉。
@@ -852,7 +884,7 @@ docker compose -f deploy/docker-compose.yml up -d
 - **`dehydration.max_tokens` 别设太小**：Gemini 2.5 系列有思考 token 开销，太小会让 JSON 截断、记忆全标成「未分类」；用 `gemini-2.0-flash` 或把它设到 `4096` 以上。
 - **记忆数据要挂 volume**：不挂载（或 Render 免费层无持久磁盘）→ 重启记忆全丢。**判断标准很简单：你能在宿主机文件夹里看到那些 `.md` 记忆文件，就是安全的。** Dashboard → 系统诊断 会直接告诉你数据目录持不持久。
 - **⚠️ env 变量会盖过面板配置**：如果你启动时用 `-e OMBRE_XXX=...` 传了某个变量（key、model、端口…），那**在 Dashboard 里改同一项、重启后会被 env 值盖回去**。要么统一在 env 改，要么就别用 `-e` 传、改用面板管理。这是新手最容易被绕晕的一点。
-- **🛟 记忆只有一份很危险，强烈建议开异地备份**：本地/单卷就是「一份」，磁盘坏了或误删就找不回。到 Dashboard → GitHub 同步 配一下（几分钟），记忆就多一份云端存档，换机/灾难也能拉回来（embeddings.db 不上传，靠「重算所有向量」恢复）。
+- **🛟 记忆只有一份很危险，强烈建议开异地备份**：本地/单卷就是「一份」，磁盘坏了或误删就找不回。到 Dashboard → GitHub 同步 配一下（几分钟），记忆、以及 `You` / `them` 写下的认识就多一份云端存档，换机/灾难也能拉回来（embeddings.db 不上传，靠「重算所有向量」恢复）。
 - **切换向量化后端会全库重算**：云端 3072 维和本地 bge-m3 1024 维不通用，每次切换都会重算，别频繁来回切。
 - **热更新按钮看部署方式**：Docker（有 restart 策略）点完自动恢复；裸机/纯 Python 需要 systemd/pm2 等守护，否则更新后要手动重启。点之前先「导出记忆备份」。
 - **自有前端 / GPT / GLM 接入**：还要保留 Claude.ai 时优先使用 OAuth + 静态 Token 共存；免鉴权只允许已确认的同机回环边界，局域网/NAS 不属于回环。
@@ -860,9 +892,26 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ---
 
+## 贡献 / Contributing
+
+想改点什么、加点什么，见 [CONTRIBUTING.md](CONTRIBUTING.md)。
+
+简短版：提交时加 `-s`（`git commit -s`），会自动附上一行 `Signed-off-by:`。
+这是 [DCO](DCO) 声明 —— **不转让著作权，你写的代码依然是你的**，
+只是声明这段代码你有权提交。Linux 内核用的是同一套。
+
+---
+
 ## License
 
-MIT
+[MIT](LICENSE)
+
+用、改、分发、商用、闭源、拿去卖，都可以，不用问我们。唯一的硬性要求是保留 `LICENSE` 里的版权声明。
+
+另有一份 [NOTICE.md](NOTICE.md)，是关于署名和「如果你拿它做记忆服务」的一点请求。
+**那不是条款，没有约束力**，MIT 说了算。写在那里只是想把为什么说清楚。
+
+写过代码的人见 [AUTHORS.md](AUTHORS.md)。
 
 ---
 
@@ -872,6 +921,6 @@ MIT
 
 当前正式变量名：
 
-`OMBRE_COMPRESS_API_KEY`、`OMBRE_COMPRESS_BASE_URL`、`OMBRE_COMPRESS_MODEL`、`OMBRE_COMPRESS_FORMAT`、`OMBRE_COMPRESS_TIMEOUT_SECONDS`、`OMBRE_EMBED_API_KEY`、`OMBRE_EMBED_BASE_URL`、`OMBRE_EMBED_MODEL`、`OMBRE_EMBED_FORMAT`、`OMBRE_EMBED_TIMEOUT_SECONDS`、`OMBRE_EMBED_BACKEND`、`OMBRE_OLLAMA_URL`、`OMBRE_VAULT_DIR`、`OMBRE_MEDIA_DIR`、`OMBRE_MEDIA_MAX_BYTES`、`OMBRE_CONFIG_PATH`、`OMBRE_CODE_DIR`、`OMBRE_LOG_DIR`、`OMBRE_LOG_FILE`、`OMBRE_EXTERNAL_CHANGE_POLL_SECONDS`、`OMBRE_TRANSPORT`、`OMBRE_PORT`、`OMBRE_BIND_HOST`、`OMBRE_BIND_ADDRESS`、`OMBRE_MCP_REQUIRE_AUTH`、`OMBRE_MCP_AUTH_MODE`、`OMBRE_MCP_TOKEN`、`OMBRE_ALLOW_INSECURE_MCP`、`OMBRE_DASHBOARD_PASSWORD`、`OMBRE_DASHBOARD_SESSION_DAYS`、`OMBRE_TRUSTED_PROXY_CIDRS`、`OMBRE_GITHUB_TOKEN`、`OMBRE_HOOK_URL`、`OMBRE_HOOK_TOKEN`、`OMBRE_HOOK_SKIP`、`OMBRE_HOOK_ALLOW_PUBLIC`、`OMBRE_ALLOW_CUSTOM_UPDATE_REPO`、`OMBRE_ALLOW_UNTRUSTED_MIRROR`、`OMBRE_UPDATE_ALLOW_PIP`、`OMBRE_FORCE_CODE_RESEED`、`AI_NAME`。
+`OMBRE_COMPRESS_API_KEY`、`OMBRE_COMPRESS_BASE_URL`、`OMBRE_COMPRESS_MODEL`、`OMBRE_COMPRESS_FORMAT`、`OMBRE_COMPRESS_TIMEOUT_SECONDS`、`OMBRE_EMBED_API_KEY`、`OMBRE_EMBED_BASE_URL`、`OMBRE_EMBED_MODEL`、`OMBRE_EMBED_FORMAT`、`OMBRE_EMBED_TIMEOUT_SECONDS`、`OMBRE_EMBED_BACKEND`、`OMBRE_OLLAMA_URL`、`OMBRE_VAULT_DIR`、`OMBRE_MEDIA_DIR`、`OMBRE_MEDIA_MAX_BYTES`、`OMBRE_CONFIG_PATH`、`OMBRE_CODE_DIR`、`OMBRE_LOG_DIR`、`OMBRE_LOG_FILE`、`OMBRE_EXTERNAL_CHANGE_POLL_SECONDS`、`OMBRE_TRANSPORT`、`OMBRE_PORT`、`OMBRE_BIND_HOST`、`OMBRE_BIND_ADDRESS`、`OMBRE_MCP_REQUIRE_AUTH`、`OMBRE_MCP_AUTH_MODE`、`OMBRE_MCP_TOKEN`、`OMBRE_ALLOW_INSECURE_MCP`、`OMBRE_DASHBOARD_PASSWORD`、`OMBRE_SETUP_TOKEN`、`OMBRE_DASHBOARD_SESSION_DAYS`、`OMBRE_TRUSTED_PROXY_CIDRS`、`OMBRE_GITHUB_TOKEN`、`OMBRE_HOOK_URL`、`OMBRE_HOOK_TOKEN`、`OMBRE_HOOK_SKIP`、`OMBRE_HOOK_ALLOW_PUBLIC`、`OMBRE_ALLOW_CUSTOM_UPDATE_REPO`、`OMBRE_ALLOW_UNTRUSTED_MIRROR`、`OMBRE_UPDATE_ALLOW_PIP`、`OMBRE_FORCE_CODE_RESEED`、`AI_NAME`。
 
 永久兼容旧名：`OMBRE_API_KEY` → `OMBRE_COMPRESS_API_KEY`，`OMBRE_BASE_URL` → `OMBRE_COMPRESS_BASE_URL`，`PASSWORD` → `OMBRE_DASHBOARD_PASSWORD`，`OMBRE_BUCKETS_DIR` → `OMBRE_VAULT_DIR`。

@@ -21,18 +21,17 @@ tools/breath/importance.py — importance_min 模式
 ========================================
 """
 
+from datetime import datetime  # noqa: F401 —— 供签名注解使用
+
 from .. import _runtime as rt
 from .._common import is_importance_audit_candidate
+from ..plan.core import is_letter_bucket
+from ._date_range import bucket_in_created_range
+from ._shared import bucket_has_tags, footprint_reader
 from ._verbatim import render_stored_bucket
+from errors import safe_error_detail
 
 _BUDGET_NOTICE = "token 预算不足：下一条重要记忆未被截断或摘要，请提高 max_tokens 后重试。"
-
-
-def _bucket_has_tags(meta: dict, tag_filter: list) -> bool:
-    if not tag_filter:
-        return True
-    bucket_tags = set(meta.get("tags", []) or [])
-    return all(t in bucket_tags for t in tag_filter)
 
 
 def _importance_of(bucket: dict) -> int:
@@ -110,22 +109,37 @@ def _select_importance_buckets(buckets: list[dict], importance_min: int, limit: 
     return sorted(selected, key=_importance_sort_key, reverse=True)
 
 
-async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter: list) -> str:
+async def surface_by_importance(
+    importance_min: int,
+    max_tokens: int,
+    tag_filter: list,
+    created_from: "datetime | None" = None,
+    created_to: "datetime | None" = None,
+) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
     except Exception as e:
-        return f"记忆系统暂时无法访问: {e}"
+        return f"记忆系统暂时无法访问: {safe_error_detail(e)}"
     canonical_buckets = _deduplicate_buckets(all_buckets)
     filtered = [
         b for b in canonical_buckets
         if is_importance_audit_candidate(
             b.get("metadata", {}), importance_min
         )
-        and _bucket_has_tags(b.get("metadata", {}), tag_filter)
+        and not is_letter_bucket(b)
+        and bucket_has_tags(b.get("metadata", {}), tag_filter)
+        # 3.6.0：重要度审计也认时间区间。日期过滤必须在 20 条截断**之前**——
+        # 先截后滤会让「七月的高重要度记忆」变成「全库前 20 里恰好在七月的那几条」。
+        and bucket_in_created_range(b, created_from, created_to)
     ]
     filtered = _select_importance_buckets(filtered, importance_min, limit=20)
     if not filtered:
+        if created_from is not None or created_to is not None:
+            return f"这段时间里没有重要度 >= {importance_min} 的记忆。"
         return f"没有重要度 >= {importance_min} 的记忆。"
+
+    _footprint = footprint_reader()
+
     results = []
     token_used = 0
     budget_blocked = False
@@ -135,6 +149,7 @@ async def surface_by_importance(importance_min: int, max_tokens: int, tag_filter
             rendered, entry_tokens = render_stored_bucket(
                 b,
                 f"[importance:{imp}] [bucket_id:{b['id']}]",
+                _footprint(b),
             )
             if token_used + entry_tokens > max_tokens:
                 budget_blocked = True

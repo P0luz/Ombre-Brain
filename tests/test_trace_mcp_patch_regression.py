@@ -35,6 +35,39 @@ async def test_trace_mcp_schema_and_dispatch_include_content_patch(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_trace_mcp_schema_dispatch_and_log_include_protected(monkeypatch):
+    import server
+
+    seen = {}
+    entries = []
+
+    async def fake_dispatch(**kwargs):
+        seen.update(kwargs)
+        return "protected"
+
+    monkeypatch.setattr(server._t_trace, "dispatch", fake_dispatch)
+    monkeypatch.setattr(
+        server,
+        "_log_op_entry",
+        lambda op, args: entries.append((op, args)),
+    )
+    monkeypatch.setattr(server, "_log_op_ok", lambda *_args: None)
+    tool = server.mcp._tool_manager.get_tool("trace")
+    listed = next(item for item in await server.mcp.list_tools() if item.name == "trace")
+
+    assert "protected" in listed.inputSchema["properties"]
+    assert "protected" in tool.fn_metadata.arg_model.model_fields
+
+    output = await tool.run({"bucket_id": "bucket-1", "protected": 1})
+
+    assert output == "protected"
+    assert seen["protected"] == 1
+    assert len(entries) == 1
+    assert entries[0][0] == "trace"
+    assert entries[0][1]["protected"] == 1
+
+
+@pytest.mark.asyncio
 async def test_trace_mcp_rejects_unknown_patch_argument_instead_of_ignoring_it():
     import server
 

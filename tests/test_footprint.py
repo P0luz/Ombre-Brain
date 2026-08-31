@@ -3,8 +3,11 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from errors import ToolInputError
+
 import tools._runtime as rt
 from ombrebrain.eventsourcing.footprint import FootprintSnapshot
+from tools._common import count_pinned
 from tools.breath.search import surface_search
 from tools.breath.surface import surface_default
 from tools.trace.core import trace_core
@@ -104,8 +107,9 @@ async def test_trace_restore_is_explicit_and_reindexes_bucket(bucket_mgr, decay_
     assert await bucket_mgr.delete(bucket_id) is True
     _install_runtime(bucket_mgr, decay_eng)
 
-    conflict = await trace_core(bucket_id, restore=True, content="do not overwrite")
-    assert "restore=True 必须单独调用" in conflict
+    with pytest.raises(ToolInputError) as excinfo:
+        await trace_core(bucket_id, restore=True, content="do not overwrite")
+    assert 'restore=True 必须单独调用' in str(excinfo.value)
     assert await bucket_mgr.get(bucket_id) is None
 
     restored = await trace_core(bucket_id, restore=True)
@@ -116,6 +120,39 @@ async def test_trace_restore_is_explicit_and_reindexes_bucket(bucket_mgr, decay_
     assert active["metadata"]["type"] == "dynamic"
     assert "deleted_at" not in active["metadata"]
     assert bucket_id in bucket_mgr.embedding_engine._store
+    assert bucket_mgr.footprint_snapshot().summary(bucket_id).endswith("重新回忆")
+
+
+@pytest.mark.asyncio
+async def test_trace_restore_archived_pin_does_not_silently_repin(
+    bucket_mgr,
+    decay_eng,
+):
+    """归档保留 pin 历史，但显式恢复不会让它重新占用活跃配额。"""
+    bucket_id = await bucket_mgr.create(
+        content="A pinned memory returning without a silent repin.",
+        domain=["life"],
+        pinned=True,
+    )
+    _install_runtime(bucket_mgr, decay_eng)
+
+    assert await count_pinned() == 1
+    assert await bucket_mgr.archive(bucket_id) is True
+
+    archived = await bucket_mgr.get_including_archive(bucket_id)
+    assert archived is not None
+    assert archived["metadata"]["type"] == "archived"
+    assert archived["metadata"]["pinned"] is True
+    assert await count_pinned() == 0
+
+    restored = await trace_core(bucket_id, restore=True)
+    active = await bucket_mgr.get(bucket_id)
+
+    assert restored == f"已重新回忆并恢复记忆桶: {bucket_id}"
+    assert active is not None
+    assert active["metadata"]["type"] == "permanent"
+    assert active["metadata"].get("pinned", False) is False
+    assert await count_pinned() == 0
     assert bucket_mgr.footprint_snapshot().summary(bucket_id).endswith("重新回忆")
 
 

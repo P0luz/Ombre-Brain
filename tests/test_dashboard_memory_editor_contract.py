@@ -212,6 +212,37 @@ def test_status_banner_tracks_responsive_sticky_header_height():
     assert "window.addEventListener('resize', syncStatusBannerOffset)" in watcher
 
 
+def test_dashboard_has_an_intermediate_pc_responsive_layout():
+    html = DASHBOARD.read_text(encoding="utf-8")
+
+    breakpoint = "@media (min-width: 769px) and (max-width: 1500px)"
+    assert breakpoint in html
+    responsive = html[html.index(breakpoint) :]
+
+    assert 'grid-template-areas:' in responsive
+    assert '"title meta meta"' in responsive
+    assert '"search search actions"' in responsive
+    assert 'grid-template-columns: repeat(6, minmax(0, 1fr))' in responsive
+    assert 'white-space: nowrap' in responsive
+    assert '.tab-spacer { display: none; }' in responsive
+    assert 'max-width: min(220px, 100%)' in html
+    assert '#owner-badge-text {' in html
+    assert 'text-overflow: ellipsis' in html
+
+
+def test_mobile_responsive_overrides_follow_the_retro_theme_layer():
+    html = DASHBOARD.read_text(encoding="utf-8")
+
+    retro_layer = html.index("RETRO HANDHELD CONSOLE LAYER")
+    final_mobile_override = html.rindex("@media (max-width: 768px)")
+
+    assert final_mobile_override > retro_layer
+    responsive = html[final_mobile_override:]
+    assert 'grid-template-columns: repeat(3, minmax(0, 1fr))' in responsive
+    assert '.header-actions button {' in responsive
+    assert 'font-size: 0 !important' in responsive
+
+
 def test_editor_preserves_special_and_future_bucket_types():
     render_source = _dashboard_function("renderEditForm", "bucketSaveEdit")
     save_source = _dashboard_function("bucketSaveEdit", "maybeShowOnboarding")
