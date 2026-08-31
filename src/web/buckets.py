@@ -218,9 +218,14 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/bucket/{bucket_id}", methods=["GET"])
     async def api_bucket_detail(request: Request) -> Response:
-        """Get full raw bucket content plus display-only derived text by ID."""
+        """Get full raw bucket content plus display-only derived text by ID.
+
+        A trusted sidecar may use its service token on this exact read route so
+        Xinchao can inspect every bucket type. Dashboard sessions remain valid,
+        while all bucket mutation routes keep requiring Dashboard auth.
+        """
         from starlette.responses import JSONResponse
-        err = sh._require_auth(request)
+        err = sh._require_service_or_dashboard_auth(request)
         if err:
             return err
         bucket_id = request.path_params["bucket_id"]

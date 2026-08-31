@@ -31,6 +31,9 @@ RUN set -eu; \
         echo "[build] INSTALL_CLOUDFLARED=0 → 跳过 cloudflared（Tunnel 一键管理将不可用）"; \
     fi; \
     rm -f /tmp/fetch_cloudflared.py
+RUN apt-get update \
+  && apt-get install -y --no-install-recommends wget curl ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
 
 # Install dependencies first (leverage Docker cache)
 # 先装依赖（利用 Docker 缓存）

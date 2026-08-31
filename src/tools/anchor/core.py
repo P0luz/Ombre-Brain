@@ -147,6 +147,7 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
     feel_lines: list[str] = []
     plan_lines: list[str] = []
     letter_lines: list[str] = []
+    i_lines: list[str] = []
     for b in buckets:
         meta = b.get("metadata", {})
         btype = meta.get("type")
@@ -166,6 +167,8 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
             icon = "🫧"
         elif btype == "plan":
             icon = "📋"
+        elif btype == "i":
+            icon = "🪞"
         elif btype == "archived":
             icon = "🗄️"
         elif meta.get("resolved", False):
@@ -213,6 +216,8 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         elif logical_letter:
             author = meta.get("author", "?")
             letter_lines.append(line + f" [{author}]")
+        elif btype == "i":
+            i_lines.append(line)
         else:
             normal_lines.append(line)
 
@@ -225,4 +230,6 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         sections.append(f"=== feel（{len(feel_lines)} 条）===\n" + "\n".join(feel_lines))
     if letter_lines:
         sections.append(f"=== 信件（{len(letter_lines)} 封）===\n" + "\n".join(letter_lines))
+    if i_lines:
+        sections.append(f"=== I（{len(i_lines)} 条）===\n" + "\n".join(i_lines))
     return "\n\n".join(sections)
