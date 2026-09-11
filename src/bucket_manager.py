@@ -449,6 +449,8 @@ _METADATA_TEXT_LIMITS = {
     "resolution_reason": 500,
     "resolved_by": 128,
     "related_bucket": 128,
+    "window_start": 64,
+    "window_end": 64,
     "author": 120,
     "user_name": 120,
     "title": 120,
@@ -2546,7 +2548,7 @@ class BucketManager:
         # 由 server.py 的 plan() / trace() / /api/plans/{id}/action 维护，bucket_manager 不参与生成。
         for k in ("status", "type", "resolution_reason", "resolved_by",
                   "resolution_suggested",
-                  "related_bucket", "author", "user_name", "letter_date",
+                  "related_bucket", "window_start", "window_end", "author", "user_name", "letter_date",
                   "lock_type", "unlock_date", "locked_by", "lock_owner_source", "writer_name",
                   "change_log",
                   # iter 1.8 新增字段。除 weight 外全部透传不转换。

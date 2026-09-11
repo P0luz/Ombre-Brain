@@ -9,7 +9,7 @@ breath 中。
 
 关键行为：
 - plan_create：去重（同正文 + status=active 已存在 → 直接返回原 ID），
-  写入 type=plan + status + weight + change_log 起点
+  写入 type=plan + status + weight + 时间窗 + change_log 起点
 - letter_write：原文永久保存，author 接受任意字符串署名（"ai" 或等于
   ai_name 时统一存为 ai_name 的值，其它字符串原样存为署名；"user" 为
   用户侧），写入 type=letter + author/title/letter_date 元数据
@@ -26,6 +26,7 @@ breath 中。
 
 import json
 import math
+import re
 from datetime import datetime, timezone
 from typing import Optional
 
@@ -55,6 +56,41 @@ _GENERIC_RELATION_NAMES = {
 }
 _HUMAN_AUTHOR_ALIASES = {"user", "human", "human-side"}
 _AI_AUTHOR_ALIASES = {"ai", "ai-side", "claude"}
+_DATE_ONLY_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
+
+def normalize_plan_window(value: object, *, boundary: str) -> str | None:
+    """把 Plan 时间窗边界归一化为带 offset 的 ISO 8601。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except (TypeError, ValueError) as exc:
+        raise ToolInputError(
+            f"时间窗「{raw}」看不懂。需要 YYYY-MM-DD 或 ISO 8601，"
+            "例如 2026-09-02 或 2026-09-02T09:30:00+08:00。"
+        ) from exc
+    if _DATE_ONLY_RE.fullmatch(raw) and boundary == "end":
+        parsed = parsed.replace(hour=23, minute=59, second=59, microsecond=999999)
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        parsed = parsed.replace(tzinfo=get_tzinfo())
+    return parsed.isoformat()
+
+
+def _window_instant(value: object) -> str | None:
+    raw = str(value or "").strip()
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            parsed = parsed.replace(tzinfo=get_tzinfo())
+        return parsed.astimezone(timezone.utc).isoformat()
+    except (TypeError, ValueError):
+        return raw
+
+
 
 
 def normalize_unlock_date(lock_type: str, value: object, *, now: datetime | None = None) -> str | None:
@@ -193,6 +229,8 @@ async def plan_create(
     related_bucket: Optional[str] = "",
     weight: Optional[float] = 0.5,
     why_remembered: Optional[str] = "",
+    window_start: Optional[str] = "",
+    window_end: Optional[str] = "",
 ) -> str:
     if status is None:
         status = "active"
@@ -210,6 +248,14 @@ async def plan_create(
         parsed_weight = 0.5
     weight = max(0.0, min(1.0, parsed_weight))
     why_remembered = str(why_remembered).strip()[:500]
+    normalized_start = normalize_plan_window(window_start, boundary="start")
+    normalized_end = normalize_plan_window(window_end, boundary="end")
+    if (
+        normalized_start
+        and normalized_end
+        and _window_instant(normalized_start) > _window_instant(normalized_end)
+    ):
+        raise ToolInputError("window_start 不能晚于 window_end。")
     await rt.decay_engine.ensure_started()
     if not content or not content.strip():
         raise ToolInputError("内容为空，无法登记计划。")
@@ -220,6 +266,8 @@ async def plan_create(
         status=status,
         related_bucket=related_bucket,
         why_remembered=why_remembered,
+        window_start=normalized_start or "",
+        window_end=normalized_end or "",
     )
     if metadata_err:
         raise ToolInputError(metadata_err)
@@ -260,10 +308,14 @@ async def plan_create(
     update_kwargs = {"status": status, "change_log": initial_log}
     if related_bucket.strip():
         update_kwargs["related_bucket"] = related_bucket.strip()
+    if normalized_start:
+        update_kwargs["window_start"] = normalized_start
+    if normalized_end:
+        update_kwargs["window_end"] = normalized_end
     try:
         await rt.bucket_mgr.update(bucket_id, **update_kwargs)
     except Exception as e:
-        rt.logger.warning(f"plan() failed to set status/related: {e}")
+        rt.logger.warning(f"plan() failed to set status/related/window: {e}")
     # 注意：bucket_mgr.create() 已在 content 落盘后投递 embedding outbox
     # 向量，这里不需要也不应该重复调用 generate_and_store（见 hold/feel.py 同类注释）。
     return f"📋plan→{bucket_id} [{status}]"

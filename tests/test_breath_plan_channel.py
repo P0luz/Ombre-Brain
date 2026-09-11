@@ -7,12 +7,15 @@ catalog 模式和「有 query 的检索模式」里生效。`breath_advanced(dom
 降级成只报条数，plan 的正文一度没有任何读取入口。
 """
 
+from datetime import timedelta, timezone
 from unittest.mock import MagicMock
 
 import pytest
 
 import tools._runtime as rt
+from errors import ToolInputError
 from tools.breath import dispatch
+from tools.plan.core import normalize_plan_window, plan_create
 
 
 class _NoopDecay:
@@ -43,6 +46,89 @@ def _install_runtime(bucket_mgr):
     rt.record_v3_tool_event = lambda *_args, **_kwargs: None
 
 
+def _created_id(result: str) -> str:
+    return result.split("→", 1)[1].split(" ", 1)[0].split("（", 1)[0]
+
+
+@pytest.mark.asyncio
+async def test_plan_mcp_schema_exposes_optional_window_fields():
+    import server
+
+    listed = next(tool for tool in await server.mcp.list_tools() if tool.name == "plan")
+    schema = listed.inputSchema
+
+    assert set(schema["properties"]) == {
+        "content",
+        "status",
+        "related_bucket",
+        "weight",
+        "why_remembered",
+        "window_start",
+        "window_end",
+    }
+    assert schema["required"] == ["content"]
+
+
+def test_plan_window_dates_expand_to_configured_local_day(monkeypatch):
+    import tools.plan.core as core
+
+    local_tz = timezone(timedelta(hours=8))
+    monkeypatch.setattr(core, "get_tzinfo", lambda: local_tz)
+
+    assert normalize_plan_window("2026-09-02", boundary="start") == (
+        "2026-09-02T00:00:00+08:00"
+    )
+    assert normalize_plan_window("2026-09-02", boundary="end") == (
+        "2026-09-02T23:59:59.999999+08:00"
+    )
+    assert normalize_plan_window(
+        "2026-09-02T09:30:00", boundary="start"
+    ) == "2026-09-02T09:30:00+08:00"
+
+
+def test_plan_window_preserves_explicit_offset_and_accepts_z():
+    assert normalize_plan_window(
+        "2026-09-02T09:30:00+09:00", boundary="start"
+    ) == "2026-09-02T09:30:00+09:00"
+    assert normalize_plan_window(
+        "2026-09-02T00:30:00Z", boundary="end"
+    ) == "2026-09-02T00:30:00+00:00"
+
+
+@pytest.mark.parametrize("value", ["tomorrow", "2026-02-30", "2026-09-02 garbage"])
+def test_plan_window_rejects_values_outside_the_contract(value):
+    with pytest.raises(ToolInputError, match="YYYY-MM-DD|ISO 8601"):
+        normalize_plan_window(value, boundary="start")
+
+
+@pytest.mark.asyncio
+async def test_plan_reversed_window_compares_real_instants(bucket_mgr):
+    _install_runtime(bucket_mgr)
+
+    with pytest.raises(ToolInputError, match="window_start.*window_end"):
+        await plan_create(
+            "offset order",
+            window_start="2026-09-02T09:00:00+08:00",
+            window_end="2026-09-02T00:30:00Z",
+        )
+
+    assert await bucket_mgr.list_all(include_archive=False) == []
+
+
+@pytest.mark.asyncio
+async def test_plan_single_ended_past_window_is_persisted(bucket_mgr):
+    _install_runtime(bucket_mgr)
+
+    result = await plan_create("past plan", window_end="2020-01-01")
+    bucket = await bucket_mgr.get(_created_id(result))
+
+    assert bucket["metadata"]["status"] == "active"
+    assert bucket["metadata"]["window_end"] == "2020-01-01T23:59:59.999999+08:00"
+    assert "window_start" not in bucket["metadata"]
+    assert bucket["metadata"]["change_log"][0]["action"] == "created"
+
+
+@pytest.mark.asyncio
 async def _make_plan(bucket_mgr, content: str, status: str = "active") -> str:
     bucket_id = await bucket_mgr.create(
         content=content,
