@@ -279,3 +279,68 @@ def test_atomic_update_write_replaces_complete_file(tmp_path):
 
     assert target.read_bytes() == b"new-complete"
     assert not list(target.parent.glob(".ob-update-*"))
+
+
+def test_apply_update_creates_regular_nested_target(tmp_path):
+    repo = tmp_path / "repo"
+    src = repo / "src"
+    frontend = repo / "frontend"
+    src.mkdir(parents=True)
+    plan = {"files": {"src/pkg/module.py": b"safe"}}
+
+    updated = meta._apply_update_files(
+        plan, str(repo), str(src), str(frontend), None
+    )
+
+    assert updated == 1
+    assert (src / "pkg" / "module.py").read_bytes() == b"safe"
+
+
+def test_apply_update_rejects_symlink_target_without_touching_referent(tmp_path):
+    repo = tmp_path / "repo"
+    src = repo / "src"
+    frontend = repo / "frontend"
+    src.mkdir(parents=True)
+    outside = tmp_path / "outside.py"
+    outside.write_bytes(b"outside-original")
+    target = src / "module.py"
+    try:
+        target.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前宿主不允许创建文件符号链接")
+
+    with pytest.raises(ValueError, match="更新目标不安全"):
+        meta._apply_update_files(
+            {"files": {"src/module.py": b"malicious"}},
+            str(repo),
+            str(src),
+            str(frontend),
+            None,
+        )
+
+    assert outside.read_bytes() == b"outside-original"
+
+
+def test_apply_update_rejects_symlink_parent_without_writing_outside(tmp_path):
+    repo = tmp_path / "repo"
+    src = repo / "src"
+    frontend = repo / "frontend"
+    src.mkdir(parents=True)
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    linked = src / "pkg"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前宿主不允许创建目录符号链接")
+
+    with pytest.raises(ValueError, match="更新目标不安全"):
+        meta._apply_update_files(
+            {"files": {"src/pkg/module.py": b"malicious"}},
+            str(repo),
+            str(src),
+            str(frontend),
+            None,
+        )
+
+    assert not (outside / "module.py").exists()

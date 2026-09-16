@@ -15,6 +15,7 @@ web/meta.py — 版本 / 部署信息 / 热更新 / 作者 / 首启引导 / 系�
 
 import os
 import re
+import stat
 import sys
 import asyncio as _asyncio
 import threading
@@ -323,6 +324,61 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
             os.unlink(temp_path)
         except FileNotFoundError:
             pass
+
+
+def _is_reparse_point(info: os.stat_result) -> bool:
+    return bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _prepare_update_target(root: str, subpath: str) -> str:
+    """Reject symlink/reparse traversal before writing one planned update."""
+
+    root_abs = os.path.abspath(root)
+    target = os.path.abspath(os.path.join(root_abs, subpath))
+    try:
+        if os.path.commonpath([root_abs, target]) != root_abs or target == root_abs:
+            raise ValueError("更新目标越界")
+    except ValueError as exc:
+        raise ValueError("更新目标越界") from exc
+
+    if not os.path.lexists(root_abs):
+        os.makedirs(root_abs, exist_ok=False)
+    root_info = os.lstat(root_abs)
+    if (
+        stat.S_ISLNK(root_info.st_mode)
+        or _is_reparse_point(root_info)
+        or not stat.S_ISDIR(root_info.st_mode)
+    ):
+        raise ValueError("更新根目录不安全")
+
+    relative_parts = os.path.relpath(target, root_abs).split(os.sep)
+    parent = root_abs
+    for part in relative_parts[:-1]:
+        parent = os.path.join(parent, part)
+        try:
+            os.mkdir(parent)
+        except FileExistsError:
+            pass
+        info = os.lstat(parent)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or _is_reparse_point(info)
+            or not stat.S_ISDIR(info.st_mode)
+        ):
+            raise ValueError("更新路径包含符号链接或 reparse point")
+
+    if os.path.lexists(target):
+        info = os.lstat(target)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or _is_reparse_point(info)
+            or not stat.S_ISREG(info.st_mode)
+        ):
+            raise ValueError("更新目标不是常规文件")
+    return target
 
 
 def _read_bounded_zip_member(zf, name: str, max_bytes: int) -> bytes:
@@ -670,11 +726,10 @@ def _apply_update_files(
         dest_root = dest_roots.get(segment)
         if not dest_root:
             continue
-        dest = os.path.join(dest_root, subpath)
-        root_abs = os.path.abspath(dest_root)
-        dest_abs = os.path.abspath(dest)
-        if dest_abs != root_abs and not dest_abs.startswith(root_abs + os.sep):
-            raise ValueError(f"更新目标越界：{rel}")
+        try:
+            dest = _prepare_update_target(dest_root, subpath)
+        except ValueError as exc:
+            raise ValueError(f"更新目标不安全：{rel}：{exc}") from exc
         _atomic_write_bytes(dest, data)
         updated += 1
 
