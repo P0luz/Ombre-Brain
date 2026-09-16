@@ -40,7 +40,14 @@ jobs:
         run: |
           rm -f requirements.lock.txt requirements-dev.lock.txt
           uv pip compile requirements.txt --universal --python-version 3.12 --generate-hashes --output-file requirements.lock.txt
-          uv pip compile requirements-dev.in --universal --python-version 3.12 --generate-hashes --output-file requirements-dev.lock.txt
+          # Starlette 1.3+ prefers httpx2 for TestClient. Keep the global 2026-08-01
+          # snapshot stable, but admit the patched httpx2 stack released after it.
+          uv pip compile requirements-dev.in --universal --python-version 3.12 --generate-hashes \
+            --exclude-newer-package 'httpx2=2026-09-15T00:00:00Z' \
+            --exclude-newer-package 'httpcore2=2026-09-15T00:00:00Z' \
+            --exclude-newer-package 'httpx2-jsfetch=2026-09-15T00:00:00Z' \
+            --exclude-newer-package 'truststore=2026-09-15T00:00:00Z' \
+            --output-file requirements-dev.lock.txt
           git diff --exit-code -- requirements.lock.txt requirements-dev.lock.txt
 
       - name: Install locked dependencies
@@ -53,6 +60,7 @@ jobs:
         run: |
           bandit -r src tools deploy -ll -ii -q
           pip-audit -r requirements.lock.txt
+          pip-audit -r requirements-dev.lock.txt
 
       - name: Generate production dependency SBOM
         run: >-
