@@ -282,7 +282,18 @@ def _slot_turn(
         flags |= os.O_CLOEXEC
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
-    descriptor = os.open(lock_path, flags, 0o600)
+    try:
+        descriptor = os.open(lock_path, flags, 0o600)
+    except OSError as exc:
+        # On POSIX, O_NOFOLLOW rejects a symlink swapped in between the lstat
+        # above and this open with ELOOP.  That is the same TOCTOU identity
+        # violation that the post-open checks report on platforms without
+        # O_NOFOLLOW, so keep the public failure contract platform-neutral.
+        if exc.errno == errno.ELOOP:
+            raise RemainderSidecarError(
+                f"lock file identity changed between lstat and open: {lock_path}"
+            ) from exc
+        raise
     try:
         fd_stat = os.fstat(descriptor)
         if not stat.S_ISREG(fd_stat.st_mode) or _is_reparse_point(fd_stat):

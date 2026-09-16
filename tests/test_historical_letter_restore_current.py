@@ -1,4 +1,5 @@
 import asyncio
+import os
 from pathlib import Path
 
 import frontmatter
@@ -9,6 +10,11 @@ from embedding_outbox import STATE_PREPARED, load_slot, prepare_upsert
 from ombrebrain.eventsourcing.footprint import system_origin
 from tools._common import restore_archived_letters
 from web import _shared as sh, meta
+
+
+windows_safe_commit_only = pytest.mark.skipif(
+    os.name != "nt", reason="historical Letter safe commit is Windows-only"
+)
 
 
 def rewrite(path: Path, **updates):
@@ -36,6 +42,7 @@ async def archived_letter(bucket_mgr, content="historical", **updates):
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_audit_is_zero_write_and_restore_preserves_public_fields(bucket_mgr):
     bucket_id, source = await archived_letter(bucket_mgr)
     rewrite(source, lock_type=None, unlock_date=None, locked_by_principal=None)
@@ -61,6 +68,7 @@ async def test_audit_is_zero_write_and_restore_preserves_public_fields(bucket_mg
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 @pytest.mark.parametrize("principal", ["cheng", "huaiyin", "huaiyin_cc", "human"])
 async def test_restore_preserves_four_principal_lock(bucket_mgr, principal):
     bucket_id, _source = await archived_letter(
@@ -102,6 +110,7 @@ async def test_audit_excludes_weak_terminal_protected_duplicate_and_malformed(bu
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_collision_leaves_one_unchanged_truth(bucket_mgr):
     bucket_id, source = await archived_letter(bucket_mgr)
     target = Path(bucket_mgr.letter_dir) / "history" / source.name
@@ -112,6 +121,7 @@ async def test_collision_leaves_one_unchanged_truth(bucket_mgr):
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_concurrent_restore_commits_once(bucket_mgr):
     bucket_id, _source = await archived_letter(bucket_mgr)
     outcomes = await asyncio.gather(
@@ -122,6 +132,7 @@ async def test_concurrent_restore_commits_once(bucket_mgr):
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_restore_changes_only_unique_type_scalar(bucket_mgr):
     bucket_id, source = await archived_letter(bucket_mgr)
     raw = source.read_bytes()
@@ -132,6 +143,7 @@ async def test_restore_changes_only_unique_type_scalar(bucket_mgr):
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_stale_audit_revision_conflicts_without_write(bucket_mgr):
     bucket_id, source = await archived_letter(bucket_mgr)
     audit = await restore_archived_letters(bucket_mgr)
@@ -146,6 +158,7 @@ async def test_stale_audit_revision_conflicts_without_write(bucket_mgr):
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_source_path_swap_commits_pinned_original_not_decoy(bucket_mgr, monkeypatch):
     import windows_safe_rename as wsr
 
@@ -209,6 +222,7 @@ async def test_lifecycle_absent_to_present_is_rejected(bucket_mgr, operation):
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_crash_intermediate_does_not_claim_unowned_outbox_intent(
     bucket_mgr, tmp_path
 ):
@@ -232,6 +246,7 @@ async def test_crash_intermediate_does_not_claim_unowned_outbox_intent(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_ambiguous_type_rejected_before_move(bucket_mgr):
     bucket_id, source = await archived_letter(bucket_mgr)
     source.write_bytes(
@@ -243,6 +258,7 @@ async def test_ambiguous_type_rejected_before_move(bucket_mgr):
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_revision_to_handle_rebind_is_rejected(bucket_mgr, monkeypatch, tmp_path):
     import windows_safe_rename as wsr
 
@@ -270,6 +286,7 @@ async def test_revision_to_handle_rebind_is_rejected(bucket_mgr, monkeypatch, tm
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_explicit_yaml_string_tag_cannot_redirect_rewrite_into_body(bucket_mgr):
     bucket_id, source = await archived_letter(bucket_mgr, content="body\ntype: archived")
     raw = source.read_bytes().replace(b"type: archived", b"type: !!str archived", 1)
@@ -285,6 +302,7 @@ async def test_explicit_yaml_string_tag_cannot_redirect_rewrite_into_body(bucket
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_precommit_failure_creates_no_noop_embedding_intent(
     bucket_mgr, monkeypatch, tmp_path
 ):
@@ -306,6 +324,7 @@ async def test_precommit_failure_creates_no_noop_embedding_intent(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_crash_intermediate_is_auditable_and_applyable(bucket_mgr):
     bucket_id, source = await archived_letter(bucket_mgr)
     history = Path(bucket_mgr.letter_dir) / "history"
@@ -357,6 +376,7 @@ async def test_audit_rejects_source_with_multiple_hardlinks(bucket_mgr, tmp_path
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_apply_rejects_hardlink_added_after_audit(bucket_mgr, tmp_path):
     bucket_id, source = await archived_letter(bucket_mgr)
     audit = await restore_archived_letters(bucket_mgr)
@@ -377,6 +397,7 @@ async def test_apply_rejects_hardlink_added_after_audit(bucket_mgr, tmp_path):
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_hardlink_added_at_rename_boundary_returns_ambiguous(
     bucket_mgr, monkeypatch, tmp_path
 ):
@@ -399,6 +420,7 @@ async def test_hardlink_added_at_rename_boundary_returns_ambiguous(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_hardlink_added_before_target_replace_returns_ambiguous(
     bucket_mgr, monkeypatch, tmp_path
 ):
@@ -422,6 +444,7 @@ async def test_hardlink_added_before_target_replace_returns_ambiguous(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_crash_intermediate_post_commit_hardlink_is_ambiguous(
     bucket_mgr, monkeypatch, tmp_path
 ):
@@ -448,6 +471,7 @@ async def test_crash_intermediate_post_commit_hardlink_is_ambiguous(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 @pytest.mark.parametrize("crash_intermediate", [False, True], ids=["ordinary", "crash"])
 async def test_post_replace_info_failure_is_ambiguous(
     bucket_mgr, monkeypatch, crash_intermediate
@@ -484,6 +508,7 @@ async def test_post_replace_info_failure_is_ambiguous(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 @pytest.mark.parametrize("crash_intermediate", [False, True], ids=["ordinary", "crash"])
 async def test_replacement_hardlink_at_rename_boundary_is_ambiguous(
     bucket_mgr, monkeypatch, tmp_path, crash_intermediate

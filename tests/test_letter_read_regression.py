@@ -1,4 +1,5 @@
 import json
+import os
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -9,6 +10,11 @@ import tools._runtime as rt
 from tools._common import restore_archived_letters
 from tools.plan.core import letter_read
 from web import letters as letters_web
+
+
+windows_safe_commit_only = pytest.mark.skipif(
+    os.name != "nt", reason="historical Letter safe commit is Windows-only"
+)
 
 
 class DisabledEmbedding:
@@ -182,6 +188,7 @@ async def test_letter_read_returns_prompt_like_text_verbatim_without_markers(buc
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_maintenance_is_dry_run_then_explicit_apply(bucket_mgr):
     eligible_id = await bucket_mgr.create_internal(
         content="historical letter becomes readable again",
@@ -251,6 +258,7 @@ async def test_archived_letter_maintenance_is_dry_run_then_explicit_apply(bucket
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_apply_revalidates_after_dry_run(bucket_mgr):
     bucket_id = await bucket_mgr.create_internal(
         content="candidate changes after audit",

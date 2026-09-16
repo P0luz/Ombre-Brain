@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -17,6 +18,11 @@ from tools.plan.core import (
     normalize_unlock_date,
 )
 from web import letters
+
+
+windows_safe_commit_only = pytest.mark.skipif(
+    os.name != "nt", reason="historical Letter safe commit is Windows-only"
+)
 
 
 class DisabledEmbedding:
@@ -746,6 +752,7 @@ async def test_historical_conversion_accepts_request_scoped_ai_name_override(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_compat_restore_keeps_opposite_side_lock_hidden(
     bucket_mgr,
 ):

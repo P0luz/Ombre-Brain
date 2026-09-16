@@ -607,8 +607,8 @@
     },
     {
       "path": "src/remainder_sidecar.py",
-      "sha256": "057ae32bde90866106fe3d2ee7e2405309adfb798fcf1f775d4a5aa96a563231",
-      "size": 47727
+      "sha256": "0b3f76d8357286aa277a746e0bb0805c367ba2537a5c11b7b982538f4c011538",
+      "size": 48268
     },
     {
       "path": "src/restore_acceptance.py",

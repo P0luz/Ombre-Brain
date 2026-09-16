@@ -5,10 +5,16 @@ which the Markdown source of truth lives.  Editing ``metadata.type`` without
 relocating that file makes later scans disagree about what the bucket is.
 """
 
+import os
 from pathlib import Path
 
 import frontmatter
 import pytest
+
+
+windows_safe_commit_only = pytest.mark.skipif(
+    os.name != "nt", reason="historical Letter safe commit is Windows-only"
+)
 
 
 def _bucket_files(bucket_mgr, bucket_id: str) -> list[Path]:
@@ -452,6 +458,7 @@ async def test_restore_move_failure_keeps_archived_pin_and_single_source(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_compat_restore_preserves_verbatim_state(bucket_mgr):
     """历史 Letter 兼容恢复只改类型与物理位置，不伪造一次活跃。"""
     bucket_id = await bucket_mgr.create_internal(
@@ -506,6 +513,7 @@ async def test_archived_letter_compat_restore_preserves_verbatim_state(bucket_mg
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 @pytest.mark.parametrize(
     ("dirty_fields", "reason"),
     [
@@ -547,6 +555,7 @@ async def test_archived_letter_compat_restore_rejects_terminal_and_protected_sta
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_compat_restore_requires_strong_marker_and_unique_source(
     bucket_mgr,
 ):
@@ -593,6 +602,7 @@ async def test_archived_letter_compat_restore_requires_strong_marker_and_unique_
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_compat_restore_rolls_back_failed_source_removal(
     bucket_mgr,
     monkeypatch,
@@ -622,6 +632,7 @@ async def test_archived_letter_compat_restore_rolls_back_failed_source_removal(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_compat_restore_never_overwrites_target_collision(
     bucket_mgr,
 ):
