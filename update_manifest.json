@@ -972,8 +972,8 @@
     },
     {
       "path": "src/web/oauth.py",
-      "sha256": "60e662061a4a41148d0d7f49b9a2c7e2d427d19947d4ab18eae858cd7a85ed4e",
-      "size": 68161
+      "sha256": "344640eb5110ecbc15b805cefd2441580ae322a807c2cb12e9e2f953e7f1c33f",
+      "size": 69802
     },
     {
       "path": "src/web/ollama_local.py",

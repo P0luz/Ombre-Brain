@@ -105,6 +105,55 @@ async def test_oauth_client_query_cannot_preselect_local_identity(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("field", ["client_id", "redirect_uri", "state", "resource"])
+async def test_authorize_get_does_not_reflect_oversized_public_fields(
+    oauth_routes, monkeypatch, field
+):
+    client_id = "client-bounded"
+    redirect_uri = "https://client.example/callback"
+    oauth_mod._oauth_clients[client_id] = {
+        "redirect_uris": [redirect_uri],
+        "client_name": "Bounded Client",
+    }
+    monkeypatch.setattr(oauth_mod.sh, "_is_setup_needed", lambda: False)
+    marker = "OVERSIZED-SENTINEL-" + "z" * 5000
+    query = {
+        "client_id": client_id,
+        "redirect_uri": redirect_uri,
+        "response_type": "code",
+        "resource": "https://ombre.example/mcp",
+        "code_challenge": "q" * 43,
+        "code_challenge_method": "S256",
+        "state": "state-1",
+    }
+    query[field] = marker
+
+    response = await oauth_routes[("GET", "/oauth/authorize")](
+        JsonRequest(method="GET", query_params=query)
+    )
+
+    html = response.body.decode()
+    assert marker not in html
+    assert len(html) < 20_000
+
+
+def test_authorize_renderer_defensively_bounds_hidden_values():
+    marker = "RENDER-SENTINEL-" + "x" * 5000
+
+    html = oauth_mod._oauth_authorize_html(
+        marker,
+        marker,
+        marker,
+        marker,
+        resource=marker,
+        scope=marker,
+    )
+
+    assert marker not in html
+    assert len(html) < 20_000
+
+
+@pytest.mark.asyncio
 async def test_oauth_metadata_and_registration_advertise_refresh_token(oauth_routes):
     metadata_response = await oauth_routes[("GET", "/.well-known/oauth-authorization-server")](
         JsonRequest()

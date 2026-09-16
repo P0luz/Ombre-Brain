@@ -75,6 +75,10 @@ _MAX_REDIRECT_URIS = 10
 _MAX_REDIRECT_URI_CHARS = 2048
 _MAX_REDIRECT_URIS_TOTAL_CHARS = 4096
 _MAX_CLIENT_NAME_CHARS = 200
+_MAX_CLIENT_ID_CHARS = 256
+_MAX_OAUTH_STATE_CHARS = 4096
+_MAX_OAUTH_RESOURCE_CHARS = 2048
+_MAX_OAUTH_SCOPE_CHARS = 64
 _PKCE_PATTERN = _re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _FORBIDDEN_REDIRECT_SCHEMES = {
     "about", "blob", "data", "file", "ftp", "javascript", "vbscript"
@@ -379,6 +383,8 @@ def _mcp_resource(
     canonical = f"{base}/mcp"
     if not requested:
         return True, canonical
+    if not isinstance(requested, str) or len(requested) > _MAX_OAUTH_RESOURCE_CHARS:
+        return False, canonical
     normalized = _normalize_resource(requested)
     if normalized in (_normalize_resource(base), _normalize_resource(canonical)):
         return True, canonical
@@ -953,8 +959,12 @@ def _validate_authorize_redirect(client_id: str, redirect_uri: str) -> tuple[boo
     _cleanup_oauth_state()
     if not client_id:
         return False, "missing client_id"
+    if not isinstance(client_id, str) or len(client_id) > _MAX_CLIENT_ID_CHARS:
+        return False, "invalid client_id"
     if not redirect_uri:
         return False, "missing redirect_uri"
+    if not _valid_redirect_uri(redirect_uri):
+        return False, "invalid redirect_uri"
     with _oauth_client_state_lock:
         client_info = _oauth_clients.get(client_id)
         if isinstance(client_info, dict):
@@ -976,6 +986,27 @@ def _oauth_authorize_html(
     caller: str = "",
     error: str = "",
 ) -> str:
+    # This renderer also serves validation errors.  Bound every reflected
+    # request field here so a future caller cannot turn an oversized public GET
+    # into a much larger HTML response even if route-level validation regresses.
+    client_id = client_id if isinstance(client_id, str) and len(client_id) <= _MAX_CLIENT_ID_CHARS else ""
+    redirect_uri = (
+        redirect_uri
+        if isinstance(redirect_uri, str) and len(redirect_uri) <= _MAX_REDIRECT_URI_CHARS
+        else ""
+    )
+    state = state if isinstance(state, str) and len(state) <= _MAX_OAUTH_STATE_CHARS else ""
+    code_challenge = (
+        code_challenge
+        if isinstance(code_challenge, str) and len(code_challenge) <= 128
+        else ""
+    )
+    resource = (
+        resource
+        if isinstance(resource, str) and len(resource) <= _MAX_OAUTH_RESOURCE_CHARS
+        else ""
+    )
+    scope = scope if isinstance(scope, str) and len(scope) <= _MAX_OAUTH_SCOPE_CHARS else ""
     e = _html_escape.escape
     try:
         from utils import get_ai_name  # type: ignore
@@ -1261,6 +1292,8 @@ def register(mcp) -> None:
                 ok, err = False, "unsupported response_type"
             if ok and not _valid_scope(p.get("scope", _MCP_SCOPE)):
                 ok, err = False, "unsupported scope"
+            if ok and len(p.get("state", "")) > _MAX_OAUTH_STATE_CHARS:
+                ok, err = False, "state is too long"
             if ok and not _valid_pkce_value(p.get("code_challenge")):
                 ok, err = False, "invalid PKCE code_challenge"
             if ok and p.get("code_challenge_method", "S256") != "S256":
@@ -1304,6 +1337,8 @@ def register(mcp) -> None:
             ok, err = False, "resource 与当前 MCP 地址不匹配"
         if ok and not _valid_scope(scope):
             ok, err = False, "unsupported scope"
+        if ok and len(state) > _MAX_OAUTH_STATE_CHARS:
+            ok, err = False, "state is too long"
         if ok and not _valid_pkce_value(code_challenge):
             ok, err = False, "invalid PKCE code_challenge"
         if ok and raw_caller and not caller:
