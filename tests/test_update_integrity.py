@@ -165,6 +165,62 @@ def test_manifest_rejects_non_object_items():
     assert plan["files"] == {}
 
 
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        ({"path": "src/server.py", "size": 2}, "sha256"),
+        ({"path": "src/server.py", "sha256": "a" * 64}, "大小"),
+        ({"path": "src/server.py", "sha256": "not-a-digest", "size": 2}, "sha256"),
+        ({"path": "src/server.py", "sha256": "a" * 64, "size": -1}, "大小"),
+        ({"path": "src/server.py", "sha256": "a" * 64, "size": True}, "大小"),
+    ],
+)
+def test_manifest_requires_strict_size_and_sha256(entry, expected):
+    zf = _zip({
+        _TOP + "src/server.py": b"ok",
+        _TOP + "update_manifest.json": json.dumps({"files": [entry]}).encode(),
+    })
+
+    plan = meta._plan_update_files(zf, _TOP)
+
+    assert expected in plan["abort"]
+    assert plan["files"] == {}
+    assert plan["verified"] is False
+
+
+def test_manifest_rejects_case_insensitive_duplicate_entries():
+    body = b"ok"
+    digest = hashlib.sha256(body).hexdigest()
+    zf = _zip({
+        _TOP + "src/server.py": body,
+        _TOP + "update_manifest.json": json.dumps({
+            "files": [
+                {"path": "src/server.py", "sha256": digest, "size": len(body)},
+                {"path": "SRC/SERVER.PY", "sha256": digest, "size": len(body)},
+            ],
+        }).encode(),
+    })
+
+    plan = meta._plan_update_files(zf, _TOP)
+
+    assert "重复路径" in plan["abort"]
+    assert plan["files"] == {}
+
+
+def test_update_archive_rejects_case_insensitive_duplicate_members():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr(_TOP + "src/server.py", b"first")
+        zf.writestr(_TOP + "src/Server.py", b"second")
+    buffer.seek(0)
+
+    with zipfile.ZipFile(buffer) as zf:
+        plan = meta._plan_update_files(zf, _TOP)
+
+    assert "重复路径" in plan["abort"]
+    assert plan["files"] == {}
+
+
 def test_bounded_zip_member_rejects_duplicate_root_file():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:

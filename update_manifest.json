@@ -967,8 +967,8 @@
     },
     {
       "path": "src/web/meta.py",
-      "sha256": "be7942f43e207e90e990acdae0bcced63aa777400b36ae1ed31ab8342f217924",
-      "size": 67826
+      "sha256": "8379f81635a7ead5faac388c369abeeb0e10568784b4fe7161738c9a85d34974",
+      "size": 69277
     },
     {
       "path": "src/web/oauth.py",

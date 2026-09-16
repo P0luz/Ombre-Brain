@@ -370,6 +370,7 @@ def _plan_update_files(zf, top: str) -> dict:
         }
 
     candidates: dict[str, bytes] = {}
+    candidate_casefolds: set[str] = set()
     skipped_unsafe = 0
     total_uncompressed = 0
     for info in infos:
@@ -385,7 +386,8 @@ def _plan_update_files(zf, top: str) -> dict:
         if _is_unsafe_path(rel) or _is_protected_path(rel):
             skipped_unsafe += 1
             continue
-        if rel in candidates:
+        rel_casefold = rel.casefold()
+        if rel in candidates or rel_casefold in candidate_casefolds:
             return {
                 "files": {}, "skipped_unsafe": skipped_unsafe,
                 "skipped_unlisted": 0, "verified": False,
@@ -426,6 +428,7 @@ def _plan_update_files(zf, top: str) -> dict:
                 "abort": f"更新文件读取长度不一致：{rel}",
             }
         candidates[rel] = data
+        candidate_casefolds.add(rel_casefold)
 
     # 2) 若含完整性清单，逐文件核对 sha256/size；篡改即整体中止
     try:
@@ -453,6 +456,7 @@ def _plan_update_files(zf, top: str) -> dict:
                 "abort": f"update_manifest.json 解析失败：{e}"}
 
     verified: dict[str, bytes] = {}
+    listed_paths: set[str] = set()
     if not isinstance(listed, list) or len(listed) > _MAX_UPDATE_MEMBERS:
         return {"files": {}, "skipped_unsafe": skipped_unsafe,
                 "skipped_unlisted": 0, "verified": False,
@@ -462,21 +466,46 @@ def _plan_update_files(zf, top: str) -> dict:
             return {"files": {}, "skipped_unsafe": skipped_unsafe,
                     "skipped_unlisted": 0, "verified": False,
                     "abort": "update_manifest.json 包含无效文件项"}
-        path = str(fm.get("path", "")).replace("\\", "/")
+        raw_path = fm.get("path", "")
+        if not isinstance(raw_path, str):
+            return {"files": {}, "skipped_unsafe": skipped_unsafe,
+                    "skipped_unlisted": 0, "verified": False,
+                    "abort": "update_manifest.json 包含无效路径"}
+        path = raw_path.replace("\\", "/")
+        path_key = path.casefold()
+        if path_key in listed_paths:
+            return {"files": {}, "skipped_unsafe": skipped_unsafe,
+                    "skipped_unlisted": 0, "verified": False,
+                    "abort": f"完整性清单包含重复路径：{path}"}
+        listed_paths.add(path_key)
         if path not in candidates:
             continue  # 清单列了但不在 src/frontend 候选里（如根文件）：本流程不覆盖，跳过
         data = candidates[path]
+        raw_size = fm.get("size")
+        if isinstance(raw_size, bool) or not isinstance(raw_size, int) or raw_size < 0:
+            return {"files": {}, "skipped_unsafe": skipped_unsafe,
+                    "skipped_unlisted": 0, "verified": False,
+                    "abort": f"完整性清单大小无效：{path}"}
         try:
-            want_size = int(fm.get("size", -1))
+            want_size = int(raw_size)
         except (TypeError, ValueError, OverflowError):
             return {"files": {}, "skipped_unsafe": skipped_unsafe,
                     "skipped_unlisted": 0, "verified": False,
                     "abort": f"完整性清单大小无效：{path}"}
-        want_sha = str(fm.get("sha256", "")).lower()
-        if want_size >= 0 and len(data) != want_size:
+        raw_sha = fm.get("sha256")
+        if (
+            not isinstance(raw_sha, str)
+            or len(raw_sha) != 64
+            or any(char not in "0123456789abcdefABCDEF" for char in raw_sha)
+        ):
+            return {"files": {}, "skipped_unsafe": skipped_unsafe,
+                    "skipped_unlisted": 0, "verified": False,
+                    "abort": f"完整性清单 sha256 无效：{path}"}
+        want_sha = raw_sha.lower()
+        if len(data) != want_size:
             return {"files": {}, "skipped_unsafe": skipped_unsafe, "skipped_unlisted": 0,
                     "verified": True, "abort": f"完整性校验失败（大小不符）：{path}"}
-        if want_sha and _hashlib.sha256(data).hexdigest() != want_sha:
+        if _hashlib.sha256(data).hexdigest() != want_sha:
             return {"files": {}, "skipped_unsafe": skipped_unsafe, "skipped_unlisted": 0,
                     "verified": True, "abort": f"完整性校验失败（sha256 不符）：{path}"}
         verified[path] = data
