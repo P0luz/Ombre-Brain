@@ -119,3 +119,101 @@ def test_备份里的越界路径不会被写出去(tmp_path):
     结果 = _rollback_from_backup(str(tmp_path), str(坏包))
     assert 结果["ok"] is False
     assert not (tmp_path.parent.parent / "escaped.md").exists()
+
+
+@pytest.mark.parametrize("name", ["safe.md:stream", "CON.txt", "trail. "])
+def test_备份拒绝_windows_文件系统别名(tmp_path, name):
+    坏包 = tmp_path / "alias.zip"
+    with zipfile.ZipFile(坏包, "w") as z:
+        z.writestr(name, "x")
+
+    结果 = _rollback_from_backup(str(tmp_path), str(坏包))
+
+    assert 结果["ok"] is False
+    assert 结果["restored"] == 0
+
+
+def test_备份拒绝仅大小写不同的重复路径且不部分落盘(tmp_path):
+    坏包 = tmp_path / "collision.zip"
+    with zipfile.ZipFile(坏包, "w") as z:
+        z.writestr("safe/a.md", "first")
+        z.writestr("safe/A.md", "second")
+
+    结果 = _rollback_from_backup(str(tmp_path), str(坏包))
+
+    assert 结果["ok"] is False
+    assert 结果["restored"] == 0
+    assert not (tmp_path / "safe" / "a.md").exists()
+    assert not (tmp_path / "safe" / "A.md").exists()
+
+
+def test_备份拒绝文件与目录前缀冲突(tmp_path):
+    坏包 = tmp_path / "prefix-collision.zip"
+    with zipfile.ZipFile(坏包, "w") as z:
+        z.writestr("safe", "file")
+        z.writestr("safe/child.md", "child")
+
+    结果 = _rollback_from_backup(str(tmp_path), str(坏包))
+
+    assert 结果["ok"] is False
+    assert 结果["restored"] == 0
+    assert not (tmp_path / "safe").exists()
+
+
+def test_备份不会跟随目标符号链接写出_vault(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+    outside.write_bytes(b"outside-original")
+    target = tmp_path / "linked.md"
+    try:
+        target.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前宿主不允许创建文件符号链接")
+    坏包 = tmp_path / "symlink.zip"
+    with zipfile.ZipFile(坏包, "w") as z:
+        z.writestr("linked.md", "backup-content")
+
+    结果 = _rollback_from_backup(str(tmp_path), str(坏包))
+
+    assert 结果["ok"] is False
+    assert 结果["restored"] == 0
+    assert outside.read_bytes() == b"outside-original"
+
+
+def test_备份不会跟随中间目录符号链接(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-outside-dir"
+    outside.mkdir()
+    linked = tmp_path / "linked-dir"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前宿主不允许创建目录符号链接")
+    坏包 = tmp_path / "dir-symlink.zip"
+    with zipfile.ZipFile(坏包, "w") as z:
+        z.writestr("linked-dir/escaped.md", "backup-content")
+
+    结果 = _rollback_from_backup(str(tmp_path), str(坏包))
+
+    assert 结果["ok"] is False
+    assert 结果["restored"] == 0
+    assert not (outside / "escaped.md").exists()
+
+
+def test_后缀不安全时前缀安全成员也不先落盘(tmp_path):
+    outside = tmp_path.parent / f"{tmp_path.name}-late-outside.md"
+    outside.write_bytes(b"outside-original")
+    target = tmp_path / "late-linked.md"
+    try:
+        target.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前宿主不允许创建文件符号链接")
+    坏包 = tmp_path / "late-symlink.zip"
+    with zipfile.ZipFile(坏包, "w") as z:
+        z.writestr("safe.md", "must-not-land")
+        z.writestr("late-linked.md", "backup-content")
+
+    结果 = _rollback_from_backup(str(tmp_path), str(坏包))
+
+    assert 结果["ok"] is False
+    assert 结果["restored"] == 0
+    assert not (tmp_path / "safe.md").exists()
+    assert outside.read_bytes() == b"outside-original"

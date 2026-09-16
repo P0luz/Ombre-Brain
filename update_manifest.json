@@ -947,8 +947,8 @@
     },
     {
       "path": "src/web/github.py",
-      "sha256": "b388ab2a7abafaa3d6ea7a8729fd7838c99714480994de89889e7de3675e8745",
-      "size": 22750
+      "sha256": "db9dcf3fc76ffc0cf9039c41aa7b39d69b87db5a1c0bff952e1f2c0c66337e30",
+      "size": 28455
     },
     {
       "path": "src/web/hooks.py",
