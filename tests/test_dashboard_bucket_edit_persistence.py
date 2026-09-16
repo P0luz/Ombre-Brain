@@ -123,7 +123,7 @@ async def test_dashboard_edit_persists_surface_reason_and_plan_weight(
     monkeypatch,
     bucket_mgr,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         "plan body",
         bucket_type="plan",
         name="Plan memory",
@@ -300,7 +300,7 @@ async def test_dashboard_edit_normalizes_and_persists_safe_type_migration(
     expected_type,
     expected_top_dir,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         "type migration body",
         bucket_type="dynamic",
         name="Migrating memory",
@@ -356,7 +356,7 @@ async def test_dashboard_edit_atomically_unpins_demotes_and_persists_fields(
     monkeypatch,
     bucket_mgr,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         "atomic unpin body",
         bucket_type="permanent",
         pinned=True,
@@ -438,8 +438,8 @@ async def test_concurrent_dashboard_pins_cannot_exceed_configured_cap(
     monkeypatch,
     bucket_mgr,
 ):
-    first_id = await bucket_mgr.create("first pin candidate", name="First pin")
-    second_id = await bucket_mgr.create("second pin candidate", name="Second pin")
+    first_id = await bucket_mgr.create_internal("first pin candidate", name="First pin")
+    second_id = await bucket_mgr.create_internal("second pin candidate", name="Second pin")
     handler = _edit_handler(monkeypatch, bucket_mgr)
     runtime_config = dict(bucket_mgr.config)
     runtime_config["limits"] = {

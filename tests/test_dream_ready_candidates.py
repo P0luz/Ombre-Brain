@@ -73,7 +73,10 @@ def env(monkeypatch):
     monkeypatch.setattr(rt, "logger", logging.getLogger("test"), raising=False)
     monkeypatch.setattr(rt, "mark_op", None, raising=False)
     monkeypatch.setattr(rt, "fire_webhook", None, raising=False)
-    return manager
+    from tools import _identity
+
+    with _identity.caller_context("cheng"):
+        yield manager
 
 
 def _flood_plans(manager, count=8, size=400):

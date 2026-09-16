@@ -53,7 +53,9 @@ class _FakeBucketManager:
         self._seq += 1
         bucket_id = f"formal{self._seq}"
         now = datetime.now().isoformat()
-        tags = ["__i__"] + ([f"aspect:{aspect}"] if aspect else [])
+        tags = ["__i__", "owner:cheng", "scope:self", "voice:self"] + (
+            [f"aspect:{aspect}"] if aspect else []
+        )
         self.buckets[bucket_id] = {
             "id": bucket_id,
             "content": content,
@@ -92,7 +94,10 @@ def env(monkeypatch):
     )
     monkeypatch.setattr(rt, "mark_op", None, raising=False)
     monkeypatch.setattr(rt, "fire_webhook", None, raising=False)
-    return manager
+    from tools import _identity
+
+    with _identity.caller_context("cheng"):
+        yield manager
 
 
 @pytest.mark.asyncio

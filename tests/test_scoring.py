@@ -30,7 +30,7 @@ async def populated_env(test_config, bucket_mgr, decay_eng):
 
     ids = []
     for item in DATASET:
-        bid = await bucket_mgr.create(
+        bid = await bucket_mgr.create_internal(
             content=item["content"],
             tags=item.get("tags", []),
             importance=item.get("importance", 5),

@@ -12,33 +12,41 @@ web/buckets.py — 记忆桶管理 + 设置 + 锚点 + 自我认知读取
 """
 
 import math
+import re
 import threading
 import unicodedata
-from contextlib import AsyncExitStack
+from contextlib import AsyncExitStack, asynccontextmanager
 
 from starlette.requests import Request
 from starlette.responses import Response
 
 from ombrebrain.domain.memory_messages import resolved_hint
 from tools.i import disputing_candidates, superseded_by
+from bucket_manager import _atomic_write_text
+from snapshot_barrier import markdown_writer_turn
 from . import _shared as sh
 
 logger = sh.logger
 
 try:
     from utils import (  # type: ignore
-        atomic_update_config_yaml,
+        config_file_path as _config_file_path,
         parse_bool,
         parse_iso_datetime,
         strip_wikilinks,
     )
 except ImportError:  # pragma: no cover
     from ..utils import (  # type: ignore
-        atomic_update_config_yaml,
+        config_file_path as _config_file_path,
         parse_bool,
         parse_iso_datetime,
         strip_wikilinks,
     )
+
+try:
+    from config_transaction import run_config_transaction  # type: ignore
+except ImportError:  # pragma: no cover
+    from ..config_transaction import run_config_transaction  # type: ignore
 
 try:
     from tools._common import (  # type: ignore
@@ -71,6 +79,17 @@ _LOCKED_LETTER_NAME = "一封上锁的信"
 _LOCKED_LETTER_NOTICE = "这封信尚未向你开放。"
 
 
+@asynccontextmanager
+async def _human_name_change_turn():
+    """Use the manager reservation when present, with a test-safe no-op fallback."""
+    turn = getattr(sh.bucket_mgr, "human_name_change_turn", None)
+    if callable(turn):
+        async with turn():
+            yield
+        return
+    yield
+
+
 def _datetime_epoch_ms(value) -> int | None:
     """Return one server-normalized instant for Dashboard sorting/display."""
     try:
@@ -86,19 +105,71 @@ async def rename_human_in_buckets(old: str, new: str) -> dict:
     用途：她/他改了称呼后，改名前就存在的老桶仍写着旧词（默认「用户」），breath 里
     新桶显示新名、老桶还是旧名，看起来"批量替换没生效"。这里一次性补齐。
 
-    每个桶都走 BucketManager 的正常事务边界，但不刷新 ``last_active``；
-    content 改变时派生索引也会按普通更新流程重建。
+    直接改 frontmatter 而不刷新 ``last_active``；content 改变后在 writer
+    gate 外 best-effort 重建派生索引。
 
     返回 {buckets_changed, replacements}。old 为空 / old==new 时直接 no-op。"""
-    result = await sh.bucket_mgr.replace_text_fields(old, new)
-    logger.info(
-        "rename_human_in_buckets: %r->%r changed=%s replacements=%s",
-        old,
-        new,
-        result["buckets_changed"],
-        result["replacements"],
-    )
-    return result
+    import frontmatter as fm
+
+    if not old or not new or old == new:
+        return {"buckets_changed": 0, "replacements": 0}
+    pattern = re.compile(re.escape(old))
+    manager = sh.bucket_mgr
+    directories = list(manager._active_dirs) + [manager.archive_dir]
+    changed = total = 0
+    embedding_jobs: list[tuple[str, str]] = []
+    async with markdown_writer_turn(manager.base_dir):
+        for _root, _filename, file_path in manager._iter_md_files(directories):
+            try:
+                post = fm.load(file_path)
+            except Exception:
+                continue
+            candidate = {
+                "id": str(post.get("id") or ""),
+                "content": post.content or "",
+                "metadata": dict(post.metadata),
+            }
+            if is_letter_bucket(candidate):
+                continue
+            replacements = 0
+            content_changed = False
+            updated_content, count = pattern.subn(new, post.content or "")
+            if count:
+                post.content = updated_content
+                replacements += count
+                content_changed = True
+            for field in ("name", "why_remembered", "user_name"):
+                value = post.get(field)
+                if isinstance(value, str) and value:
+                    updated, count = pattern.subn(new, value)
+                    if count:
+                        post[field] = updated
+                        replacements += count
+            if not replacements:
+                continue
+            try:
+                _atomic_write_text(file_path, fm.dumps(post))
+            except OSError as exc:
+                logger.warning("rename_human write failed %s: %s", file_path, exc)
+                continue
+            changed += 1
+            total += replacements
+            bucket_id = str(post.get("id") or "")
+            if content_changed and bucket_id:
+                embedding_jobs.append((bucket_id, post.content or ""))
+
+    engine = sh.embedding_engine
+    if engine and getattr(engine, "enabled", False):
+        for bucket_id, content in embedding_jobs:
+            try:
+                await engine.generate_and_store(bucket_id, content)
+            except Exception:
+                pass
+    try:
+        manager._invalidate_bm25()
+    except Exception:
+        pass
+    return {"buckets_changed": changed, "replacements": total}
 
 
 def register(mcp) -> None:
@@ -772,11 +843,11 @@ def register(mcp) -> None:
                 })
 
             try:
-                atomic_update_config_yaml(_mutate_sampling)
+                run_config_transaction(_config_file_path(), _mutate_sampling)
             except Exception as e:
                 # 磁盘未落地就如实报错，不能让用户看到“已保存”。
                 return JSONResponse(
-                    {"error": f"采样设置写入磁盘失败，未保存：{e}"},
+                    {"ok": False, "error": f"采样设置写入磁盘失败，未保存：{e}"},
                     status_code=500,
                 )
 
@@ -827,17 +898,18 @@ def register(mcp) -> None:
         # Config read/write, live runtime update and the full-vault replacement
         # are one outer transaction.  Without it, concurrent A->B and B->C
         # requests can interleave their per-bucket writes and leave mixed names.
-        async with sh.bucket_mgr.human_name_change_turn():
+        async with _human_name_change_turn():
             # 旧称呼（默认「用户」，与 dehydrator / import 的兜底同源）—— 用于把老桶里的旧词换成新名。
             old_human = (sh.config.get("human") or "用户").strip() or "用户"
             try:
-                atomic_update_config_yaml(
+                run_config_transaction(
+                    _config_file_path(),
                     lambda save_config: save_config.__setitem__("human", human)
                 )
             except Exception as e:
                 # Do not mutate live state unless persistence succeeded.
                 return JSONResponse(
-                    {"error": f"称呼写入磁盘失败，未保存：{e}"},
+                    {"ok": False, "error": f"称呼写入磁盘失败，未保存：{e}"},
                     status_code=500,
                 )
 
@@ -877,7 +949,7 @@ def register(mcp) -> None:
             return JSONResponse({"error": "from must be at most 100 characters"}, status_code=400)
         if not from_term:
             return JSONResponse({"error": "缺少要替换的旧称呼"}, status_code=400)
-        async with sh.bucket_mgr.human_name_change_turn():
+        async with _human_name_change_turn():
             # Re-read inside the same reservation used by name-change requests.
             cur = (sh.config.get("human") or "人类").strip() or "人类"
             if from_term == cur:

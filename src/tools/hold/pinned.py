@@ -24,8 +24,13 @@ permanent 目录，不衰减、不会被合并掉。
 
 from utils import normalize_memory_title
 
-from .. import _runtime as rt
-from .._common import check_pinned_quota, _quota_turn
+from .. import _identity, _runtime as rt
+from .._common import (
+    _create_bucket_deferred,
+    _m04_merge_commit_turn,
+    _quota_turn,
+    check_pinned_quota,
+)
 
 
 async def store_pinned(
@@ -59,39 +64,48 @@ async def store_pinned(
     final_valence = valence if 0 <= valence <= 1 else (float(_v) if _v is not None else 0.5)
     final_arousal = arousal if 0 <= arousal <= 1 else (float(_a) if _a is not None else 0.3)
     _raw_tags = analysis.get("tags") or []
-    model_tags = _raw_tags if isinstance(_raw_tags, list) else []
-    all_tags = list(dict.fromkeys(extra_tags if extra_tags else model_tags))
+    model_tags = _identity.strip_owner_tags(_raw_tags)
+    explicit_non_owner = [
+        tag for tag in extra_tags if not str(tag).lower().startswith("owner:")
+    ]
+    owner_tags = [
+        tag for tag in extra_tags if str(tag).lower().startswith("owner:")
+    ]
+    selected_tags = explicit_non_owner if explicit_non_owner else model_tags
+    all_tags = _identity.ensure_write_owner([*selected_tags, *owner_tags])
     suggested_name = analysis.get("suggested_name", "")
     final_title = title or normalize_memory_title(suggested_name)
 
     # 配额判定 + 落盘必须在同一把锁里：两个并发 hold(pinned=True) 都可能在
     # 对方提交前读到同一个「未满」快照，检查和创建隔着一次 await 就会互相看不见。
-    async with _quota_turn("pinned"):
-        err = await check_pinned_quota()
-        if err:
-            return err
+    async with _m04_merge_commit_turn():
+        async with _quota_turn("pinned"):
+            err = await check_pinned_quota()
+            if err:
+                return err
 
-        bucket_id = await rt.bucket_mgr.create(
-            content=content,
-            tags=all_tags,
-            importance=10,
-            domain=final_domain,
-            valence=final_valence,
-            arousal=final_arousal,
-            name=suggested_name or None,
-            title=final_title,
-            source_refs=source_refs,
-            quotes=quotes,
-            bucket_type="permanent",
-            pinned=True,
-            why_remembered=why_remembered,
-            source_tool="hold",
-            event_actor="llm",
-            allow_embedding_fallback=True,
-            meaning=meaning,
-            media=media,
-            defer_derived_index=True,
-        )
+            bucket_id = await _create_bucket_deferred(
+                content=content,
+                tags=all_tags,
+                importance=10,
+                domain=final_domain,
+                valence=final_valence,
+                arousal=final_arousal,
+                name=suggested_name or None,
+                title=final_title,
+                source_refs=source_refs,
+                quotes=quotes,
+                bucket_type="permanent",
+                pinned=True,
+                why_remembered=why_remembered,
+                source_tool="hold",
+                event_actor="llm",
+                allow_embedding_fallback=True,
+                meaning=meaning,
+                media=media,
+                defer_derived_index=True,
+                footprint_origin=_identity.origin_for_mcp("hold"),
+            )
     post_index = getattr(rt.bucket_mgr, "_index_after_update", None)
     if callable(post_index):
         await post_index(

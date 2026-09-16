@@ -33,7 +33,6 @@ tools/_common.py — 跨工具共享的辅助逻辑
 
 from typing import Tuple
 import asyncio
-from copy import deepcopy
 from concurrent.futures import Future, InvalidStateError
 from contextlib import AsyncExitStack, asynccontextmanager
 import hashlib
@@ -41,12 +40,19 @@ import math
 import threading
 
 from bucket_manager import _filesystem_turn as _kernel_filesystem_turn
+from snapshot_barrier import markdown_writer_turn
 from utils import normalize_memory_title, now_iso, parse_bool
-from ombrebrain.storage import bucket_paths as _bp
 from ombrebrain.domain.plan_history import append_plan_change_log as append_plan_change_log
 
-from . import _runtime as rt
-from ._relation_link import link_new_bucket
+from . import _identity, _runtime as rt
+
+
+def is_logical_letter(bucket: dict) -> bool:
+    """Use the canonical spoof-resistant Letter classifier at generic seams."""
+    from .plan.core import is_letter_bucket
+
+    return is_letter_bucket(bucket)
+
 
 _EMBED_WARN = (
     "向量暂未完成，该桶当前仅支持关键词匹配；正文已保存。"
@@ -82,6 +88,10 @@ _GROW_ITEM_FIELDS = frozenset({
 # 注意：这不是配额机制。rule.md §2 的稀缺性哲学由 pinned(20)/anchor(24) 两个
 # 结构承担；importance 只是普通评分字段，不再对 >=9 设硬配额/自动降级。
 _HIGH_IMP_EXEMPT_TYPES = frozenset({"feel", "plan", "letter", "archived"})
+_HIGH_IMP_THRESHOLD = 9
+_HIGH_IMP_HARD_CAP = 24
+_HIGH_IMP_SOFT_WARN = 22
+_HIGH_IMP_DEGRADE_TO = 8
 
 # --- pinned 软阈值 ---
 _PINNED_SOFT_GAP = 2                   # “软阈值 = cap - GAP”；cap=20 → soft=18
@@ -90,6 +100,7 @@ _PINNED_SOFT_GAP = 2                   # “软阈值 = cap - GAP”；cap=20 �
 _DUP_DEFAULT_THRESHOLD = 0.95          # 向量相似 >= 该值 → 标为疑似重复
 _DUP_TOPK = 10                         # 检索前 N 个候选以判重复
 _DUP_CHECK_CONCURRENCY = 4             # fire-and-forget 疑似重复检测的并发上限
+_dup_check_semaphore = asyncio.Semaphore(_DUP_CHECK_CONCURRENCY)
 _PLAN_VECTOR_TOPK = 20                 # plan 判定的向量预筛范围
 _PLAN_VECTOR_THRESHOLD = 0.7           # 超过才交给 LLM 判定是否已完成
 _PLAN_LLM_CONFIDENCE_MIN = 0.7         # LLM judgement.confidence 下限
@@ -104,6 +115,8 @@ _LOG_REASON_PREVIEW = 60               # 日志里预览的理由长度
 _CONTENT_LOCK_KEY_HEX = 16             # 64 bit 空间，碰撞概率徽不足道
 _CONTENT_LOCK_WAIT_MIN_SECONDS = 300.0
 _CONTENT_LOCK_STALE_GRACE_SECONDS = 60.0
+_OWNER_SAFE_MERGE_CANDIDATES = 50
+_MERGE_COMMIT_MAX_ATTEMPTS = 3
 
 # Per-content turns use concurrent futures rather than asyncio.Lock. FastMCP may
 # dispatch independent HTTP sessions from different event loops/threads;
@@ -208,6 +221,56 @@ async def _quota_turn(name: str):
         yield
 
 
+@asynccontextmanager
+async def _bucket_turn(bucket_id: str):
+    """Use the production bucket lease when the manager exposes it."""
+    factory = getattr(rt.bucket_mgr, "_bucket_turn", None)
+    if callable(factory):
+        async with factory(bucket_id):
+            yield
+    else:
+        yield
+
+
+async def _commit_bucket_update(bucket_id: str, updates: dict) -> bool:
+    locked = getattr(rt.bucket_mgr, "_update_locked", None)
+    if callable(locked):
+        return bool(await locked(bucket_id, **updates))
+    return bool(await rt.bucket_mgr.update(bucket_id, **updates))
+
+
+@asynccontextmanager
+async def _m04_merge_commit_turn():
+    async with markdown_writer_turn(rt.bucket_mgr.base_dir):
+        yield
+
+
+async def _create_bucket_deferred(**kwargs) -> str:
+    try:
+        return await rt.bucket_mgr.create(
+            **kwargs,
+            defer_embedding=True,
+            _m04_gate_held=True,
+        )
+    except TypeError as exc:
+        if "defer_embedding" not in str(exc):
+            raise
+        return await rt.bucket_mgr.create(**kwargs)
+
+
+async def _sync_after_commit(bucket_id: str) -> bool:
+    sync = getattr(rt.bucket_mgr, "sync_embedding_after_commit", None)
+    if callable(sync):
+        return bool(await sync(bucket_id))
+    bucket = await rt.bucket_mgr.get(bucket_id)
+    if not bucket:
+        return False
+    engine = getattr(rt, "embedding_engine", None)
+    if engine and getattr(engine, "enabled", False):
+        await engine.generate_and_store(bucket_id, str(bucket.get("content") or ""))
+    return True
+
+
 def _push_warning_safe(code: str, msg: str) -> None:
     """安全调用 errors.push_warning；import 失败时静默降级。
 
@@ -240,6 +303,16 @@ def limits_cfg() -> dict:
     """读 config.limits 段；缺省为 50KB 单桶 / 20 pinned / 20 protected。"""
     config = rt.config if isinstance(rt.config, dict) else {}
     return config.get("limits", {}) or {}
+
+
+async def _fresh_active_buckets() -> list[dict]:
+    """Read disk truth; only legacy test doubles may omit ``fresh``."""
+    try:
+        return await rt.bucket_mgr.list_all(include_archive=False, fresh=True)
+    except TypeError as exc:
+        if "fresh" not in str(exc):
+            raise
+        return await rt.bucket_mgr.list_all(include_archive=False)
 
 
 def _configured_limit(name: str, default: int) -> int:
@@ -446,7 +519,7 @@ async def count_pinned() -> int:
     不等同于 pinned=True，也不占用 pinned 配额。
     """
     try:
-        all_b = await rt.bucket_mgr.list_all(include_archive=False)
+        all_b = await _fresh_active_buckets()
         seen_ids: set[str] = set()
         count = 0
         for bucket in all_b:
@@ -479,6 +552,7 @@ async def count_protected() -> int:
     """
     try:
         all_b = await rt.bucket_mgr.list_all(include_archive=False)
+        all_b = _identity.filter_default(all_b)
         seen_ids: set[str] = set()
         count = 0
         for bucket in all_b:
@@ -578,6 +652,7 @@ async def restore_archived_letters(
     bucket_mgr,
     *,
     ids: list[str] | None = None,
+    revisions: dict[str, str] | None = None,
     apply: bool = False,
 ) -> dict:
     """审计或显式恢复历史误归档 Letter，不回传正文或标题。
@@ -603,7 +678,10 @@ async def restore_archived_letters(
         failed_count = 0
         for bucket_id in requested:
             try:
-                outcome = await bucket_mgr.recover_archived_letter(bucket_id)
+                outcome = await bucket_mgr.recover_archived_letter(
+                    bucket_id,
+                    expected_revision=(revisions or {}).get(bucket_id),
+                )
                 reason = str((outcome or {}).get("reason") or "failed")
             except Exception as exc:
                 reason = "internal_error"
@@ -629,65 +707,9 @@ async def restore_archived_letters(
             "results": results,
         }
 
-    # GET/dry-run 只使用 list_all 的当前读取结果。这里的结论仅供展示；POST
-    # 不信任此快照，存储层会在桶租约内重新完整枚举与校验。
-    buckets = await bucket_mgr.list_all(include_archive=True)
-    grouped: dict[str, list[dict]] = {}
-    for bucket in buckets:
-        bucket_id = str((bucket or {}).get("id") or "").strip()
-        if bucket_id:
-            grouped.setdefault(bucket_id, []).append(bucket)
+    from historical_letter_restore import audit_archived_letters
 
-    candidate_ids: list[str] = []
-    exclusions: list[dict[str, str]] = []
-    for bucket_id, physical_rows in grouped.items():
-        relevant_rows: list[dict] = []
-        has_archived_signal = False
-        for bucket in physical_rows:
-            metadata = bucket.get("metadata") or {}
-            if not isinstance(metadata, dict):
-                continue
-            strong = _bp.has_strong_letter_marker(metadata)
-            ambiguous = _bp.has_ambiguous_letter_marker(metadata)
-            if not (strong or ambiguous):
-                continue
-            relevant_rows.append(bucket)
-            path = str(bucket.get("path") or "")
-            if (
-                str(metadata.get("type") or "").strip().casefold() == "archived"
-                or _bp.path_is_within(path, bucket_mgr.archive_dir)
-            ):
-                has_archived_signal = True
-
-        # 正常活跃 Letter 不属于这次历史兼容审计。
-        if not relevant_rows or not has_archived_signal:
-            continue
-        if len(physical_rows) != 1:
-            exclusions.append({"id": bucket_id, "reason": "duplicate_source"})
-            continue
-
-        bucket = relevant_rows[0]
-        metadata = bucket.get("metadata") or {}
-        path = str(bucket.get("path") or "")
-        if not _bp.path_is_within(path, bucket_mgr.archive_dir):
-            reason = "not_archived"
-        elif str(metadata.get("type") or "").strip().casefold() != "archived":
-            reason = "invalid_archived_type"
-        else:
-            reason = bucket_mgr.archived_letter_rejection(metadata)
-        if reason:
-            exclusions.append({"id": bucket_id, "reason": reason})
-        else:
-            candidate_ids.append(bucket_id)
-
-    candidate_ids.sort()
-    exclusions.sort(key=lambda item: item["id"])
-    return {
-        "candidate_count": len(candidate_ids),
-        "candidate_ids": candidate_ids,
-        "excluded_count": len(exclusions),
-        "exclusions": exclusions,
-    }
+    return await audit_archived_letters(bucket_mgr)
 
 
 async def check_pinned_quota() -> str | None:
@@ -799,6 +821,109 @@ async def enforce_pinned_quota(pinned: bool) -> bool:
     return True
 
 
+async def count_high_importance() -> int:
+    """Count visible ordinary active buckets whose importance is at least 9."""
+    try:
+        buckets = await _fresh_active_buckets()
+        return sum(
+            1
+            for bucket in buckets
+            if is_importance_audit_candidate(
+                bucket.get("metadata", {}), _HIGH_IMP_THRESHOLD
+            )
+            and not parse_bool(bucket.get("metadata", {}).get("pinned"), default=False)
+            and not parse_bool(bucket.get("metadata", {}).get("protected"), default=False)
+        )
+    except Exception as exc:
+        warning = getattr(getattr(rt, "logger", None), "warning", None)
+        if callable(warning):
+            warning(f"count_high_importance failed: {exc}")
+        return 0
+
+
+async def enforce_high_importance_quota(importance: int) -> int:
+    importance = int(importance)
+    if importance < _HIGH_IMP_THRESHOLD:
+        return importance
+    current = await count_high_importance()
+    if current >= _HIGH_IMP_HARD_CAP:
+        _push_warning_safe(
+            "OB-I001",
+            f"当前已有 {current} 条 importance≥{_HIGH_IMP_THRESHOLD}（硬上限 {_HIGH_IMP_HARD_CAP}），新桶 importance 自动降级为 {_HIGH_IMP_DEGRADE_TO}",
+        )
+        return _HIGH_IMP_DEGRADE_TO
+    if current >= _HIGH_IMP_SOFT_WARN:
+        _push_warning_safe(
+            "OB-W003",
+            f"当前已有 {current} 条 importance≥{_HIGH_IMP_THRESHOLD}（硬上限 {_HIGH_IMP_HARD_CAP}），接近上限",
+        )
+    return importance
+
+
+async def quota_safe_update(
+    bucket_id: str,
+    updates: dict,
+) -> tuple[bool, dict, str]:
+    """Commit protected/pinned edits under production writer and bucket locks."""
+    applied = dict(updates)
+    content_changed = "content" in applied
+    if content_changed:
+        require_embedding = getattr(rt.bucket_mgr, "_require_embedding_available", None)
+        if callable(require_embedding):
+            require_embedding()
+
+    async with markdown_writer_turn(rt.bucket_mgr.base_dir):
+        async with AsyncExitStack() as stack:
+            if "pinned" in applied:
+                await stack.enter_async_context(_quota_turn("pinned"))
+            if "protected" in applied:
+                await stack.enter_async_context(_quota_turn("protected"))
+            await stack.enter_async_context(_bucket_turn(bucket_id))
+            bucket = await rt.bucket_mgr.get(bucket_id)
+            if not bucket:
+                return False, applied, f"未找到记忆桶: {bucket_id}"
+            meta = bucket.get("metadata", {}) or {}
+            current_pinned = bool(meta.get("pinned"))
+            current_protected = bool(meta.get("protected"))
+            current_importance = int(meta.get("importance") or 5)
+            final_pinned = bool(applied.get("pinned", current_pinned))
+            final_protected = bool(applied.get("protected", current_protected))
+
+            if "importance" in applied and (current_pinned or current_protected):
+                if int(applied["importance"]) != current_importance:
+                    return False, applied, "pinned/protected 记忆桶的 importance 锁定为 10"
+                applied.pop("importance")
+            if final_pinned and not current_pinned:
+                quota_error = await check_pinned_quota()
+                if quota_error:
+                    return False, applied, quota_error
+                applied["importance"] = 10
+            if final_protected and not current_protected:
+                quota_error = await check_protected_quota()
+                if quota_error:
+                    return False, applied, quota_error
+                applied["importance"] = 10
+
+            committed = await _commit_bucket_update(bucket_id, applied)
+            if not committed:
+                return False, applied, f"修改失败: {bucket_id}"
+
+    warning = ""
+    if content_changed:
+        try:
+            await _sync_after_commit(bucket_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            rt.logger.warning(
+                "post-commit update embedding failed for %s: %s",
+                bucket_id,
+                type(exc).__name__,
+            )
+            warning = _EMBED_WARN
+    return True, applied, warning
+
+
 async def merge_or_create(
     content: str,
     tags: list,
@@ -818,12 +943,16 @@ async def merge_or_create(
     meaning: str = "",
     media: list | str | None = None,
     test_data: bool = False,
+    exact_only: bool = False,
+    footprint_origin: dict | None = None,
+    owner: str | None = None,
 ) -> Tuple[str, bool, str]:
     """
     检查是否有相似桶可合并，有则合并，无则新建。返回 (桶ID或名称, 是否合并, embed警告信息)。
 
     raw_merge=True (hold)：原文追加，不调 LLM 压缩。
     raw_merge=False (grow)：LLM 压缩老+新内容。
+    exact_only=True：只折叠同 owner、同正文的精确重复，不做模糊合并。
 
     iter 2.0 来源追踪：
     - source_tool: "hold" | "grow"，作为新建桶的 source_tool 写入；
@@ -831,35 +960,65 @@ async def merge_or_create(
     - grow_batch_id: 仅 grow 路径会传，新建时写入；合并路径不覆盖原桶的 batch_id
       （原桶可能来自上一次 grow 或 hold，硬覆盖会丢失最初批次信息）。
 
-    Miss：meaning/media 是我自己的体验锚定，不是摘要。新建时直接写入；
-    合并到老桶时两条 meaning 都保留（拼接），media 追加而不是覆盖。
-
-    F-01 / F-08 fix：整个 search→create 路径在 per-content-hash Lock 下串行执行。
-    同内容并发调用时后到的协程会阻塞，等前者写完后直接走合并分支，不产生重复桶。
+    M-04 precondition: selection and provider preparation hold no content,
+    quota, bucket, or Markdown-snapshot turn.  The final durable commit phase
+    revalidates fresh disk state under its existing M-01 lock order.
     """
-    async with _content_turn(content):
-        result = await _merge_or_create_inner(
-            content=content, tags=tags, importance=importance, domain=domain,
-            valence=valence, arousal=arousal, name=name, title=title,
-            source_refs=source_refs, quotes=quotes, raw_merge=raw_merge,
-            why_remembered=why_remembered,
-            merge_why_remembered=merge_why_remembered,
-            source_tool=source_tool,
-            grow_batch_id=grow_batch_id, meaning=meaning, media=media,
-            test_data=test_data,
-            _defer_derived_index=True,
-        )
+    tags = _identity.ensure_write_owner(tags, caller=owner)
+    origin = (
+        footprint_origin
+        if footprint_origin is not None
+        else _identity.origin_for_mcp(source_tool)
+    )
+    # BucketManager canonicalizes dangerous controls before durable storage.
+    # Use the same canonical bytes for exact selection, content leases, merge
+    # preparation, and the final raced-create review; otherwise two identical
+    # raw inputs can both miss a previously stored sanitized body.
+    sanitize_text = getattr(rt.bucket_mgr, "_sanitize_text", None)
+    if callable(sanitize_text):
+        content = sanitize_text(str(content))
+    else:
+        content = str(content)
+    require_embedding = getattr(rt.bucket_mgr, "_require_embedding_available", None)
+    if callable(require_embedding):
+        require_embedding()
+    bucket_id, is_merged, old_content = await _merge_or_create_inner(
+        content=content, tags=tags, importance=importance, domain=domain,
+        valence=valence, arousal=arousal, name=name, title=title,
+        source_refs=source_refs, quotes=quotes, raw_merge=raw_merge,
+        why_remembered=why_remembered,
+        merge_why_remembered=merge_why_remembered,
+        source_tool=source_tool, grow_batch_id=grow_batch_id,
+        meaning=meaning, media=media, test_data=test_data,
+        exact_only=exact_only,
+        footprint_origin=origin,
+    )
 
-    # identical-content、merge-target 与 quota turns 都已释放。独立/兼容
-    # 运行时即使需要同步调用 provider，也不能继续占用这些写入协调锁。
-    post_index = getattr(rt.bucket_mgr, "_index_after_update", None)
-    if callable(post_index) and result[0]:
-        await post_index(
-            result[0],
-            content_changed=True,
-            meaning_changed=bool(meaning),
+    # The Markdown commit is already durable and every content/quota/bucket turn
+    # is released before the external provider is awaited.
+    embed_warn = ""
+    try:
+        await _sync_after_commit(bucket_id)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        embed_warn = _EMBED_WARN
+        rt.logger.warning(
+            "post-commit embedding failed for %s: %s",
+            bucket_id,
+            type(exc).__name__,
         )
-    return result
+    if old_content:
+        try:
+            rt.dehydrator.invalidate_cache(old_content)
+        except Exception:
+            pass
+    rt.logger.info(
+        f"op=merge_or_create phase=commit bucket_id={bucket_id} "
+        f"merged={int(is_merged)} source_tool={source_tool or '_'} "
+        f"grow_batch_id={grow_batch_id or '_'} embed_ok={int(not embed_warn)}"
+    )
+    return bucket_id, is_merged, embed_warn
 
 
 async def _merge_or_create_inner(
@@ -881,148 +1040,316 @@ async def _merge_or_create_inner(
     meaning: str = "",
     media: list | str | None = None,
     test_data: bool = False,
-    _defer_derived_index: bool = False,
+    exact_only: bool = False,
+    footprint_origin: dict | None = None,
 ) -> Tuple[str, bool, str]:
-    """实际的 search→merge/create 逻辑，由 merge_or_create 在 Lock 保护下调用。"""
-    why_remembered = str(why_remembered or "").strip()[:_WHY_REMEMBERED_MAX_CHARS]
-    merge_why_remembered = str(
-        merge_why_remembered or ""
-    ).strip()[:_WHY_REMEMBERED_MAX_CHARS]
-    exact_storage_match = False
-    try:
-        existing = await rt.bucket_mgr.search(content, limit=1, domain_filter=domain or None)
-    except Exception as e:
-        rt.logger.warning(f"Search for merge failed, creating new / 合并搜索失败，新建: {e}")
-        existing = []
-
-    # Cache invalidation and a concurrent list_all() refresh can cross: an old
-    # parsed snapshot may briefly hide a bucket that is already durable on disk.
-    # Before any create, let Markdown truth override search/cache results.
-    exact_finder = getattr(rt.bucket_mgr, "find_exact_content", None)
-    if callable(exact_finder):
-        try:
-            # Byte-identical source text is the same write even when concurrent
-            # Flash analyses choose different domains/tags. Metadata is a
-            # derived classification and must not split one identical event.
-            exact = exact_finder(content, domain_filter=None)
-        except Exception as exc:
-            rt.logger.warning(f"Exact-content storage check failed: {exc}")
+    """Prepare/provider/revalidate/commit without holding provider under locks."""
+    prepared_merges: dict[tuple[str, str], str] = {}
+    for _attempt in range(_MERGE_COMMIT_MAX_ATTEMPTS):
+        selected = await _select_merge_target(content, tags, domain, exact_only)
+        if selected is None:
+            created = await _create_after_merge_review(
+                content=content, tags=tags, importance=importance, domain=domain,
+                valence=valence, arousal=arousal, name=name, title=title,
+                source_refs=source_refs, quotes=quotes,
+                why_remembered=why_remembered, source_tool=source_tool,
+                grow_batch_id=grow_batch_id, meaning=meaning, media=media,
+                test_data=test_data, event_actor="llm",
+                footprint_origin=footprint_origin,
+            )
+            if created is not None:
+                return created
+            # Another process published the same owner/content after our
+            # unlocked selection.  Re-enter the normal merge path so incoming
+            # tags/importance/domain are committed instead of silently lost.
+            continue
+        target_id, exact_selected = selected
+        prepared = await _prepare_merge_target(
+            target_id, content, tags, exact_selected
+        )
+        if prepared is None:
+            continue
+        old_text, _prepared_meta = prepared
+        if not exact_selected:
+            judge_same_event = getattr(rt.dehydrator, "judge_same_event", None)
+            if callable(judge_same_event):
+                judgement = await judge_same_event(old_text, content)
+                same_event = bool(
+                    isinstance(judgement, dict)
+                    and judgement.get("same_event") is True
+                    and float(judgement.get("confidence") or 0)
+                    >= _SAME_EVENT_CONFIDENCE_MIN
+                )
+                if not same_event:
+                    created = await _create_after_merge_review(
+                        content=content, tags=tags, importance=importance,
+                        domain=domain, valence=valence, arousal=arousal,
+                        name=name, title=title, source_refs=source_refs,
+                        quotes=quotes, why_remembered=why_remembered,
+                        source_tool=source_tool, grow_batch_id=grow_batch_id,
+                        meaning=meaning, media=media, test_data=test_data,
+                        event_actor="llm", footprint_origin=footprint_origin,
+                    )
+                    if created is not None:
+                        return created
+                    continue
+        if old_text == content:
+            merged = old_text
+            merge_method = "exact_dup"
+        elif raw_merge:
+            old_clean = old_text.rstrip()
+            new_clean = content.strip()
+            merged = (
+                f"{old_clean}\n\n---\n{new_clean}"
+                if old_clean and new_clean and new_clean not in old_clean
+                else old_clean or new_clean
+            )
+            merge_method = "raw_concat"
         else:
-            if exact:
-                exact = dict(exact)
-                exact["score"] = float("inf")
-                existing = [exact]
-                exact_storage_match = True
+            cache_key = (target_id, old_text)
+            if cache_key not in prepared_merges:
+                # Provider work is deliberately outside every merge/commit turn.
+                prepared_merges[cache_key] = await rt.dehydrator.merge(
+                    old_text, content
+                )
+            merged = prepared_merges[cache_key]
+            merge_method = "llm"
 
-    merge_threshold = rt.config.get("merge_threshold") or 75
-    if (
-        not test_data
-        and existing
-        and existing[0].get("score", 0) > merge_threshold
-    ):
-        candidate_id = str(existing[0].get("id") or "").strip()
-        merge_key = hashlib.sha256(
-            candidate_id.encode("utf-8", errors="replace")
-        ).hexdigest()[:_CONTENT_LOCK_KEY_HEX]
+        committed = await _revalidate_and_commit_merge(
+            target_id=target_id,
+            expected_old_text=old_text,
+            merged=merged,
+            content=content,
+            tags=tags,
+            importance=importance,
+            domain=domain,
+            valence=valence,
+            arousal=arousal,
+            source_tool=source_tool,
+            title=title,
+            source_refs=source_refs,
+            quotes=quotes,
+            merge_why_remembered=merge_why_remembered,
+            meaning=meaning,
+            media=media,
+            merge_method=merge_method,
+        )
+        if committed:
+            return target_id, True, old_text
+
+    # Preserve the bounded fail-closed behavior: a repeatedly stale target is
+    # never overwritten, and a concurrently published exact duplicate is never
+    # bypassed by an unconditional create.
+    created = await _create_after_merge_review(
+        content=content, tags=tags, importance=importance, domain=domain,
+        valence=valence, arousal=arousal, name=name, title=title,
+        source_refs=source_refs, quotes=quotes,
+        why_remembered=why_remembered, source_tool=source_tool,
+        grow_batch_id=grow_batch_id, meaning=meaning, media=media,
+        test_data=test_data, event_actor="llm",
+        footprint_origin=footprint_origin,
+    )
+    if created is not None:
+        return created
+    raise RuntimeError("merge/create state changed repeatedly; retry the write")
+
+
+def _mergeable_for_owner(snapshot: dict, tags: list) -> bool:
+    metadata = snapshot.get("metadata", {}) or {}
+    return bool(
+        _identity.owners_compatible(metadata, tags)
+        and not is_logical_letter(snapshot)
+        and not metadata.get("pinned")
+        and not metadata.get("protected")
+        and not metadata.get("deleted_at")
+        and metadata.get("type") != "archived"
+    )
+
+
+async def _select_merge_target(
+    content: str,
+    tags: list,
+    domain: list,
+    exact_only: bool,
+) -> tuple[str, bool] | None:
+    """Return an unlocked candidate ID and whether it was exact at selection."""
+    threshold = rt.config.get("merge_threshold") or 75
+    fresh_buckets = await _fresh_active_buckets()
+    exact = next(
+        (
+            bucket for bucket in fresh_buckets
+            if (bucket.get("content") or "") == content
+            and _mergeable_for_owner(bucket, tags)
+        ),
+        None,
+    )
+    candidate = exact
+    score = 100.0 if exact else 0.0
+    if candidate is None and not exact_only:
         try:
-            # Different new texts can resolve to the same target bucket.  The
-            # content-hash lock above cannot serialize that fan-in, so reserve
-            # the logical target too and optimistically retry regular edits.
-            async with _keyed_turn(f"merge-target-{merge_key}"):
-                for _attempt in range(3):
-                    bucket = await rt.bucket_mgr.get(candidate_id)
-                    if not bucket:
-                        break
-                    metadata = bucket.get("metadata", {})
-                    if not isinstance(metadata, dict):
-                        metadata = {}
-                    # Letter 是专用通道，生命周期类型即使被历史数据改写，也绝不
-                    # 参与 hold/grow 的事件合并；延迟导入避免 plan.core 回引本模块。
-                    from .plan.core import is_letter_bucket
-                    if is_letter_bucket(bucket) or parse_bool(
-                        metadata.get("pinned"), default=False
-                    ) or parse_bool(
-                        metadata.get("protected"), default=False
-                    ) or is_terminal_memory_metadata(metadata) or str(
-                        metadata.get("i_stage") or ""
-                    ) == "candidate":
-                        # 待沉淀的 I 候选不能当合并目标：它是「我对我自己的一个判断」，
-                        # 不是时间里发生的事，把一件事追加进去语义上就错了；而且沉淀
-                        # 要问的是「几轮梦之后它还站得住吗」，正文被改写就没有对象了。
-                        # i_stage 的真源在 tools/i（这里不反向导入，避免循环依赖）。
-                        break
-                    snapshot_content = str(bucket.get("content") or "")
-                    snapshot_metadata = deepcopy(metadata)
+            try:
+                candidates = await rt.bucket_mgr.search(
+                    content,
+                    limit=_OWNER_SAFE_MERGE_CANDIDATES,
+                    domain_filter=domain or None,
+                    fresh=True,
+                )
+            except TypeError as exc:
+                if "fresh" not in str(exc):
+                    raise
+                candidates = await rt.bucket_mgr.search(
+                    content,
+                    limit=_OWNER_SAFE_MERGE_CANDIDATES,
+                    domain_filter=domain or None,
+                )
+            compatible = [
+                bucket for bucket in candidates if _mergeable_for_owner(bucket, tags)
+            ]
+            if compatible:
+                candidate = compatible[0]
+                score = float(candidate.get("score", 0) or 0)
+        except Exception as exc:
+            rt.logger.warning(
+                f"Search for merge failed, creating new / 合并搜索失败，新建: {exc}"
+            )
+    if candidate is None or (exact is None and score <= threshold):
+        return None
+    target_id = str(candidate.get("id") or "")
+    return (target_id, exact is not None) if target_id else None
 
-                    if not exact_storage_match:
-                        judge = getattr(rt.dehydrator, "judge_same_event", None)
-                        if not callable(judge):
-                            rt.logger.warning(
-                                "Same-event judge unavailable; creating new bucket / "
-                                "同一事件判定器不可用，保守新建"
-                            )
-                            break
-                        judgement = await judge(snapshot_content, content)
-                        same_event = parse_bool(
-                            judgement.get("same_event", False), default=False
+
+async def _prepare_merge_target(
+    target_id: str,
+    content: str,
+    tags: list,
+    exact_selected: bool,
+) -> tuple[str, dict] | None:
+    """Read an unlocked candidate for provider preparation; never commit here."""
+    snapshot = await rt.bucket_mgr.get(target_id)
+    if not snapshot or not _mergeable_for_owner(snapshot, tags):
+        return None
+    old_text = str(snapshot.get("content") or "")
+    if exact_selected and old_text != content:
+        return None
+    return old_text, dict(snapshot.get("metadata", {}) or {})
+
+
+async def _revalidate_and_commit_merge(
+    *,
+    target_id: str,
+    expected_old_text: str,
+    merged: str,
+    content: str,
+    tags: list,
+    importance: int,
+    domain: list,
+    valence: float,
+    arousal: float,
+    source_tool: str,
+    title: str = "",
+    source_refs: list | None = None,
+    quotes: list | None = None,
+    merge_why_remembered: str = "",
+    meaning: str = "",
+    media: list | str | None = None,
+    merge_method: str = "llm",
+) -> bool:
+    """Acquire the future M-04 seam, then revalidate and atomically commit."""
+    async with _m04_merge_commit_turn():
+        async with _content_turn(content):
+            async with _keyed_turn(f"merge-target-{target_id}"):
+                before_quota = await rt.bucket_mgr.get(target_id)
+                if (
+                    not before_quota
+                    or not _mergeable_for_owner(before_quota, tags)
+                    or str(before_quota.get("content") or "") != expected_old_text
+                ):
+                    return False
+                async with AsyncExitStack() as stack:
+                    # The high-importance quota turn must precede the bucket
+                    # lease.  Acquire it conservatively for every incoming high
+                    # write, then decide the actual transition from the fresh
+                    # metadata read under the bucket lease.
+                    if importance >= _HIGH_IMP_THRESHOLD:
+                        await stack.enter_async_context(
+                            _quota_turn("high_importance")
                         )
+                    await stack.enter_async_context(_bucket_turn(target_id))
+                    current = await rt.bucket_mgr.get(target_id)
+                    if (
+                        not current
+                        or not _mergeable_for_owner(current, tags)
+                        or str(current.get("content") or "") != expected_old_text
+                    ):
+                        return False
+                    current_meta = current.get("metadata", {}) or {}
+                    current_importance = int(
+                        current_meta.get("importance") or 5
+                    )
+                    final_importance = max(current_importance, importance)
+                    if (
+                        current_importance < _HIGH_IMP_THRESHOLD
+                        and final_importance >= _HIGH_IMP_THRESHOLD
+                    ):
+                        final_importance = await enforce_high_importance_quota(
+                            final_importance
+                        )
+
+                    # ---- remainder sidecar: prepare ----
+                    sidecar_entry = None
+                    sidecar_gen = None
+                    base_dir = str(
+                        getattr(rt.bucket_mgr, "base_dir", "") or ""
+                    ).strip()
+                    if base_dir:
+                        from remainder_sidecar import prepare_remainder
+                        from remainder_integration import RemainderIntegrationError
                         try:
-                            confidence = float(judgement.get("confidence", 0.0))
-                        except (TypeError, ValueError):
-                            confidence = 0.0
-                        if not same_event or confidence < _SAME_EVENT_CONFIDENCE_MIN:
-                            rt.logger.info(
-                                "op=merge_or_create phase=branch branch=separate_event "
-                                f"bucket_id={candidate_id} confidence={confidence:.3f} "
-                                f"reason={str(judgement.get('reason', ''))[:_LOG_REASON_PREVIEW]}"
+                            sidecar_entry, sidecar_gen = prepare_remainder(
+                                base_dir,
+                                target_id,
+                                old_text=expected_old_text,
+                                new_text=content,
+                                merged_text=merged,
+                                merge_method=merge_method,
+                                metadata=current_meta,
+                                current_content=expected_old_text,
                             )
-                            break
-
-                    if raw_merge or exact_storage_match:
-                        old_text = snapshot_content.rstrip()
-                        new_text = content.strip()
-                        if new_text and new_text not in old_text:
-                            merged = (
-                                f"{old_text}\n\n---\n{new_text}"
-                                if old_text
-                                else new_text
+                        except Exception as _prep_exc:
+                            rt.logger.error(
+                                "remainder prepare failed for %s: %s",
+                                target_id, _prep_exc,
                             )
-                        else:
-                            merged = old_text or new_text
-                    else:
-                        merged = await rt.dehydrator.merge(
-                            snapshot_content, content
-                        )
+                            raise RemainderIntegrationError(
+                                f"prepare failed for {target_id}: "
+                                f"{type(_prep_exc).__name__}"
+                            ) from _prep_exc
 
-                    old_v = metadata.get("valence") or 0.5
-                    old_a = metadata.get("arousal") or 0.3
-                    merged_valence = (
-                        round((old_v + valence) / 2, 2)
-                        if 0 <= valence <= 1
-                        else old_v
-                    )
-                    merged_arousal = (
-                        round((old_a + arousal) / 2, 2)
-                        if 0 <= arousal <= 1
-                        else old_a
-                    )
-                    merged_importance = max(
-                        metadata.get("importance") or 5,
-                        importance,
-                    )
-                    update_kwargs = {
+                    old_v = current_meta.get("valence") or 0.5
+                    old_a = current_meta.get("arousal") or 0.3
+                    updates = {
                         "content": merged,
-                        "tags": list(dict.fromkeys(tags + (metadata.get("tags") or []))),
-                        "importance": merged_importance,
-                        "domain": list(
-                            dict.fromkeys(domain + (metadata.get("domain") or []))
+                        "tags": list(
+                            dict.fromkeys((current_meta.get("tags") or []) + tags)
                         ),
-                        "valence": merged_valence,
-                        "arousal": merged_arousal,
+                        "importance": final_importance,
+                        "domain": list(
+                            dict.fromkeys((current_meta.get("domain") or []) + domain)
+                        ),
+                        "valence": (
+                            round((old_v + valence) / 2, 2)
+                            if 0 <= valence <= 1 else old_v
+                        ),
+                        "arousal": (
+                            round((old_a + arousal) / 2, 2)
+                            if 0 <= arousal <= 1 else old_a
+                        ),
                     }
+                    if source_tool:
+                        updates["last_merged_by"] = source_tool
                     if title:
-                        update_kwargs["title"] = title
-                        old_name = str(metadata.get("name") or "")
+                        updates["title"] = title
+                        old_name = str(current_meta.get("name") or "")
                         timestamp_prefix = old_name[:19]
                         if (
                             len(timestamp_prefix) == 19
@@ -1032,267 +1359,166 @@ async def _merge_or_create_inner(
                             and timestamp_prefix[13] == "-"
                             and timestamp_prefix[16] == "-"
                         ):
-                            update_kwargs["name"] = f"{timestamp_prefix} {title}"
+                            updates["name"] = f"{timestamp_prefix} {title}"
                         else:
-                            update_kwargs["name"] = title
+                            updates["name"] = title
                     if source_refs:
-                        update_kwargs["source_refs_append"] = source_refs
+                        updates["source_refs_append"] = source_refs
                     if quotes:
-                        # 合并到已有桶时引语追加，不覆盖：每条引语属于它自己的时刻，
-                        # 不因为两段记忆被判定为同一件事就作废。超上限的处理见
-                        # BucketManager._merge_quotes（丢弃并 OB-W006 明说）。
-                        update_kwargs["quotes_append"] = quotes
-                    if source_tool:
-                        update_kwargs["last_merged_by"] = source_tool
-                    # grow digest 在首次拆条时还没有稳定的目标桶，
-                    # 只能在后续确认命中同一事件时补写。旧值优先，
-                    # 自动整理永不覆盖已有的人工或历史理由。
+                        updates["quotes_append"] = quotes
                     if merge_why_remembered and not str(
-                        metadata.get("why_remembered") or ""
+                        current_meta.get("why_remembered") or ""
                     ).strip():
-                        update_kwargs["why_remembered"] = merge_why_remembered
+                        updates["why_remembered"] = merge_why_remembered
                     if meaning:
-                        update_kwargs["meaning_append"] = meaning
+                        updates["meaning_append"] = meaning
                     if media:
-                        update_kwargs["media_append"] = media
+                        updates["media_append"] = media
+                    locked = getattr(rt.bucket_mgr, "_update_locked", None)
+                    if not callable(locked):
+                        raise RuntimeError(
+                            "owner-safe merge requires an atomic locked update helper"
+                        )
 
-                    derived_state = {}
-                    async with AsyncExitStack() as commit_stack:
-                        bucket_turn = getattr(rt.bucket_mgr, "_bucket_turn", None)
-                        update_locked = getattr(
-                            rt.bucket_mgr, "_update_locked", None
-                        )
-                        use_locked_update = callable(bucket_turn) and callable(
-                            update_locked
-                        )
-                        if use_locked_update:
-                            await commit_stack.enter_async_context(
-                                bucket_turn(candidate_id)
+                    # ---- Markdown commit ----
+                    from remainder_integration import (
+                        RemainderIntegrationError,
+                        mark_unresolved,
+                    )
+                    md_ok = False
+                    try:
+                        md_ok = bool(await locked(target_id, **updates))
+                    except BaseException as _md_exc:
+                        # Markdown failed: try to abort remainder
+                        if sidecar_entry and base_dir:
+                            try:
+                                from remainder_sidecar import abort_remainder
+                                abort_remainder(
+                                    base_dir, target_id,
+                                    sidecar_entry.entry_id, sidecar_gen,
+                                )
+                            except Exception as _abort_exc:
+                                mark_unresolved(
+                                    code="md_abort_double_fail",
+                                    bucket_id=target_id,
+                                    exc_type=type(_abort_exc).__name__,
+                                )
+                                rt.logger.error(
+                                    "remainder abort also failed for %s "
+                                    "after Markdown error: md=%s abort=%s",
+                                    target_id, _md_exc, _abort_exc,
+                                )
+                                if isinstance(
+                                    _md_exc, asyncio.CancelledError
+                                ):
+                                    raise _md_exc
+                                raise RemainderIntegrationError(
+                                    f"Markdown+abort both failed for "
+                                    f"{target_id}: "
+                                    f"md={type(_md_exc).__name__}, "
+                                    f"abort={type(_abort_exc).__name__}"
+                                ) from _md_exc
+                        if isinstance(_md_exc, asyncio.CancelledError):
+                            raise
+                        raise
+
+                    if not md_ok:
+                        # _update_locked returned False
+                        if sidecar_entry and base_dir:
+                            try:
+                                from remainder_sidecar import abort_remainder
+                                abort_remainder(
+                                    base_dir, target_id,
+                                    sidecar_entry.entry_id, sidecar_gen,
+                                )
+                            except Exception as _abort_exc:
+                                mark_unresolved(
+                                    code="md_false_abort_fail",
+                                    bucket_id=target_id,
+                                    exc_type=type(_abort_exc).__name__,
+                                )
+                                rt.logger.error(
+                                    "remainder abort failed for %s after "
+                                    "Markdown returned False: %s",
+                                    target_id, _abort_exc,
+                                )
+                                raise RemainderIntegrationError(
+                                    f"Markdown false + abort failed for "
+                                    f"{target_id}: "
+                                    f"{type(_abort_exc).__name__}"
+                                ) from _abort_exc
+                        return False
+
+                    # Markdown succeeded: commit remainder
+                    if sidecar_entry and base_dir:
+                        try:
+                            from remainder_sidecar import commit_remainder
+                            commit_remainder(
+                                base_dir, target_id,
+                                sidecar_entry.entry_id, sidecar_gen,
+                            )
+                        except Exception as _commit_exc:
+                            from remainder_integration import mark_unresolved
+                            mark_unresolved(
+                                code="commit_failed",
+                                bucket_id=target_id,
+                                exc_type=type(_commit_exc).__name__,
+                            )
+                            rt.logger.error(
+                                "remainder commit failed for %s "
+                                "(Markdown is authority, merge returns True, "
+                                "PREPARED preserved): %s",
+                                target_id, _commit_exc,
                             )
 
-                        locked_bucket = await rt.bucket_mgr.get(candidate_id)
-                        if not locked_bucket:
-                            break
-                        locked_metadata = locked_bucket.get("metadata", {})
-                        if not isinstance(locked_metadata, dict):
-                            locked_metadata = {}
-                        if is_terminal_memory_metadata(locked_metadata) or (
-                            str(locked_bucket.get("content") or "")
-                            != snapshot_content
-                            or locked_metadata != snapshot_metadata
-                        ):
-                            continue
+                    # archive terminal entries
+                    if base_dir:
+                        try:
+                            from remainder_sidecar import (
+                                archive_if_needed as _arc,
+                            )
+                            _arc(base_dir, target_id)
+                        except Exception as _arc_exc:
+                            from remainder_integration import mark_unresolved
+                            mark_unresolved(
+                                code="archive_failed",
+                                bucket_id=target_id,
+                                exc_type=type(_arc_exc).__name__,
+                            )
+                            rt.logger.error(
+                                "remainder archive failed for %s "
+                                "(not rolling back): %s",
+                                target_id, _arc_exc,
+                            )
 
-                        update_method = (
-                            update_locked
-                            if use_locked_update
-                            else rt.bucket_mgr.update
-                        )
-                        if use_locked_update:
-                            update_kwargs["_derived_state_out"] = derived_state
-                        committed = await update_method(
-                            candidate_id,
-                            allow_embedding_fallback=(
-                                raw_merge and source_tool == "hold"
-                            ),
-                            bump_active=True,
-                            **update_kwargs,
-                        )
-                        if not committed:
-                            break
+                    return True
 
-                    queue_captured = getattr(
-                        rt.bucket_mgr, "_queue_captured_derived_state", None
-                    )
-                    if use_locked_update and callable(queue_captured):
-                        queue_captured(derived_state)
 
-                    # _update_locked() 持有桶租约时只提交 Markdown。content/meaning
-                    # 的 provider 索引必须等 AsyncExitStack 释放租约后执行，否则一次
-                    # 慢 embedding 请求会让所有并发写入者等满 30 秒文件系统超时。
-                    post_index = getattr(rt.bucket_mgr, "_index_after_update", None)
-                    if (
-                        not _defer_derived_index
-                        and use_locked_update
-                        and callable(post_index)
-                    ):
-                        await post_index(
-                            candidate_id,
-                            content_changed=True,
-                            meaning_changed=bool(meaning),
-                        )
-
-                    try:
-                        rt.dehydrator.invalidate_cache(snapshot_content)
-                    except Exception:
-                        pass
-                    rt.logger.info(
-                        "op=merge_or_create phase=branch branch=merge "
-                        f"bucket_id={candidate_id} raw_merge={int(raw_merge)} "
-                        f"source_tool={source_tool or '_'} "
-                        f"score={existing[0].get('score', 0):.3f}"
-                    )
-                    return candidate_id, True, ""
-                else:
-                    rt.logger.warning(
-                        "Merge target changed repeatedly; creating a new bucket "
-                        "instead of overwriting concurrent edits: %s",
-                        candidate_id,
-                    )
-        except Exception as e:
-            rt.logger.warning(f"Merge failed, creating new / 合并失败，新建: {e}")
-
-    async def create_bucket(final_importance: int) -> str:
-        return await rt.bucket_mgr.create(
-            content=content,
-            tags=tags,
-            importance=final_importance,
-            domain=domain,
-            valence=valence,
-            arousal=arousal,
-            name=name or None,
-            title=title,
-            why_remembered=why_remembered,
-            source_tool=source_tool,
-            event_actor="llm",
-            grow_batch_id=grow_batch_id,
-            meaning=meaning,
-            media=media,
-            test_data=test_data,
-            source_refs=source_refs,
-            quotes=quotes,
-            defer_derived_index=_defer_derived_index,
-            # hold 的铁律：正文优先落盘。打标/embedding 可降级，但绝不压缩或撤销记忆。
-            allow_embedding_fallback=(raw_merge and source_tool == "hold"),
-        )
-
-    bucket_id = await create_bucket(importance)
-    # create() 已在原文落盘后投递 embedding outbox，此处无需重复生成。
-    # Managed runtime 下 queued 是正常成功态，不应在网络请求真正完成前误报
-    # “向量失败”；没有 outbox 的兼容运行时才检查同步尝试的结果。
-    embed_warn = ""
-    embedding_state = "disabled"
-    outbox = getattr(rt.bucket_mgr, "embedding_outbox", None)
-    engine = rt.embedding_engine
-    if outbox is not None:
-        try:
-            pending = bool(outbox.is_pending(bucket_id))
-        except Exception as pending_exc:
-            pending = False
-            rt.logger.warning(
-                "embedding outbox pending check failed for %s: %s",
-                bucket_id,
-                pending_exc,
+async def _create_after_merge_review(**kwargs) -> Tuple[str, bool, str] | None:
+    """Create under the commit seam, or request a retry after a raced exact write."""
+    importance = int(kwargs["importance"])
+    async with _m04_merge_commit_turn():
+        async with _content_turn(str(kwargs["content"])):
+            fresh = await _fresh_active_buckets()
+            raced_exact = next(
+                (
+                    bucket for bucket in fresh
+                    if (bucket.get("content") or "") == str(kwargs["content"])
+                    and _mergeable_for_owner(bucket, kwargs["tags"])
+                ),
+                None,
             )
-        if pending:
-            embedding_state = "queued"
-        else:
-            existing = None
-            lookup_error = None
-            if engine and getattr(engine, "enabled", False):
-                try:
-                    existing = await engine.get_embedding(bucket_id)
-                except Exception as exc:
-                    lookup_error = exc
-            if existing is not None:
-                embedding_state = "indexed"
-            else:
-                # Defensive repair: a stale reconcile/path-index race must not
-                # turn a transiently lost task into a permanent unindexed row
-                # or tell the user to delete and recreate valid Markdown.
-                repair_content = content
-                try:
-                    stored_bucket = await rt.bucket_mgr.get(bucket_id)
-                    if stored_bucket is not None:
-                        repair_content = str(
-                            stored_bucket.get("content") or repair_content
-                        )
-                except Exception as read_exc:
-                    rt.logger.warning(
-                        "embedding repair could not reload bucket %s: %s",
-                        bucket_id,
-                        read_exc,
-                    )
-                try:
-                    ensure_pending = getattr(outbox, "ensure_pending", None)
-                    if callable(ensure_pending):
-                        repaired = bool(ensure_pending(
-                            bucket_id,
-                            repair_content,
-                        ))
-                    else:
-                        repaired = bool(outbox.enqueue(
-                            bucket_id,
-                            repair_content,
-                            reset_retry=False,
-                        ))
-                except Exception as enqueue_exc:
-                    try:
-                        repaired = bool(outbox.is_pending(bucket_id))
-                    except Exception:
-                        repaired = False
-                    rt.logger.warning(
-                        "embedding outbox repair enqueue failed for %s: %s",
-                        bucket_id,
-                        enqueue_exc,
-                    )
-                if repaired:
-                    embedding_state = "queued_repair"
-                    rt.logger.warning(
-                        "Requeued missing embedding task after create: %s%s",
-                        bucket_id,
-                        (
-                            f" lookup_error={type(lookup_error).__name__}"
-                            if lookup_error is not None else ""
-                        ),
-                    )
-                else:
-                    embedding_state = "missing"
-                    embed_warn = _EMBED_WARN
-                    rt.logger.info(
-                        "op=merge_or_create phase=branch "
-                        "branch=embed_degrade bucket_id=%s "
-                        "reason=outbox_requeue_failed",
-                        bucket_id,
-                    )
-    elif engine and getattr(engine, "enabled", False):
-        try:
-            existing = await engine.get_embedding(bucket_id)
-            if existing is None:
-                embedding_state = "missing"
-                embed_warn = _EMBED_WARN
-                rt.logger.info(
-                    f"op=merge_or_create phase=branch branch=embed_degrade bucket_id={bucket_id} "
-                    f"reason=no_embedding_after_create"
-                )
-            else:
-                embedding_state = "indexed"
-        except Exception as _embed_exc:
-            embedding_state = "missing"
-            embed_warn = _EMBED_WARN
-            rt.logger.info(
-                f"op=merge_or_create phase=branch branch=embed_degrade bucket_id={bucket_id} "
-                f"reason={type(_embed_exc).__name__}"
-            )
-    rt.logger.info(
-        f"op=merge_or_create phase=branch branch=create bucket_id={bucket_id} "
-        f"source_tool={source_tool or '_'} grow_batch_id={grow_batch_id or '_'} "
-        f"embedding_state={embedding_state}"
-    )
-    # 自动建立桶间关系：fire-and-forget，写入返回不等它。
-    # 只在**新建**时触发——合并进已有桶时那条桶的关系已经建过了，
-    # 重复推断只会反复撞每桶上限。关系建不出来不影响记忆本身。
-    if not test_data:
-        asyncio.create_task(link_new_bucket(bucket_id, content))
-
-    return bucket_id, False, embed_warn
-
-
-# grow/hold 等调用方以 asyncio.create_task(check_duplicate_for(...)) 的方式
-# fire-and-forget 触发；同一批 grow 可能一次并发几十个 item，若不限流会
-# 同时打满 embedding provider 的并发配额。信号量在函数体内获取，跟调用方
-# 建了多少个 task 无关，只约束真正同时在跑 search_similar/update 的数量。
-_dup_check_semaphore = asyncio.Semaphore(_DUP_CHECK_CONCURRENCY)
+            if raced_exact is not None:
+                return None
+            async with AsyncExitStack() as stack:
+                final_importance = importance
+                if importance >= _HIGH_IMP_THRESHOLD:
+                    await stack.enter_async_context(_quota_turn("high_importance"))
+                    final_importance = await enforce_high_importance_quota(importance)
+                create_kwargs = dict(kwargs)
+                create_kwargs["importance"] = final_importance
+                bucket_id = await _create_bucket_deferred(**create_kwargs)
+    return bucket_id, False, ""
 
 
 async def check_duplicate_for(new_bucket_id: str, new_text: str, threshold: float = _DUP_DEFAULT_THRESHOLD) -> None:
@@ -1305,6 +1531,10 @@ async def check_duplicate_for(new_bucket_id: str, new_text: str, threshold: floa
         try:
             if not rt.embedding_engine or not getattr(rt.embedding_engine, "enabled", False):
                 return
+            new_bucket = await rt.bucket_mgr.get(new_bucket_id)
+            if not new_bucket:
+                return
+            new_tags = (new_bucket.get("metadata") or {}).get("tags") or []
             sims = await rt.embedding_engine.search_similar(new_text, top_k=_DUP_TOPK)
             for bid, score in sims:
                 if bid == new_bucket_id:
@@ -1312,12 +1542,31 @@ async def check_duplicate_for(new_bucket_id: str, new_text: str, threshold: floa
                 if score < threshold:
                     continue
                 try:
-                    await rt.bucket_mgr.update(
-                        new_bucket_id, dup_candidate=bid, dup_score=round(float(score), 4)
+                    candidate = await rt.bucket_mgr.get(bid)
+                    if not candidate or not _identity.owners_compatible(
+                        candidate.get("metadata") or {}, new_tags
+                    ):
+                        continue
+                    new_owner = _identity.mutation_owner(
+                        new_bucket.get("metadata") or {}
                     )
-                    await rt.bucket_mgr.update(
-                        bid, dup_candidate=new_bucket_id, dup_score=round(float(score), 4)
+                    candidate_owner = _identity.mutation_owner(
+                        candidate.get("metadata") or {}
                     )
+                    with _identity.manager_mutation_guard(
+                        rt.bucket_mgr,
+                        {new_bucket_id: new_owner, bid: candidate_owner},
+                    ):
+                        await rt.bucket_mgr.update(
+                            new_bucket_id,
+                            dup_candidate=bid,
+                            dup_score=round(float(score), 4),
+                        )
+                        await rt.bucket_mgr.update(
+                            bid,
+                            dup_candidate=new_bucket_id,
+                            dup_score=round(float(score), 4),
+                        )
                     rt.logger.info(
                         f"duplicate candidate: {new_bucket_id} ↔ {bid} (sim={score:.3f})"
                     )
@@ -1355,7 +1604,8 @@ async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "")
     try:
         from .plan.core import is_letter_bucket
 
-        all_b = await rt.bucket_mgr.list_all(include_archive=False)
+        all_b = await _fresh_active_buckets()
+        all_b = [b for b in all_b if _identity.admitted_mutation(b)]
         active_plans = [
             b for b in all_b
             if b["metadata"].get("type") == "plan"
@@ -1397,16 +1647,20 @@ async def check_plan_resolution(new_event_text: str, source_bucket_id: str = "")
                 confidence = float(judgement.get("confidence") or 0.0)
                 if judgement.get("resolved") and confidence >= _PLAN_LLM_CONFIDENCE_MIN:
                     reason = str(judgement.get("reason") or "")[:_RESOLUTION_REASON_MAX]
-                    await rt.bucket_mgr.update(
-                        p["id"],
-                        resolution_suggested={
-                            "reason": reason,
-                            "confidence": confidence,
-                            "suggested_by": "plan_resolution_judge",
-                            "source_bucket_id": source_bucket_id or "",
-                            "ts": now_iso(),
-                        },
-                    )
+                    owner = _identity.mutation_owner(p.get("metadata") or {})
+                    with _identity.manager_mutation_guard(
+                        rt.bucket_mgr, {p["id"]: owner}
+                    ):
+                        await rt.bucket_mgr.update(
+                            p["id"],
+                            resolution_suggested={
+                                "reason": reason,
+                                "confidence": confidence,
+                                "suggested_by": "plan_resolution_judge",
+                                "source_bucket_id": source_bucket_id or "",
+                                "ts": now_iso(),
+                            },
+                        )
                     rt.logger.info(
                         f"plan resolution suggested: {p['id']} — {reason[:_LOG_REASON_PREVIEW]}"
                     )
@@ -1440,6 +1694,7 @@ async def cascade_plan_resolved_to_buckets(plan_meta: dict, plan_id: str) -> lis
     linked: list[str] = []
     if not isinstance(plan_meta, dict):
         return linked
+    plan_owner = _identity.owner_of(plan_meta)
     candidates: list[str] = []
     for key in ("related_bucket", "resolved_by"):
         val = (plan_meta.get(key) or "").strip() if isinstance(plan_meta.get(key), str) else ""
@@ -1454,13 +1709,19 @@ async def cascade_plan_resolved_to_buckets(plan_meta: dict, plan_id: str) -> lis
             if not b:
                 continue
             meta = b.get("metadata", {})
+            target_owner = _identity.mutation_owner(meta)
+            if plan_owner and target_owner != plan_owner:
+                continue
             # 已经 resolved 就不重复操作（避免无意义 touch）
             if meta.get("resolved"):
                 continue
             # plan 不联动 plan；letter 也跳过（永久保留）
             if meta.get("type") in ("plan", "letter"):
                 continue
-            ok = await rt.bucket_mgr.update(bid, resolved=True)
+            with _identity.manager_mutation_guard(
+                rt.bucket_mgr, {bid: target_owner}
+            ):
+                ok = await rt.bucket_mgr.update(bid, resolved=True)
             if ok:
                 linked.append(bid)
                 rt.logger.info(

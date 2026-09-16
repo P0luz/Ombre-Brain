@@ -24,6 +24,7 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
 from . import _shared as sh
+from runtime_owner import spawn_background
 
 try:
     from utils import parse_bool, atomic_update_config_yaml  # type: ignore
@@ -196,7 +197,7 @@ async def _await_update_worker(
     until the step has genuinely stopped.
     """
 
-    worker = _asyncio.create_task(_asyncio.to_thread(func, *args, **kwargs))
+    worker = spawn_background(_asyncio.to_thread(func, *args, **kwargs))
     try:
         return await _asyncio.shield(worker)
     except _asyncio.CancelledError:
@@ -973,7 +974,7 @@ def register(mcp) -> None:
             await _asyncio.sleep(0.8)
             _restart_self()
 
-        _asyncio.create_task(_delayed_restart())
+        spawn_background(_delayed_restart())
         return JSONResponse({"ok": True, "restarting": True})
 
     @mcp.custom_route("/api/version", methods=["GET"])
@@ -1339,7 +1340,7 @@ def register(mcp) -> None:
                         reservation.release()
                     _restart_self()
 
-                restart_task = _asyncio.create_task(_restart())
+                restart_task = spawn_background(_restart())
                 _UPDATE_RESTART_TASKS.add(restart_task)
                 restart_task.add_done_callback(_UPDATE_RESTART_TASKS.discard)
                 reservation.defer_to_restart()
@@ -1430,6 +1431,7 @@ def register(mcp) -> None:
         from tools._common import restore_archived_letters
 
         ids: list[str] | None = None
+        revisions: dict[str, str] | None = None
         apply = request.method == "POST"
         if apply:
             try:
@@ -1475,11 +1477,31 @@ def register(mcp) -> None:
                     status_code=400,
                 )
             ids = normalized
+            raw_revisions = body.get("revisions")
+            if not isinstance(raw_revisions, dict):
+                return no_store_json(
+                    {"ok": False, "reason": "invalid_revisions"},
+                    status_code=400,
+                )
+            revisions = {}
+            for bucket_id in ids:
+                value = raw_revisions.get(bucket_id)
+                if (
+                    not isinstance(value, str)
+                    or len(value) != 64
+                    or any(char not in "0123456789abcdef" for char in value.casefold())
+                ):
+                    return no_store_json(
+                        {"ok": False, "reason": "invalid_revisions"},
+                        status_code=400,
+                    )
+                revisions[bucket_id] = value.casefold()
 
         try:
             result = await restore_archived_letters(
                 sh.bucket_mgr,
                 ids=ids,
+                revisions=revisions,
                 apply=apply,
             )
             return no_store_json({"ok": True, **result})

@@ -9,9 +9,9 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_archiving_similar_buckets_keeps_all(bucket_mgr):
-    id1 = await bucket_mgr.create(content="第一条内容 AAA", name="重名记忆",
+    id1 = await bucket_mgr.create_internal(content="第一条内容 AAA", name="重名记忆",
                                   domain=["测试"], bucket_type="dynamic", importance=3)
-    id2 = await bucket_mgr.create(content="第二条内容 BBB", name="重名记忆",
+    id2 = await bucket_mgr.create_internal(content="第二条内容 BBB", name="重名记忆",
                                   domain=["测试"], bucket_type="dynamic", importance=3)
 
     assert await bucket_mgr.archive(id1) is True
@@ -26,9 +26,9 @@ async def test_archiving_similar_buckets_keeps_all(bucket_mgr):
 @pytest.mark.asyncio
 async def test_archive_collision_guard_appends_suffix(bucket_mgr, tmp_path, monkeypatch):
     """强制 dest 撞名：让 archive 目标基名固定，验证第二次归档不覆盖第一次。"""
-    id1 = await bucket_mgr.create(content="原始归档内容 X", name="固定名",
+    id1 = await bucket_mgr.create_internal(content="原始归档内容 X", name="固定名",
                                   domain=["测试"], bucket_type="dynamic", importance=3)
-    id2 = await bucket_mgr.create(content="后来归档内容 Y", name="固定名",
+    id2 = await bucket_mgr.create_internal(content="后来归档内容 Y", name="固定名",
                                   domain=["测试"], bucket_type="dynamic", importance=3)
 
     # 把两个桶的文件基名强制成同一个，制造真正的 archive 撞名

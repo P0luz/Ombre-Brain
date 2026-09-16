@@ -16,7 +16,7 @@ pytestmark = pytest.mark.asyncio
 
 
 async def _make_bucket(bucket_mgr, *, content: str = "old content") -> str:
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content,
         name="old title",
         why_remembered="remember old",
@@ -142,8 +142,8 @@ async def test_concurrent_human_name_routes_are_one_full_vault_transaction(
     persisted = []
     monkeypatch.setattr(
         buckets_web,
-        "atomic_update_config_yaml",
-        lambda mutate: (
+        "run_config_transaction",
+        lambda _path, mutate: (
             mutate(saved := {"human": persisted[-1] if persisted else "old"}),
             persisted.append(saved["human"]),
         )[-1],

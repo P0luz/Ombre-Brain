@@ -18,7 +18,7 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_concurrent_archive_and_update_leaves_single_copy(bucket_mgr):
-    bid = await bucket_mgr.create(content="并发前的原始内容")
+    bid = await bucket_mgr.create_internal(content="并发前的原始内容")
 
     await asyncio.gather(
         bucket_mgr.archive(bid),
@@ -36,7 +36,7 @@ async def test_concurrent_archive_and_update_leaves_single_copy(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_concurrent_touch_and_delete_leaves_single_copy(bucket_mgr):
-    bid = await bucket_mgr.create(content="并发前的原始内容")
+    bid = await bucket_mgr.create_internal(content="并发前的原始内容")
 
     await asyncio.gather(
         bucket_mgr.touch(bid, ripple=False),

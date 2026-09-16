@@ -20,8 +20,8 @@ def _install_trace_runtime(bucket_mgr) -> None:
 
 @pytest.mark.asyncio
 async def test_only_creation_marked_test_bucket_can_be_hard_deleted(bucket_mgr):
-    real_id = await bucket_mgr.create(content="a real memory", domain=["life"])
-    test_id = await bucket_mgr.create(
+    real_id = await bucket_mgr.create_internal(content="a real memory", domain=["life"])
+    test_id = await bucket_mgr.create_internal(
         content="synthetic memory for a test",
         domain=["test"],
         source_tool="hold",
@@ -48,9 +48,10 @@ async def test_only_creation_marked_test_bucket_can_be_hard_deleted(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_trace_hard_delete_refuses_normal_plan_without_archiving(bucket_mgr):
-    plan_id = await bucket_mgr.create(
+    plan_id = await bucket_mgr.create_internal(
         content="a real plan that must remain recoverable",
         domain=["plan"],
+        tags=["owner:cheng"],
         bucket_type="plan",
         source_tool="plan",
     )
@@ -83,9 +84,10 @@ async def test_trace_hard_delete_refuses_normal_plan_without_archiving(bucket_mg
 async def test_test_data_cleanup_requires_reason_and_rejects_conflicting_modes(
     bucket_mgr,
 ):
-    test_id = await bucket_mgr.create(
+    test_id = await bucket_mgr.create_internal(
         content="synthetic gateway test payload",
         domain=["test"],
+        tags=["owner:cheng"],
         source_tool="hold",
         test_data=True,
     )

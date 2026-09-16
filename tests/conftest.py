@@ -182,8 +182,10 @@ def fake_embedding_engine():
 @pytest.fixture
 def bucket_mgr(test_config, fake_embedding_engine):
     from bucket_manager import BucketManager
+    from tools import _identity
 
-    return BucketManager(test_config, embedding_engine=fake_embedding_engine)
+    with _identity.caller_context("cheng"):
+        yield BucketManager(test_config, embedding_engine=fake_embedding_engine)
 
 
 @pytest.fixture

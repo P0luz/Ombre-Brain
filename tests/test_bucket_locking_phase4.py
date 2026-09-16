@@ -162,7 +162,7 @@ def test_filesystem_turn_serializes_independent_event_loops(tmp_path):
 
 
 def test_active_cache_lock_serializes_independent_event_loops(bucket_mgr, monkeypatch):
-    asyncio.run(bucket_mgr.create("cross-loop cache body", domain=["race"]))
+    asyncio.run(bucket_mgr.create_internal("cross-loop cache body", domain=["race"]))
     bucket_mgr.external_change_poll_seconds = 0
     entered = threading.Event()
     release = threading.Event()
@@ -200,7 +200,7 @@ def test_bulk_bucket_id_index_avoids_n_by_n_frontmatter_scans(
 ):
     for index in range(24):
         asyncio.run(
-            bucket_mgr.create(
+            bucket_mgr.create_internal(
                 f"indexed body {index}",
                 name=f"indexed-{index}",
                 domain=["race"],
@@ -228,8 +228,8 @@ def test_bulk_bucket_id_index_avoids_n_by_n_frontmatter_scans(
 @pytest.mark.asyncio
 async def test_concurrent_create_override_never_overwrites_same_id(bucket_mgr):
     first, second = await asyncio.gather(
-        bucket_mgr.create("first body", bucket_id_override="shared-id"),
-        bucket_mgr.create("second body", bucket_id_override="shared-id"),
+        bucket_mgr.create_internal("first body", bucket_id_override="shared-id"),
+        bucket_mgr.create_internal("second body", bucket_id_override="shared-id"),
     )
 
     assert first != second
@@ -246,7 +246,7 @@ async def test_update_releases_bucket_turn_before_waiting_for_derived_index(
     monkeypatch,
 ):
     """慢 embedding provider 不得继续占用持久桶租约。"""
-    bucket_id = await bucket_mgr.create("meaning base", domain=["race"])
+    bucket_id = await bucket_mgr.create_internal("meaning base", domain=["race"])
     indexing_started = asyncio.Event()
     release_indexing = asyncio.Event()
 
@@ -279,7 +279,7 @@ async def test_update_releases_bucket_turn_before_waiting_for_derived_index(
 async def test_concurrent_updates_cannot_finish_with_stale_derived_content(
     bucket_mgr,
 ):
-    bucket_id = await bucket_mgr.create("initial", domain=["race"])
+    bucket_id = await bucket_mgr.create_internal("initial", domain=["race"])
     first_started = asyncio.Event()
     release_first = asyncio.Event()
     completed: list[str] = []
@@ -328,7 +328,7 @@ async def test_cancelled_newer_update_still_converges_meaning_index(
     monkeypatch,
 ):
     """较新请求取消后，迟到的旧 provider 结果也不能成为最终 meaning。"""
-    bucket_id = await bucket_mgr.create("meaning cancellation base")
+    bucket_id = await bucket_mgr.create_internal("meaning cancellation base")
     first_started = asyncio.Event()
     release_first = asyncio.Event()
     stored: list[str] = []
@@ -377,7 +377,7 @@ async def test_cancelled_provider_wait_releases_derived_lease(
     bucket_mgr,
     monkeypatch,
 ):
-    bucket_id = await bucket_mgr.create("cancel provider base")
+    bucket_id = await bucket_mgr.create_internal("cancel provider base")
     provider_started = asyncio.Event()
     wait_forever = asyncio.Event()
 
@@ -414,7 +414,11 @@ async def test_hold_merge_releases_bucket_turn_before_derived_index(
     """hold 合并路径不得在私有桶租约内等待 embedding。"""
     old_content = "existing hold event"
     new_content = "additional detail from the same event"
-    bucket_id = await bucket_mgr.create(old_content, domain=["race"])
+    bucket_id = await bucket_mgr.create_internal(
+        old_content,
+        domain=["race"],
+        tags=["owner:cheng"],
+    )
 
     async def find_target(*_args, **_kwargs):
         bucket = await bucket_mgr.get(bucket_id)
@@ -494,7 +498,7 @@ async def test_hold_merge_releases_bucket_turn_before_derived_index(
 
 @pytest.mark.asyncio
 async def test_update_enqueues_outbox_after_releasing_bucket_turn(bucket_mgr):
-    bucket_id = await bucket_mgr.create("outbox lease base", domain=["race"])
+    bucket_id = await bucket_mgr.create_internal("outbox lease base", domain=["race"])
 
     class ProbingOutbox:
         running = True
@@ -591,7 +595,7 @@ async def test_create_rechecks_id_after_waiting_for_migration_turn(bucket_mgr):
 
     async with bucket_mgr._bucket_turn(imported_id):
         create_task = asyncio.create_task(
-            bucket_mgr.create(
+            bucket_mgr.create_internal(
                 "new local body",
                 domain=["race"],
                 bucket_id_override=imported_id,
@@ -624,8 +628,8 @@ async def test_create_rechecks_id_after_waiting_for_migration_turn(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_ripple_reloads_target_under_its_turn_without_lost_touch(bucket_mgr):
-    source_id = await bucket_mgr.create("source", domain=["race"])
-    target_id = await bucket_mgr.create("target", domain=["race"])
+    source_id = await bucket_mgr.create_internal("source", domain=["race"])
+    target_id = await bucket_mgr.create_internal("target", domain=["race"])
     source = await bucket_mgr.get(source_id)
     reference = parse_iso_datetime(source["metadata"]["created"])
 
@@ -643,8 +647,8 @@ async def test_ripple_reloads_target_under_its_turn_without_lost_touch(bucket_mg
 
 @pytest.mark.asyncio
 async def test_ripple_does_not_update_target_archived_after_snapshot(bucket_mgr):
-    source_id = await bucket_mgr.create("source", domain=["race"])
-    target_id = await bucket_mgr.create("target", domain=["race"])
+    source_id = await bucket_mgr.create_internal("source", domain=["race"])
+    target_id = await bucket_mgr.create_internal("target", domain=["race"])
     source = await bucket_mgr.get(source_id)
     reference = parse_iso_datetime(source["metadata"]["created"])
 
@@ -663,7 +667,7 @@ async def test_ripple_does_not_update_target_archived_after_snapshot(bucket_mgr)
 
 @pytest.mark.asyncio
 async def test_hard_delete_rechecks_provenance_inside_bucket_turn(bucket_mgr):
-    bucket_id = await bucket_mgr.create("test body", test_data=True)
+    bucket_id = await bucket_mgr.create_internal("test body", test_data=True)
     bucket = await bucket_mgr.get(bucket_id)
     path = Path(bucket["path"])
 

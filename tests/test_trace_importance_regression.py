@@ -9,6 +9,11 @@ from tools.breath.importance import _select_importance_buckets, surface_by_impor
 from tools.trace.core import trace_core
 
 
+async def _create_owned(manager, **kwargs):
+    kwargs.setdefault("tags", ["owner:cheng"])
+    return await manager.create_internal(**kwargs)
+
+
 class EchoDehydrator:
     async def dehydrate(self, content, meta=None):
         return content
@@ -84,7 +89,7 @@ async def test_importance_surface_filters_after_canonical_id_deduplication():
 
 @pytest.mark.asyncio
 async def test_trace_importance_update_refreshes_importance_breath(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await _create_owned(bucket_mgr,
         content="Plain important memory should be demoted.",
         importance=10,
         domain=["rules"],
@@ -104,12 +109,12 @@ async def test_trace_importance_update_refreshes_importance_breath(bucket_mgr):
 async def test_importance_breath_keeps_threshold_bucket_visible_when_tens_fill_cap(bucket_mgr):
     install_runtime(bucket_mgr)
     for i in range(21):
-        await bucket_mgr.create(
+        await _create_owned(bucket_mgr,
             content=f"Higher-importance memory {i}",
             importance=10,
             domain=["rules"],
         )
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await _create_owned(bucket_mgr,
         content="Demoted-to-nine memory should still be visible at threshold nine.",
         importance=10,
         domain=["rules"],
@@ -127,7 +132,7 @@ async def test_importance_breath_keeps_threshold_bucket_visible_when_tens_fill_c
 
 @pytest.mark.asyncio
 async def test_trace_importance_update_on_pinned_bucket_does_not_report_fake_success(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await _create_owned(bucket_mgr,
         content="Pinned memory keeps importance locked.",
         importance=10,
         pinned=True,
@@ -153,7 +158,7 @@ async def test_trace_protects_without_changing_type_and_locks_importance(
     bucket_mgr,
     bucket_type,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await _create_owned(bucket_mgr,
         content=f"Protected {bucket_type} memory keeps its storage type.",
         importance=6,
         bucket_type=bucket_type,
@@ -172,7 +177,7 @@ async def test_trace_protects_without_changing_type_and_locks_importance(
 
 @pytest.mark.asyncio
 async def test_trace_unprotect_requires_same_call_importance(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await _create_owned(bucket_mgr,
         content="Unprotecting must restore an explicit ordinary importance.",
         importance=5,
         protected=True,
@@ -199,7 +204,7 @@ async def test_trace_unprotect_requires_same_call_importance(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_trace_rejects_protected_while_bucket_remains_pinned(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await _create_owned(bucket_mgr,
         content="Pinned and protected are distinct, conflicting states.",
         pinned=True,
         domain=["rules"],
@@ -218,7 +223,7 @@ async def test_trace_rejects_protected_while_bucket_remains_pinned(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_trace_atomically_switches_pinned_to_protected(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await _create_owned(bucket_mgr,
         content="Pinned memory can switch to silent protection atomically.",
         pinned=True,
         domain=["rules"],

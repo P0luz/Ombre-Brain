@@ -26,7 +26,7 @@ from ombrebrain.storage.relation_store import (
     unlink_relation,
 )
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 
 # custom 关系必须带 label（见 normalize_relation_links），而 trace 没有传
 # label 的参数。与其加第四个参数，不如明确拒绝——自动关系永远不会是 custom，
@@ -63,17 +63,31 @@ def validate(bucket_id: str, unlink: str, relink: str, relation_type: str) -> No
                 "continuation_of / continues / related_to / same_event。本次未修改。")
 
 
-async def apply(bucket_id: str, unlink: str, relink: str, relation_type: str) -> str:
+async def apply(
+    bucket_id: str,
+    unlink: str,
+    relink: str,
+    relation_type: str,
+    *,
+    source_owner: str = "",
+) -> str:
     """执行解绑 / 改类型，返回给模型看的中文短句。"""
     validate(bucket_id, unlink, relink, relation_type)
 
     target_id = unlink or relink
-    if not await rt.bucket_mgr.get(target_id):
+    target = await rt.bucket_mgr.get(target_id)
+    if not target:
         raise ToolInputError(f"找不到目标记忆 {target_id}；本次未修改。")
+    try:
+        target_owner = _identity.mutation_owner(target.get("metadata") or {})
+    except ValueError as exc:
+        raise ToolInputError(str(exc)) from exc
 
-    if unlink:
-        return await _apply_unlink(bucket_id, target_id)
-    return await _apply_retype(bucket_id, target_id, relation_type)
+    expected = {bucket_id: source_owner, target_id: target_owner}
+    with _identity.manager_mutation_guard(rt.bucket_mgr, expected):
+        if unlink:
+            return await _apply_unlink(bucket_id, target_id)
+        return await _apply_retype(bucket_id, target_id, relation_type)
 
 
 def _read_links(post) -> list[dict] | None:

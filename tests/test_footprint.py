@@ -52,29 +52,30 @@ def test_footprint_is_compact_and_ignores_technical_touch_events():
 
 
 @pytest.mark.asyncio
-async def test_default_breath_shows_footprint_after_each_memory(bucket_mgr, decay_eng):
-    bucket_id = await bucket_mgr.create(
+async def test_default_breath_omits_footprint_to_preserve_budget(bucket_mgr, decay_eng):
+    bucket_id = await bucket_mgr.create_internal(
         content="A memory whose path remains visible.",
         domain=["life"],
         importance=8,
+        tags=["owner:cheng"],
     )
     _install_runtime(bucket_mgr, decay_eng)
 
     output = await surface_default(max_results=5, max_tokens=10000, tag_filter=[])
 
-    body_at = output.index("A memory whose path remains visible.")
-    footprint_at = output.index("👣 Footprint：系统经系统直接创建")
+    assert "A memory whose path remains visible." in output
     assert bucket_id in output
-    assert footprint_at > body_at
+    assert "👣 Footprint：" not in output
 
 
 @pytest.mark.asyncio
 async def test_query_discovers_archive_and_prints_explicit_restore_call(
     bucket_mgr, decay_eng
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="The hidden lantern memory is useful now.",
         domain=["life"],
+        tags=["owner:cheng"],
     )
     assert await bucket_mgr.delete(bucket_id) is True
     archived = await bucket_mgr.get_including_archive(bucket_id)
@@ -93,7 +94,7 @@ async def test_query_discovers_archive_and_prints_explicit_restore_call(
 
     assert "[query 命中·已删除到档案]" in output
     assert "The hidden lantern memory is useful now." in output
-    assert "👣 Footprint：系统经系统直接创建 → 删除到档案" in output
+    assert "👣 Footprint：" not in output
     assert f'trace(bucket_id="{bucket_id}", restore=True)' in output
     assert archived_path.exists()
     assert await bucket_mgr.get(bucket_id) is None
@@ -101,8 +102,8 @@ async def test_query_discovers_archive_and_prints_explicit_restore_call(
 
 @pytest.mark.asyncio
 async def test_trace_restore_is_explicit_and_reindexes_bucket(bucket_mgr, decay_eng):
-    bucket_id = await bucket_mgr.create(
-        content="A returned memory.", domain=["life"]
+    bucket_id = await bucket_mgr.create_internal(
+        content="A returned memory.", domain=["life"], tags=["owner:cheng"]
     )
     assert await bucket_mgr.delete(bucket_id) is True
     _install_runtime(bucket_mgr, decay_eng)
@@ -129,10 +130,11 @@ async def test_trace_restore_archived_pin_does_not_silently_repin(
     decay_eng,
 ):
     """归档保留 pin 历史，但显式恢复不会让它重新占用活跃配额。"""
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="A pinned memory returning without a silent repin.",
         domain=["life"],
         pinned=True,
+        tags=["owner:cheng"],
     )
     _install_runtime(bucket_mgr, decay_eng)
 

@@ -22,6 +22,8 @@ from ombrebrain.security.public_origin import (
     configured_public_origin,
     normalize_public_origin,
 )
+from tools import _identity
+from runtime_owner import spawn_background
 from utils import parse_bool
 from web.request_limits import (
     MCPRequestBodyLimitMiddleware,
@@ -37,6 +39,7 @@ DEFAULT_KEEPALIVE_INITIAL_DELAY_SECONDS = 10.0
 DEFAULT_KEEPALIVE_INTERVAL_SECONDS = 60.0
 
 TokenValidator = Callable[..., bool]
+CallerResolver = Callable[..., str]
 AsyncCallback = Callable[[], Awaitable[Any]]
 
 
@@ -180,6 +183,7 @@ class MCPAuthMiddleware:
         auth_required: bool,
         token_validator: TokenValidator,
         static_token_validator: TokenValidator | None = None,
+        caller_resolver: CallerResolver | None = None,
         auth_mode: str = "oauth",
         path_matcher: Callable[[object], bool] = is_mcp_endpoint_path,
         resource_path: str = "/mcp",
@@ -189,6 +193,7 @@ class MCPAuthMiddleware:
         self.auth_required = bool(auth_required)
         self.token_validator = token_validator
         self.static_token_validator = static_token_validator
+        self.caller_resolver = caller_resolver
         self.auth_mode = (
             auth_mode if auth_mode in ("oauth", "token", "hybrid") else "oauth"
         )
@@ -198,6 +203,7 @@ class MCPAuthMiddleware:
 
     async def __call__(self, scope: dict, receive: Any, send: Any) -> None:
         path = str(scope.get("path", ""))
+        bound_caller = ""
         if (
             scope.get("type") == "http"
             and str(scope.get("method", "")).upper() != "OPTIONS"
@@ -211,6 +217,7 @@ class MCPAuthMiddleware:
             resource = f"{base}{self.resource_path}"
             bearer_token = _extract_bearer_token(auth)
             valid = False
+            primary_valid = False
             if bearer_token:
                 primary_valid = bool(
                     self.token_validator(bearer_token, resource=resource)
@@ -222,6 +229,14 @@ class MCPAuthMiddleware:
                         self.static_token_validator(bearer_token, resource=resource)
                     )
                 valid = primary_valid | static_valid
+                if (
+                    primary_valid
+                    and self.auth_mode in ("oauth", "hybrid")
+                    and self.caller_resolver is not None
+                ):
+                    bound_caller = _identity.normalize_caller(
+                        self.caller_resolver(bearer_token, resource=resource)
+                    )
             if not valid and self.auth_mode in ("token", "hybrid"):
                 # Fallback header for MCP clients that can't customize Authorization.
                 alt_token = headers.get(b"ombre-mcp-token", b"").decode(
@@ -275,6 +290,10 @@ class MCPAuthMiddleware:
                     }
                 )
                 return
+        if scope.get("type") == "http" and self.path_matcher(path):
+            with _identity.caller_context(bound_caller, transport="http"):
+                await self.app(scope, receive, send)
+            return
         await self.app(scope, receive, send)
 
 
@@ -620,10 +639,8 @@ class RuntimeLifecycle:
             getattr(self.you_service, "start", None),
         )
         if self.keepalive_url:
-            self._keepalive_task = asyncio.create_task(
-                self._keepalive_loop(),
-                name="ombre-health-keepalive",
-            )
+            self._keepalive_task = spawn_background(self._keepalive_loop())
+            self._keepalive_task.set_name("ombre-health-keepalive")
         self._reset_boot_marker()
 
     async def stop(self) -> None:
@@ -690,6 +707,7 @@ def build_http_app(
     token_validator: TokenValidator,
     lifecycle: RuntimeLifecycle,
     static_token_validator: TokenValidator | None = None,
+    caller_resolver: CallerResolver | None = None,
 ) -> Any:
     """Build the HTTP (streamable-http) ASGI app with one consistent middleware stack."""
 
@@ -728,6 +746,7 @@ def build_http_app(
         auth_required=settings.auth_required,
         token_validator=token_validator,
         static_token_validator=static_token_validator,
+        caller_resolver=caller_resolver,
         auth_mode=settings.auth_mode,
         path_matcher=mcp_path_matcher,
         resource_path="/mcp",

@@ -12,7 +12,6 @@ import yaml
 import web.buckets as buckets_web
 import web.config_api as config_api
 import web.import_api as import_api
-import utils
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -45,6 +44,15 @@ class JsonRequest:
 
 def _json(response):
     return json.loads(response.body.decode("utf-8"))
+
+
+def _transaction_stub(writer):
+    """Adapt an old-style mutate callback fake to the M-02 transaction API."""
+
+    def run(_path, mutate, **_kwargs):
+        return SimpleNamespace(persisted=writer(mutate))
+
+    return run
 
 
 @pytest.mark.asyncio
@@ -200,7 +208,7 @@ async def test_grow_shortpath_explains_hold_style_single_memory(monkeypatch):
     async def fake_background(*_args, **_kwargs):
         return None
 
-    def fake_create_task(coro):
+    def fake_spawn_background(coro):
         coro.close()
         return None
 
@@ -209,7 +217,7 @@ async def test_grow_shortpath_explains_hold_style_single_memory(monkeypatch):
     monkeypatch.setattr(shortpath, "merge_or_create", fake_merge_or_create)
     monkeypatch.setattr(shortpath, "check_plan_resolution", fake_background)
     monkeypatch.setattr(shortpath, "check_duplicate_for", fake_background)
-    monkeypatch.setattr(shortpath.asyncio, "create_task", fake_create_task)
+    monkeypatch.setattr(shortpath, "spawn_background", fake_spawn_background)
 
     result = await shortpath.grow_shortpath("短句")
 
@@ -386,7 +394,7 @@ async def test_dashboard_hybrid_mode_persists_and_requires_restart(monkeypatch, 
     monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
     monkeypatch.setenv("OMBRE_BIND_HOST", "127.0.0.1")
     monkeypatch.delenv("OMBRE_MCP_AUTH_MODE", raising=False)
-    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(config_api, "_config_file_path", lambda: str(config_path))
     mcp = FakeMCP()
     config_api.register(mcp)
 
@@ -417,7 +425,7 @@ async def test_dashboard_oauth_switch_persists_to_config(monkeypatch, tmp_path):
     monkeypatch.setenv("OMBRE_BIND_HOST", "127.0.0.1")
     monkeypatch.delenv("OMBRE_MCP_REQUIRE_AUTH", raising=False)
     monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
-    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(config_api, "_config_file_path", lambda: str(config_path))
     mcp = FakeMCP()
     config_api.register(mcp)
 
@@ -465,8 +473,8 @@ async def test_dashboard_mcp_startup_settings_require_persistence_and_do_not_pub
 
     monkeypatch.setattr(
         config_api,
-        "atomic_update_config_yaml",
-        lambda _mutate: (_ for _ in ()).throw(OSError("read-only mount")),
+        "run_config_transaction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only mount")),
     )
     failed = await mcp.routes[("POST", "/api/config")](
         JsonRequest(
@@ -511,8 +519,8 @@ async def test_dashboard_hot_config_persist_failure_rolls_back_runtime(
     monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
     monkeypatch.setattr(
         config_api,
-        "atomic_update_config_yaml",
-        lambda _mutate: (_ for _ in ()).throw(OSError("只读挂载")),
+        "run_config_transaction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("只读挂载")),
     )
     mcp = FakeMCP()
     config_api.register(mcp)
@@ -550,11 +558,11 @@ async def test_dashboard_rejects_unsafe_no_auth_before_config_write(
     monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
     monkeypatch.delenv("OMBRE_MCP_REQUIRE_AUTH", raising=False)
     monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
-    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(config_api, "_config_file_path", lambda: str(config_path))
     monkeypatch.setattr(
         config_api,
-        "atomic_update_config_yaml",
-        lambda mutate: writes.append(mutate),
+        "run_config_transaction",
+        lambda *_args, **_kwargs: writes.append(True),
     )
     mcp = FakeMCP()
     config_api.register(mcp)
@@ -594,7 +602,7 @@ async def test_dashboard_rechecks_network_safety_inside_atomic_config_turn(
     monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
     monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
     monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
-    monkeypatch.setattr(config_api, "atomic_update_config_yaml", writer)
+    monkeypatch.setattr(config_api, "run_config_transaction", _transaction_stub(writer))
     mcp = FakeMCP()
     config_api.register(mcp)
 
@@ -637,7 +645,7 @@ async def test_dashboard_reports_restart_after_open_runtime_is_repaired(
     monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
     monkeypatch.delenv("OMBRE_MCP_REQUIRE_AUTH", raising=False)
     monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
-    monkeypatch.setattr(config_api, "atomic_update_config_yaml", writer)
+    monkeypatch.setattr(config_api, "run_config_transaction", _transaction_stub(writer))
     monkeypatch.setattr(config_api, "read_config_yaml", lambda: copy.deepcopy(persisted))
     mcp = FakeMCP()
     config_api.register(mcp)
@@ -681,7 +689,7 @@ async def test_dashboard_explicit_insecure_override_is_auditable(monkeypatch):
     monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
     monkeypatch.delenv("OMBRE_MCP_REQUIRE_AUTH", raising=False)
     monkeypatch.setenv("OMBRE_ALLOW_INSECURE_MCP", "true")
-    monkeypatch.setattr(config_api, "atomic_update_config_yaml", writer)
+    monkeypatch.setattr(config_api, "run_config_transaction", _transaction_stub(writer))
     mcp = FakeMCP()
     config_api.register(mcp)
 
@@ -728,7 +736,7 @@ async def test_dashboard_reports_platform_managed_open_runtime_as_effective(
     monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
     monkeypatch.setenv("OMBRE_MCP_REQUIRE_AUTH", "false")
     monkeypatch.delenv("OMBRE_ALLOW_INSECURE_MCP", raising=False)
-    monkeypatch.setattr(config_api, "atomic_update_config_yaml", writer)
+    monkeypatch.setattr(config_api, "run_config_transaction", _transaction_stub(writer))
     monkeypatch.setattr(config_api, "read_config_yaml", lambda: copy.deepcopy(persisted))
     mcp = FakeMCP()
     config_api.register(mcp)
@@ -786,7 +794,7 @@ async def test_dashboard_does_not_promise_restart_can_override_platform_no_auth(
     monkeypatch.setenv("OMBRE_BIND_HOST", "0.0.0.0")
     monkeypatch.setenv("OMBRE_MCP_REQUIRE_AUTH", "false")
     monkeypatch.setenv("OMBRE_ALLOW_INSECURE_MCP", "true")
-    monkeypatch.setattr(config_api, "atomic_update_config_yaml", writer)
+    monkeypatch.setattr(config_api, "run_config_transaction", _transaction_stub(writer))
     mcp = FakeMCP()
     config_api.register(mcp)
 
@@ -956,8 +964,8 @@ async def test_dashboard_config_rejects_nonfinite_and_out_of_range_numbers_atomi
     monkeypatch.setattr(config_api.sh, "config", runtime)
     monkeypatch.setattr(
         config_api,
-        "atomic_update_config_yaml",
-        lambda mutate: persistence_calls.append(mutate),
+        "run_config_transaction",
+        lambda *_args, **_kwargs: persistence_calls.append(True),
     )
     mcp = FakeMCP()
     config_api.register(mcp)
@@ -984,7 +992,7 @@ async def test_dashboard_config_persists_validated_numeric_types(monkeypatch):
 
     monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
     monkeypatch.setattr(config_api.sh, "config", runtime)
-    monkeypatch.setattr(config_api, "atomic_update_config_yaml", persist)
+    monkeypatch.setattr(config_api, "run_config_transaction", _transaction_stub(persist))
     mcp = FakeMCP()
     config_api.register(mcp)
 
@@ -1076,7 +1084,12 @@ async def test_dashboard_public_mcp_address_persists_round_trips_and_clears(
         {"mcp_require_auth": True, "deployment": {"profile": "advanced"}},
     )
     monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
-    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(config_api, "_config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(
+        config_api,
+        "read_config_yaml",
+        lambda: yaml.safe_load(config_path.read_text(encoding="utf-8")),
+    )
     mcp = FakeMCP()
     config_api.register(mcp)
 
@@ -1125,7 +1138,7 @@ async def test_dashboard_public_mcp_address_rejects_non_origin_without_mutation(
     config_path.write_text(yaml.safe_dump(original), encoding="utf-8")
     monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
     monkeypatch.setattr(config_api.sh, "config", dict(original))
-    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(config_api, "_config_file_path", lambda: str(config_path))
     mcp = FakeMCP()
     config_api.register(mcp)
 
@@ -1152,8 +1165,8 @@ async def test_dashboard_public_mcp_address_write_failure_is_not_published_to_ru
     monkeypatch.setattr(config_api.sh, "config", runtime)
     monkeypatch.setattr(
         config_api,
-        "atomic_update_config_yaml",
-        lambda _mutate: (_ for _ in ()).throw(OSError("read-only mount")),
+        "run_config_transaction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only mount")),
     )
     mcp = FakeMCP()
     config_api.register(mcp)
@@ -1201,8 +1214,8 @@ async def test_sampling_settings_reject_invalid_numeric_values_without_mutation(
     monkeypatch.setattr(buckets_web.sh, "config", runtime)
     monkeypatch.setattr(
         buckets_web,
-        "atomic_update_config_yaml",
-        lambda mutate: persist_calls.append(mutate),
+        "run_config_transaction",
+        lambda *_args, **_kwargs: persist_calls.append(True),
     )
     mcp = FakeMCP()
     buckets_web.register(mcp)
@@ -1235,8 +1248,8 @@ async def test_sampling_settings_write_failure_keeps_runtime_unchanged(monkeypat
     monkeypatch.setattr(buckets_web.sh, "config", runtime)
     monkeypatch.setattr(
         buckets_web,
-        "atomic_update_config_yaml",
-        lambda _mutate: (_ for _ in ()).throw(OSError("read-only config")),
+        "run_config_transaction",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(OSError("read-only config")),
     )
     mcp = FakeMCP()
     buckets_web.register(mcp)
@@ -1275,7 +1288,7 @@ async def test_sampling_settings_persist_before_atomic_runtime_publish(monkeypat
 
     monkeypatch.setattr(buckets_web.sh, "_require_auth", lambda _request: None)
     monkeypatch.setattr(buckets_web.sh, "config", runtime)
-    monkeypatch.setattr(buckets_web, "atomic_update_config_yaml", persist)
+    monkeypatch.setattr(buckets_web, "run_config_transaction", _transaction_stub(persist))
     mcp = FakeMCP()
     buckets_web.register(mcp)
 
@@ -1334,7 +1347,7 @@ def test_sampling_settings_serialize_commit_and_merge_across_event_loops(
 
     monkeypatch.setattr(buckets_web.sh, "_require_auth", lambda _request: None)
     monkeypatch.setattr(buckets_web.sh, "config", runtime)
-    monkeypatch.setattr(buckets_web, "atomic_update_config_yaml", persist)
+    monkeypatch.setattr(buckets_web, "run_config_transaction", _transaction_stub(persist))
     mcp = FakeMCP()
     buckets_web.register(mcp)
     handler = mcp.routes[("POST", "/api/settings/sampling")]
@@ -1409,7 +1422,7 @@ async def test_timezone_persists_and_is_hot_applied(monkeypatch, tmp_path):
     monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
     monkeypatch.setattr(config_api.sh, "config", runtime)
     monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
-    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(config_api, "_config_file_path", lambda: str(config_path))
     mcp = FakeMCP()
     config_api.register(mcp)
 
@@ -1436,7 +1449,7 @@ async def test_invalid_timezone_is_rejected_instead_of_silently_falling_back(
     monkeypatch.setattr(config_api.sh, "_require_auth", lambda _request: None)
     monkeypatch.setattr(config_api.sh, "config", {"transport": "streamable-http"})
     monkeypatch.setattr(config_api.sh, "in_docker", lambda: False)
-    monkeypatch.setattr(utils, "config_file_path", lambda: str(config_path))
+    monkeypatch.setattr(config_api, "_config_file_path", lambda: str(config_path))
     mcp = FakeMCP()
     config_api.register(mcp)
 

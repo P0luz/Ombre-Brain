@@ -40,20 +40,20 @@ async def test_default_breath_hides_all_digested_surface_classes(
     decay_eng,
     monkeypatch,
 ):
-    visible_id = await bucket_mgr.create(
+    visible_id = await bucket_mgr.create_internal(
         content="Visible undigested control memory.",
         importance=9,
     )
-    ordinary_id = await bucket_mgr.create(
+    ordinary_id = await bucket_mgr.create_internal(
         content="Digested ordinary memory must stay hidden.",
         importance=10,
     )
     # 3.2.0 起：核心准则不可被消化。这条从"必须隐藏"翻成"必须在场"。
-    pinned_id = await bucket_mgr.create(
+    pinned_id = await bucket_mgr.create_internal(
         content="Digested pinned memory must stay visible.",
         pinned=True,
     )
-    resolved_id = await bucket_mgr.create(
+    resolved_id = await bucket_mgr.create_internal(
         content="Digested resolved memory must not return through encounter.",
         importance=10,
     )
@@ -98,7 +98,7 @@ async def test_explicit_query_still_returns_digested_memory(
     decay_eng,
 ):
     marker = "DIGESTED-EXPLICIT-QUERY-7F91"
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content=f"{marker} remains explicitly searchable.",
         importance=8,
     )
@@ -236,7 +236,7 @@ async def test_explicit_importance_audit_and_catalog_keep_digested_discoverable(
     bucket_mgr,
     decay_eng,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Digested audit body remains explicitly inspectable.",
         name="Digested audit marker",
         importance=9,

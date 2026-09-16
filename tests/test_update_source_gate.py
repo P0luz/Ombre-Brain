@@ -73,7 +73,7 @@ def test_hot_update_downgrade_guard(current, target, expected):
 
 
 def test_hot_update_defaults_to_same_main_branch_as_version_check():
-    source = open(meta.__file__, encoding="utf-8").read()
+    source = Path(meta.__file__).read_text(encoding="utf-8")
     assert '_ucfg.get("channel") or "branch"' in source
 
 

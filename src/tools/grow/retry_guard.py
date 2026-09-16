@@ -17,6 +17,7 @@ import hashlib
 import json
 import time
 import weakref
+from runtime_owner import spawn_background
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 
@@ -119,7 +120,8 @@ async def run_once(
                 state.completed[fingerprint] = (time.monotonic(), result)
             return result
 
-        task = asyncio.create_task(execute(), name=f"grow:{fingerprint[:12]}")
+        task = spawn_background(execute())
+        task.set_name(f"grow:{fingerprint[:12]}")
         task.add_done_callback(_consume_background_exception)
         state.inflight[fingerprint] = task
 

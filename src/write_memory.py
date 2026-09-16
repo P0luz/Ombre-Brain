@@ -23,13 +23,18 @@ write_memory.py — 手动写入记忆的命令行小工具
 """
 
 import os
+import tempfile
 import uuid
 import argparse
 import math
 
 import frontmatter
 
-from utils import atomic_write_text, load_config, now_iso
+from ombrebrain.eventsourcing.footprint import cli_origin
+from runtime_owner import admitted_sync
+from snapshot_barrier import markdown_writer_turn_sync
+from tools import _identity
+from utils import load_config, now_iso
 
 
 _DEFAULT_MAX_BUCKET_BYTES = 50 * 1024
@@ -64,6 +69,27 @@ VAULT_DIR = _resolve_dynamic_dir()
 
 def gen_id():
     return uuid.uuid4().hex[:12]
+
+
+def _atomic_create_text(path: str, text: str) -> None:
+    """Publish a new CLI bucket without replacing an existing file."""
+    directory = os.path.dirname(path) or "."
+    descriptor, temporary = tempfile.mkstemp(
+        dir=directory, prefix=".write-memory-", suffix=".tmp"
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.link(temporary, path)
+        os.remove(temporary)
+    except BaseException:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+        raise
 
 
 def _max_bucket_bytes() -> int:
@@ -103,6 +129,7 @@ def write_memory(
     content: str,
     domain: list[str],
     tags: list[str],
+    owner: str,
     importance: int = 7,
     valence: float = 0.5,
     arousal: float = 0.3,
@@ -119,6 +146,13 @@ def write_memory(
         raise ValueError(
             f"content exceeds max_bucket_bytes ({size} > {cap})"
         )
+
+    target_owner = str(owner or "").strip().lower().replace("-", "_")
+    if target_owner == "human" or target_owner not in _identity.known_owner_values():
+        raise ValueError("CLI creation requires one explicit validated target owner")
+    tags = _identity.ensure_write_owner(tags, caller=target_owner)
+    if _identity.strict_owner_of({"tags": tags}) != target_owner:
+        raise ValueError("CLI owner tag must exactly match --owner")
 
     mid = gen_id()
     now = now_iso()
@@ -138,10 +172,15 @@ def write_memory(
         "tags": _bounded_strings(tags),
         "type": "dynamic",
         "valence": _finite_unit(valence, 0.5),
+        "footprint_origin": cli_origin(),
     }
     post = frontmatter.Post(content, **metadata)
     path = os.path.join(VAULT_DIR, f"{mid}.md")
-    atomic_write_text(path, frontmatter.dumps(post))
+    vault_root = os.path.dirname(VAULT_DIR)
+    with admitted_sync():
+        with markdown_writer_turn_sync(vault_root):
+            os.makedirs(VAULT_DIR, exist_ok=True)
+            _atomic_create_text(path, frontmatter.dumps(post))
 
     print(f"✓ 已写入: {path}")
     print(f"  ID: {mid} | 名称: {name}")
@@ -154,10 +193,11 @@ def interactive():
     content = input("内容: ").strip()
     domain = [d.strip() for d in input("主题域(逗号分隔): ").split(",") if d.strip()]
     tags = [t.strip() for t in input("标签(逗号分隔): ").split(",") if t.strip()]
+    owner = input("目标 owner（必填）: ").strip()
     importance = int(input("重要性(1-10, 默认7): ").strip() or "7")
     valence = float(input("效价(0-1, 默认0.5): ").strip() or "0.5")
     arousal = float(input("唤醒(0-1, 默认0.3): ").strip() or "0.3")
-    write_memory(name, content, domain, tags, importance, valence, arousal)
+    write_memory(name, content, domain, tags, owner, importance, valence, arousal)
 
 
 if __name__ == "__main__":
@@ -166,17 +206,19 @@ if __name__ == "__main__":
     parser.add_argument("--content", help="记忆内容")
     parser.add_argument("--domain", help="主题域,逗号分隔")
     parser.add_argument("--tags", help="标签,逗号分隔")
+    parser.add_argument("--owner", required=False, help="目标 owner（必填）")
     parser.add_argument("--importance", type=int, default=7)
     parser.add_argument("--valence", type=float, default=0.5)
     parser.add_argument("--arousal", type=float, default=0.3)
     args = parser.parse_args()
 
-    if args.name and args.content and args.domain:
+    if args.name and args.content and args.domain and args.owner:
         write_memory(
             name=args.name,
             content=args.content,
             domain=[d.strip() for d in args.domain.split(",")],
             tags=[t.strip() for t in (args.tags or "").split(",") if t.strip()],
+            owner=args.owner,
             importance=args.importance,
             valence=args.valence,
             arousal=args.arousal,

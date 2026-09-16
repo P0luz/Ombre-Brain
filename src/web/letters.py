@@ -16,6 +16,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from . import _shared as sh
+from ombrebrain.eventsourcing.footprint import dashboard_letter_origin
 from tools._common import check_content_size, check_metadata_size
 from tools.plan.core import (
     author_side,
@@ -203,6 +204,7 @@ def register(mcp) -> None:
                 unlock_date=unlock_date,
                 locked_by="human",
                 writer_name=writer_name or "",
+                footprint_origin=dashboard_letter_origin(),
             )
             await sh.bucket_mgr.update(bid, **extra)
             created = await sh.bucket_mgr.get(bid)

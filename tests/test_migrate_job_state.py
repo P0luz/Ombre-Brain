@@ -256,8 +256,19 @@ async def test_apply_route_returns_one_202_and_one_409_before_background_runs(
             self.reservations += 1
             return "reservation-1"
 
-        async def apply(self, _decisions, *, reservation_id):
+        async def apply(
+            self,
+            _decisions,
+            *,
+            reservation_id,
+            job_owner,
+            assigned_owners,
+            footprint_origin,
+        ):
             assert reservation_id == "reservation-1"
+            assert job_owner
+            assert assigned_owners == {}
+            assert footprint_origin["via"] == "import"
             self.applied += 1
             await release.wait()
             self.phase = "done"
@@ -344,8 +355,8 @@ async def test_apply_route_schedule_failure_abandons_reservation(monkeypatch):
     monkeypatch.setattr(import_web.sh, "_read_json_object", read_json)
     monkeypatch.setattr(import_web.sh, "migrate_engine", engine, raising=False)
     monkeypatch.setattr(
-        import_web.asyncio,
-        "create_task",
+        import_web,
+        "spawn_background",
         lambda _coro: (_ for _ in ()).throw(RuntimeError("scheduler down")),
     )
     mcp = _MCP()
@@ -355,7 +366,7 @@ async def test_apply_route_schedule_failure_abandons_reservation(monkeypatch):
         _Request({"job_id": "current-job", "decisions": {}})
     )
 
-    assert response.status_code == 503
+    assert response.status_code == 500
     assert engine.phase == "error"
     assert engine.abandoned == [
         ("apply-reservation", "task scheduling failed: scheduler down")

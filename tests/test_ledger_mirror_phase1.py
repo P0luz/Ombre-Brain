@@ -43,7 +43,7 @@ async def test_bucket_manager_create_appends_trace_created_event(test_config, fa
 
     manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
 
-    bucket_id = await manager.create(
+    bucket_id = await manager.create_internal(
         "memory body should not be copied into the ledger",
         tags=["ledger"],
         domain=["测试"],
@@ -67,8 +67,8 @@ async def test_bucket_manager_update_delete_and_archive_append_lifecycle_events(
     from bucket_manager import BucketManager
 
     manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
-    updated_id = await manager.create("one", domain=["测试"])
-    archived_id = await manager.create("two", domain=["测试"])
+    updated_id = await manager.create_internal("one", domain=["测试"])
+    archived_id = await manager.create_internal("two", domain=["测试"])
 
     assert await manager.update(updated_id, resolved=True)
     assert await manager.delete(updated_id)
@@ -94,7 +94,7 @@ async def test_bucket_manager_touch_appends_trace_touched_event(test_config, fak
     from bucket_manager import BucketManager
 
     manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
-    bucket_id = await manager.create("touch me", domain=["测试"])
+    bucket_id = await manager.create_internal("touch me", domain=["测试"])
 
     await manager.touch(bucket_id)
 
@@ -113,7 +113,7 @@ async def test_bucket_manager_exposes_read_only_ledger_integrity_report(
     from bucket_manager import BucketManager
 
     manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
-    await manager.create("diagnose me", domain=["测试"])
+    await manager.create_internal("diagnose me", domain=["测试"])
 
     report = manager.ledger_integrity_report()
 

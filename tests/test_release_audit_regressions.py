@@ -13,6 +13,7 @@ from dehydrator import Dehydrator
 from embedding_engine import EmbeddingEngine
 from import_memory import ImportEngine
 from tools import _common as common
+from tools import _identity
 from tools import _runtime as tools_runtime
 from tools.dream.candidates import collect_candidates
 from utils import load_config, parse_bool
@@ -103,7 +104,7 @@ async def test_bucket_update_normalizes_string_false(tmp_path):
     manager = BucketManager(
         {"buckets_dir": str(tmp_path / "vault")}, embedding_engine=engine
     )
-    bucket_id = await manager.create(content="状态边界测试")
+    bucket_id = await manager.create_internal(content="状态边界测试")
 
     assert await manager.update(bucket_id, pinned=True)
     assert await manager.update(
@@ -139,7 +140,9 @@ async def test_merge_updates_embedding_exactly_once(tmp_path, monkeypatch):
     )
     old_content = "旧记忆"
     new_content = "新记忆"
-    bucket_id = await manager.create(content=old_content)
+    bucket_id = await manager.create_internal(
+        content=old_content, tags=["owner:cheng"]
+    )
 
     async def fake_search(*_args, **_kwargs):
         bucket = await manager.get(bucket_id)
@@ -161,16 +164,17 @@ async def test_merge_updates_embedding_exactly_once(tmp_path, monkeypatch):
     monkeypatch.setattr(tools_runtime, "config", {"merge_threshold": 75})
     monkeypatch.setattr(tools_runtime, "logger", _Logger())
 
-    result_id, merged, _warning = await common.merge_or_create(
-        content=new_content,
-        tags=[],
-        importance=5,
-        domain=["测试"],
-        valence=0.5,
-        arousal=0.3,
-        raw_merge=True,
-        source_tool="hold",
-    )
+    with _identity.caller_context("cheng"):
+        result_id, merged, _warning = await common.merge_or_create(
+            content=new_content,
+            tags=["owner:cheng"],
+            importance=5,
+            domain=["测试"],
+            valence=0.5,
+            arousal=0.3,
+            raw_merge=True,
+            source_tool="hold",
+        )
 
     assert merged is True
     assert result_id == bucket_id
@@ -320,7 +324,6 @@ async def test_mcp_token_regeneration_publishes_only_after_persist(monkeypatch):
 
 def test_embedding_is_owned_by_bucket_manager_on_normal_write_paths():
     paths = (
-        "src/tools/_common.py",
         "src/import_memory.py",
         "src/web/plans.py",
         "src/web/import_api.py",
@@ -329,6 +332,12 @@ def test_embedding_is_owned_by_bucket_manager_on_normal_write_paths():
     for rel in paths:
         source = (ROOT / rel).read_text(encoding="utf-8")
         assert "generate_and_store(" not in source, rel
+
+    common_source = (ROOT / "src/tools/_common.py").read_text(encoding="utf-8")
+    assert common_source.count("generate_and_store(") == 1
+    assert common_source.index("sync_embedding_after_commit") < common_source.index(
+        "generate_and_store("
+    )
 
 
 def test_dashboard_source_uses_real_host_mount_contract():

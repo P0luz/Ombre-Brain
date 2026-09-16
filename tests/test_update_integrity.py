@@ -132,7 +132,8 @@ def test_duplicate_candidate_path_aborts():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr(_TOP + "src/server.py", b"first")
-        zf.writestr(_TOP + "src/server.py", b"second")
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            zf.writestr(_TOP + "src/server.py", b"second")
     buf.seek(0)
 
     with zipfile.ZipFile(buf) as zf:
@@ -168,7 +169,8 @@ def test_bounded_zip_member_rejects_duplicate_root_file():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr(_TOP + "VERSION", b"1")
-        zf.writestr(_TOP + "VERSION", b"2")
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            zf.writestr(_TOP + "VERSION", b"2")
     buf.seek(0)
 
     with zipfile.ZipFile(buf) as zf, pytest.raises(ValueError, match="重复路径"):

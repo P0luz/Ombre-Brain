@@ -53,6 +53,7 @@ try:
         positive_float as _positive_float,
         parse_bool as _parse_bool,
         atomic_update_config_yaml,
+        config_file_path as _config_file_path,
         read_config_yaml,
     )
 except ImportError:  # pragma: no cover
@@ -64,8 +65,14 @@ except ImportError:  # pragma: no cover
         positive_float as _positive_float,
         parse_bool as _parse_bool,
         atomic_update_config_yaml,
+        config_file_path as _config_file_path,
         read_config_yaml,
     )
+
+try:
+    from config_transaction import run_config_transaction  # type: ignore
+except ImportError:  # pragma: no cover
+    from ..config_transaction import run_config_transaction  # type: ignore
 
 logger = sh.logger
 _MAX_PROVIDER_KEY_CHARS = 8192
@@ -844,7 +851,9 @@ def register(mcp) -> None:
                         sc_deployment.pop("public_url", None)
 
             try:
-                persisted_after = atomic_update_config_yaml(_mutate)
+                persisted_after = run_config_transaction(
+                    _config_file_path(), _mutate
+                ).persisted
                 updated.append("persisted_to_yaml")
                 if mcp_auth_value is not None:
                     updated.append("mcp_require_auth")
@@ -854,7 +863,7 @@ def register(mcp) -> None:
                     updated.append("deployment.public_url")
             except ValueError as e:
                 _rollback_hot_runtime()
-                return JSONResponse({"error": str(e), "updated": []}, status_code=400)
+                return JSONResponse({"ok": False, "error": str(e), "updated": []}, status_code=400)
             except Exception as e:
                 _rollback_hot_runtime()
                 logger.error(
@@ -862,7 +871,7 @@ def register(mcp) -> None:
                     type(e).__name__,
                 )
                 return JSONResponse(
-                    {"error": "persist failed", "updated": []},
+                    {"ok": False, "error": "persist failed", "updated": []},
                     status_code=500,
                 )
 
@@ -1283,7 +1292,43 @@ def register(mcp) -> None:
                 warnings.append(f"{var}: 只允许 http:// 或 https:// 开头的 URL，未应用")
                 continue
 
+            if var in {
+                "OMBRE_EMBED_BASE_URL",
+                "OMBRE_EMBED_MODEL",
+                "OMBRE_EMBED_FORMAT",
+            }:
+                section, key = _ENV_CONFIG_FIELDS[var]["in_memory"]
+                current = str(sh.config.get(section, {}).get(key, "") or "").strip()
+                if value != current:
+                    return JSONResponse(
+                        {
+                            "ok": False,
+                            "error": (
+                                f"{var}: 现有向量库身份变更必须使用 "
+                                "/api/embedding/migrate"
+                            ),
+                            "updated": [],
+                        },
+                        status_code=400,
+                    )
+
             accepted[var] = value
+
+        yaml_vars = [
+            var for var in accepted if _ENV_CONFIG_FIELDS[var]["in_memory"]
+        ]
+        env_vars = [
+            var for var in accepted if not _ENV_CONFIG_FIELDS[var]["in_memory"]
+        ]
+        if yaml_vars and env_vars:
+            return JSONResponse(
+                {
+                    "ok": False,
+                    "error": "config.yaml 字段与纯 .env 字段必须分两次提交",
+                    "updated": [],
+                },
+                status_code=400,
+            )
 
         # Compress 必须按整批最终配置只重建一次 client。逐字段重建会让请求中的
         # key/base_url/model 顺序影响中间状态，也会在落盘失败时留下旧 client。

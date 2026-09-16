@@ -38,6 +38,7 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
+from tools import _identity
 from utils import clean_llm_json, count_tokens_approx, parse_bool, positive_float
 
 from ombrebrain.integrations.provider_detect import (
@@ -71,6 +72,7 @@ _DEFAULT_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/openai/"
 _DEFAULT_MAX_TOKENS = 1024
 _DEFAULT_TEMPERATURE = 0.1
 _API_TIMEOUT_SECONDS = 60.0
+_DEHYDRATE_EXTRA_BODY = {"thinking": {"type": "disabled"}}
 
 # --- 瞬时错误重试（Gemini 免费层偶发 429 / 503，详见 README 故障表）---
 # 总尝试 = 1 次初始 + (max_attempts-1) 次重试；退避 base*2^attempt 秒。
@@ -147,14 +149,21 @@ def chat_completion_token_limit(model: str, limit: int) -> dict[str, int]:
 # 视角丢失。压缩本应保密度、不应改人称。下面这条规则注入 system prompt 强制保留：
 #   AI 一方恒用「我」；人类一方一律用其名字称呼（由 config.human 注入）。
 # 禁止 双方 / 对方 / 用户 / TA 等抹掉视角的中性第三人称。
-def _perspective_rule(human: str) -> str:
+def _perspective_rule(human: str, owner: str = "") -> str:
+    owner_rule = ""
+    if owner:
+        owner_rule = (
+            f"\n- 当前记忆的唯一 owner 是「{owner}」；只有 owner 对应的 AI 可以称为「我」。"
+            "其他 AI 即使出现在原文里，也必须保留其名字，绝不能改写成「我」。"
+        )
     return (
         "\n\n【视角铁律——最高优先级，违反即视为压缩失败】\n"
         "以下内容是「我」（AI）以第一人称写下的记忆。压缩/合并只改密度，绝不改人称：\n"
         f"- AI 自身永远用「我」，不要换成「AI」「助手」「TA」。\n"
         f"- 人类那一方一律称呼「{human}」（原文里的「你/她/他」都指「{human}」，按名字还原）。\n"
         "- 严禁把「我」和「" + human + "」合并成「双方」「彼此」「对方」「用户」等抹掉视角的中性词。\n"
-        "- 谁做的动作、谁的感受，就归到谁名下，不得混同或对调。\n"
+        "- 谁做的动作、谁的感受，就归到谁名下，不得混同或对调。"
+        + owner_rule + "\n"
         f"- 反方向同罪：严禁把「{human}」的动作/情绪归给「我」。\n"
         "- 原文省略主语时，先从紧邻上下文判断归属；判断不了就照抄原句结构、"
         "保持主语省略——禁止靠猜补一个「我」。\n"
@@ -446,39 +455,58 @@ class Dehydrator:
             raise
         return conn
 
-    def _content_key(self, content: str) -> str:
+    @staticmethod
+    def _perspective_owner(metadata: Optional[dict]) -> str:
+        """Return the one AI owner that may use first person for this memory."""
+        if not metadata:
+            return ""
+        explicit = str(metadata.get("owner") or "").strip().lower().replace("-", "_")
+        tagged = _identity.strict_owner_of(metadata, allow_untagged=True)
+        if explicit and tagged and explicit != tagged:
+            raise ValueError(
+                f"metadata owner mismatch: owner:{explicit} != owner:{tagged}"
+            )
+        owner = explicit or tagged
+        if owner and owner not in _identity.known_owner_values():
+            raise ValueError(f"unknown owner value: {owner}")
+        return owner if owner in _identity.known_callers() else ""
+
+    def _content_key(self, content: str, owner: str = "") -> str:
         """缓存键 = hash(prompt 版本 + 人名 + 模型配置 + 原文)。
 
         缓存原本只按 content_hash 存，导致脱水 prompt 改了、人名改了，旧的
         third-person 摘要仍会命中缓存返回——视角修复对存量内容不生效。把
         prompt 版本、人名、api_format、base_url 和 model 混进 key，换模型或端点后
         下次 breath 会用新配置重新脱水，不会复用旧模型的摘要。"""
+        api_format = getattr(self, "api_format", "")
+        base_url = str(getattr(self, "base_url", ""))
+        model = getattr(self, "model", "")
         keyed = (
-            f"{_PROMPT_VERSION}|{self.human}|{self.api_format}|"
-            f"{self.base_url.rstrip('/')}|{self.model}|{content}"
+            f"{_PROMPT_VERSION}|{self.human}|{api_format}|"
+            f"{base_url.rstrip('/')}|{model}|{owner}|{content}"
         )
         return hashlib.sha256(keyed.encode()).hexdigest()
 
-    def _get_cached_summary(self, content: str) -> str | None:
+    def _get_cached_summary(self, content: str, owner: str = "") -> str | None:
         """Look up cached dehydration result by content hash."""
         row = self._cache_conn.execute(
             "SELECT summary FROM dehydration_cache WHERE content_hash = ?",
-            (self._content_key(content),)
+            (self._content_key(content, owner),)
         ).fetchone()
         return row[0] if row else None
 
-    def _set_cached_summary(self, content: str, summary: str):
+    def _set_cached_summary(self, content: str, summary: str, owner: str = ""):
         """Store dehydration result in cache."""
         self._cache_conn.execute(
             "INSERT OR REPLACE INTO dehydration_cache (content_hash, summary, model) VALUES (?, ?, ?)",
-            (self._content_key(content), summary, self.model)
+            (self._content_key(content, owner), summary, self.model)
         )
         self._cache_conn.commit()
 
-    def invalidate_cache(self, content: str):
+    def invalidate_cache(self, content: str, owner: str = ""):
         """Remove cached summary for specific content (call when bucket content changes)."""
         self._cache_conn.execute(
-            "DELETE FROM dehydration_cache WHERE content_hash = ?", (self._content_key(content),)
+            "DELETE FROM dehydration_cache WHERE content_hash = ?", (self._content_key(content, owner),)
         )
         self._cache_conn.commit()
 
@@ -518,6 +546,7 @@ class Dehydrator:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        extra_body: dict | None = None,
     ) -> str:
         """统一 chat 入口：对 429 / 5xx / 超时等瞬时错误做指数退避重试。
 
@@ -527,7 +556,11 @@ class Dehydrator:
         for attempt in range(_RETRY_MAX_ATTEMPTS):
             try:
                 return await self._chat_once(
-                    system, user, max_tokens=max_tokens, temperature=temperature
+                    system,
+                    user,
+                    max_tokens=max_tokens,
+                    temperature=temperature,
+                    extra_body=extra_body,
                 )
             except Exception as e:
                 if not self._is_transient_error(e) or attempt == _RETRY_MAX_ATTEMPTS - 1:
@@ -550,6 +583,7 @@ class Dehydrator:
         *,
         max_tokens: int | None = None,
         temperature: float | None = None,
+        extra_body: dict | None = None,
     ) -> str:
         """统一的 OpenAI-compatible chat 调用。
 
@@ -577,6 +611,10 @@ class Dehydrator:
         # openai_compat (default)
         if self.client is None:
             return ""
+        configured_extra = getattr(self, "extra_body", {})
+        effective_extra = dict(configured_extra) if isinstance(configured_extra, dict) else {}
+        if extra_body:
+            effective_extra.update(extra_body)
         response = await self.client.chat.completions.create(
             model=self.model,
             messages=[
@@ -584,7 +622,7 @@ class Dehydrator:
                 {"role": "user", "content": user},
             ],
             temperature=temperature if temperature is not None else self.temperature,
-            extra_body=self.extra_body or None,
+            extra_body=effective_extra or None,
             **chat_completion_token_limit(
                 self.model,
                 max_tokens if max_tokens is not None else self.max_tokens,
@@ -765,18 +803,19 @@ class Dehydrator:
 
         # --- Check cache first ---
         # --- 先查缓存 ---
-        cached = self._get_cached_summary(content)
+        owner = self._perspective_owner(metadata)
+        cached = self._get_cached_summary(content, owner)
         if cached:
             try:
                 normalized = self._normalize_dehydration_result(cached)
             except ValueError:
                 # A malformed cache entry must never be surfaced as memory content.
-                self.invalidate_cache(content)
+                self.invalidate_cache(content, owner)
                 logger.warning("discarded invalid dehydration cache entry")
             else:
                 # Self-heal parseable entries such as `JSON + trailing commentary`.
                 if normalized != cached:
-                    self._set_cached_summary(content, normalized)
+                    self._set_cached_summary(content, normalized, owner)
                 return self._format_output(normalized, metadata)
 
         # --- API dehydration (no local fallback) ---
@@ -784,7 +823,12 @@ class Dehydrator:
         self._require_api()
 
         try:
-            raw_result = await self._api_dehydrate(content)
+            if owner:
+                raw_result = await self._api_dehydrate(content, owner=owner)
+            else:
+                # Preserve compatibility with existing adapters/tests that replace
+                # the legacy single-argument method.
+                raw_result = await self._api_dehydrate(content)
             result = self._normalize_dehydration_result(raw_result)
         except Exception as e:
             # --- 本地降级：API（已含重试）彻底失败时，返回原文截断片段而非抛异常。---
@@ -800,7 +844,7 @@ class Dehydrator:
                 snippet += "…（原文截断·脱水暂不可用）"
             return self._format_output(snippet, metadata)
         # --- Cache the result ---
-        self._set_cached_summary(content, result)
+        self._set_cached_summary(content, result, owner)
         return self._format_output(result, metadata)
 
     # ---------------------------------------------------------
@@ -835,14 +879,15 @@ class Dehydrator:
     # API call: dehydration
     # API 调用：脱水压缩
     # ---------------------------------------------------------
-    async def _api_dehydrate(self, content: str) -> str:
+    async def _api_dehydrate(self, content: str, *, owner: str = "") -> str:
         """
         Call LLM API for intelligent dehydration (via OpenAI-compatible client).
         调用 LLM API 执行智能脱水。
         """
         return await self._chat(
-            DEHYDRATE_PROMPT + _perspective_rule(self.human),
+            DEHYDRATE_PROMPT + _perspective_rule(self.human, owner),
             content[:_DEHYDRATE_INPUT_LIMIT],
+            extra_body=_DEHYDRATE_EXTRA_BODY,
         )
 
     # ---------------------------------------------------------

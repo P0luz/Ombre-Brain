@@ -74,7 +74,11 @@ async def test_plan正文超限是错误且不建桶(工具):
 async def test_trace元数据超限是错误且不改桶(工具):
     """原表现：返回「元数据过大（97.7 KB > 上限 16 KB）」，isError=False。"""
     取, 管理器 = 工具
-    编号 = await 管理器.create(content="给 trace 用的靶子。", title="靶子")
+    编号 = await 管理器.create_internal(
+        content="给 trace 用的靶子。",
+        title="靶子",
+        tags=["owner:cheng"],
+    )
     with pytest.raises(ToolError, match="元数据过大"):
         await 取("trace").run({"bucket_id": 编号, "meaning_append": "长" * 100_000})
     桶 = await 管理器.get(编号)
@@ -155,6 +159,10 @@ async def test_正常调用不受影响(工具):
 async def test_已经是anchor仍算成功(工具):
     """反面：幂等不是失败。你要的状态已经达成了。"""
     取, 管理器 = 工具
-    编号 = await 管理器.create(content="要被锚住的记忆。", title="锚")
+    编号 = await 管理器.create_internal(
+        content="要被锚住的记忆。",
+        title="锚",
+        tags=["owner:cheng"],
+    )
     await 取("anchor").run({"bucket_id": 编号})
     await 取("anchor").run({"bucket_id": 编号})  # 第二次：不抛

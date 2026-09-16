@@ -10,6 +10,7 @@ from types import SimpleNamespace
 import httpx
 import pytest
 from starlette.applications import Starlette
+from tools import _identity
 
 from server_app import (
     DEFAULT_MAX_MANAGEMENT_REQUEST_BYTES,
@@ -33,6 +34,7 @@ EXPECTED_PUBLIC_MCP_TOOLS = (
     "hold",
     "grow",
     "trace",
+    "just_now",
     "dream",
     "anchor",
     "release",
@@ -918,6 +920,121 @@ async def test_auth_middleware_validates_token_against_exact_resource():
 
     assert seen == {"token": "token-1", "resource": "https://ombre.example/mcp"}
     assert downstream.scopes == [scope]
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_binds_oauth_caller_only_for_request():
+    seen = []
+
+    class CallerRecordingApp:
+        async def __call__(self, scope, receive, send):
+            seen.append((_identity.get_caller(), _identity.get_transport()))
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+    middleware = MCPAuthMiddleware(
+        CallerRecordingApp(),
+        auth_required=True,
+        token_validator=lambda token, **_kwargs: token == "oauth-token",
+        caller_resolver=lambda token, **_kwargs: "cheng" if token == "oauth-token" else "",
+    )
+    scope = {
+        "type": "http",
+        "scheme": "https",
+        "path": "/mcp",
+        "headers": [
+            (b"host", b"ombre.example"),
+            (b"authorization", b"Bearer oauth-token"),
+            (b"x-ombre-caller", b"huaiyin"),
+        ],
+    }
+
+    assert _identity.get_caller() == ""
+    assert _identity.get_transport() == "local"
+    await middleware(scope, _empty_receive, _discard_send)
+
+    assert seen == [("cheng", "http")]
+    assert _identity.get_caller() == ""
+    assert _identity.get_transport() == "local"
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_does_not_bind_identity_for_static_token():
+    seen = []
+
+    class CallerRecordingApp:
+        async def __call__(self, scope, receive, send):
+            seen.append((_identity.get_caller(), _identity.get_transport()))
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+    middleware = MCPAuthMiddleware(
+        CallerRecordingApp(),
+        auth_required=True,
+        auth_mode="hybrid",
+        token_validator=lambda *_args, **_kwargs: False,
+        static_token_validator=lambda token, **_kwargs: token == "static-token",
+        caller_resolver=lambda *_args, **_kwargs: pytest.fail(
+            "static credentials must not resolve an OAuth caller"
+        ),
+    )
+    scope = {
+        "type": "http",
+        "scheme": "https",
+        "path": "/mcp",
+        "headers": [
+            (b"host", b"ombre.example"),
+            (b"authorization", b"Bearer static-token"),
+            (b"x-ombre-caller", b"cheng"),
+        ],
+    }
+
+    await middleware(scope, _empty_receive, _discard_send)
+
+    assert seen == [("", "http")]
+    assert _identity.get_transport() == "local"
+
+
+@pytest.mark.asyncio
+async def test_auth_middleware_isolates_concurrent_oauth_callers():
+    seen = {}
+
+    class YieldingCallerApp:
+        async def __call__(self, scope, receive, send):
+            request_id = scope["request_id"]
+            before = _identity.get_caller()
+            await asyncio.sleep(0)
+            seen[request_id] = (before, _identity.get_caller())
+            await send({"type": "http.response.start", "status": 204, "headers": []})
+            await send({"type": "http.response.body", "body": b""})
+
+    callers = {"token-cheng": "cheng", "token-huaiyin": "huaiyin"}
+    middleware = MCPAuthMiddleware(
+        YieldingCallerApp(),
+        auth_required=True,
+        token_validator=lambda token, **_kwargs: token in callers,
+        caller_resolver=lambda token, **_kwargs: callers[token],
+    )
+
+    def scope(request_id, token):
+        return {
+            "type": "http",
+            "scheme": "https",
+            "path": "/mcp",
+            "request_id": request_id,
+            "headers": [
+                (b"host", b"ombre.example"),
+                (b"authorization", f"Bearer {token}".encode()),
+            ],
+        }
+
+    await asyncio.gather(
+        middleware(scope("a", "token-cheng"), _empty_receive, _discard_send),
+        middleware(scope("b", "token-huaiyin"), _empty_receive, _discard_send),
+    )
+
+    assert seen == {"a": ("cheng", "cheng"), "b": ("huaiyin", "huaiyin")}
+    assert _identity.get_caller() == ""
 
 
 @pytest.mark.asyncio

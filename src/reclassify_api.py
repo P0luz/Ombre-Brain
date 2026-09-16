@@ -18,6 +18,7 @@ from typing import Any, Callable, Mapping, Protocol
 import frontmatter
 
 from dehydrator import Dehydrator
+from snapshot_barrier import markdown_writer_turn
 from utils import atomic_write_text, load_config
 
 
@@ -139,20 +140,21 @@ async def reclassify(
                 source,
                 analysis,
             )
-            if destination != source and destination.exists():
-                raise FileExistsError(
-                    f"destination already exists; source was left untouched: {destination}"
-                )
-
             for key, value in metadata.items():
                 post.metadata[key] = value
             if post.content != original_content:
                 raise RuntimeError("stored content changed before serialization")
 
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            atomic_write_text(str(destination), frontmatter.dumps(post))
-            if destination != source:
-                source.unlink()
+            async with markdown_writer_turn(dynamic_dir.parent):
+                if destination != source and destination.exists():
+                    raise FileExistsError(
+                        "destination already exists; source was left untouched: "
+                        f"{destination}"
+                    )
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                atomic_write_text(str(destination), frontmatter.dumps(post))
+                if destination != source:
+                    source.unlink()
             summary["updated"] += 1
             emit(f"OK {source.name} -> {destination.relative_to(dynamic_dir)}")
         except Exception as exc:

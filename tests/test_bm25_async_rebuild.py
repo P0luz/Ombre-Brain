@@ -12,7 +12,7 @@ import pytest
 async def test_rebuild_swaps_and_clears_dirty(bucket_mgr):
     if bucket_mgr._bm25 is None:
         pytest.skip("BM25 软依赖未安装（rank_bm25/jieba）")
-    await bucket_mgr.create(content="关于向量检索和关键词匹配的记忆", name="检索", domain=["技术"])
+    await bucket_mgr.create_internal(content="关于向量检索和关键词匹配的记忆", name="检索", domain=["技术"])
     old = bucket_mgr._bm25
     bucket_mgr._bm25_dirty = True
     snapshot = await bucket_mgr.list_all()
@@ -38,7 +38,7 @@ async def test_search_does_not_block_on_dirty_bm25(bucket_mgr):
     if bucket_mgr._bm25 is None:
         pytest.skip("BM25 软依赖未安装")
     for i in range(5):
-        await bucket_mgr.create(content=f"第{i}条关于检索性能的记忆内容", name=f"桶{i}", domain=["技术"])
+        await bucket_mgr.create_internal(content=f"第{i}条关于检索性能的记忆内容", name=f"桶{i}", domain=["技术"])
     # create 已经把 dirty 置真。一次 search 应立即返回（不同步重建），并调度后台重建。
     bucket_mgr._bm25_dirty = True
     res = await bucket_mgr.search("检索性能")
@@ -55,7 +55,7 @@ async def test_search_does_not_block_on_dirty_bm25(bucket_mgr):
 async def test_only_one_rebuild_launches(bucket_mgr, monkeypatch):
     if bucket_mgr._bm25 is None:
         pytest.skip("BM25 软依赖未安装")
-    await bucket_mgr.create(content="内容内容内容内容内容", name="一", domain=["技术"])
+    await bucket_mgr.create_internal(content="内容内容内容内容内容", name="一", domain=["技术"])
     launches = {"n": 0}
     real = bucket_mgr._build_bm25_index
 

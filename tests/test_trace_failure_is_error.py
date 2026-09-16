@@ -26,6 +26,11 @@ import pytest_asyncio
 from errors import ToolInputError
 
 
+async def _create_owned(manager, **kwargs):
+    kwargs.setdefault("tags", ["owner:cheng"])
+    return await manager.create_internal(**kwargs)
+
+
 class _NoopDecay:
     is_running = True
 
@@ -66,7 +71,7 @@ async def 环境(bucket_mgr, monkeypatch):
     monkeypatch.setattr(rt, "mark_op", None)
     monkeypatch.setattr(rt, "record_v3_tool_event", lambda *a, **k: None)
 
-    编号 = await bucket_mgr.create(
+    编号 = await _create_owned(bucket_mgr,
         content="那天下午我们把四个接口的退化路径逐条过了一遍。",
         title="接口评审",
         importance=6,
@@ -161,7 +166,10 @@ async def test_解一段本来就不存在的关系不算失败(环境):
     from tools.trace import dispatch as trace
 
     管理器, 编号 = 环境
-    另一条 = await 管理器.create(content="另一条无关的记忆。", importance=5)
+    另一条 = await _create_owned(管理器,
+        content="另一条无关的记忆。",
+        importance=5,
+    )
 
     出 = await trace(bucket_id=编号, unlink=另一条)
     assert "本来就没有关系" in 出

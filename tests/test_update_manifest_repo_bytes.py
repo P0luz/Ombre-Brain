@@ -119,6 +119,18 @@ def test_manifest_refuses_files_missing_from_the_repository(repo: Path):
     assert "src/stray.py" in str(excinfo.value)
 
 
+def test_manifest_excludes_gitignored_runtime_files(repo: Path):
+    """明确忽略的本地配置不属于源码归档，也不能阻塞发布清单生成。"""
+    module = _load_module()
+    (repo / ".gitignore").write_text(".env\n", encoding="utf-8")
+    _git(repo, "add", ".gitignore")
+    (repo / "src" / ".env").write_text("LOCAL_SECRET=value\n", encoding="utf-8")
+
+    manifest = module.build_manifest(str(repo))
+
+    assert "src/.env" not in {item["path"] for item in manifest["files"]}
+
+
 def test_manifest_refuses_unstaged_version_bump(repo: Path):
     """版本已改但未 add 时必须中止，不能把工作区版本与旧 index 哈希混在一起。"""
     module = _load_module()

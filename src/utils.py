@@ -825,6 +825,14 @@ def setup_logging(level: str = "INFO", log_dir: str | None = None) -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=handlers,
     )
+    # basicConfig is intentionally a no-op once the root logger is configured
+    # (pytest and embedded hosts commonly configure it first).  Close handlers
+    # that were constructed for this attempt but not adopted by the root logger;
+    # otherwise every repeated server import leaks an open server.log handle.
+    root_handlers = logging.getLogger().handlers
+    for handler in handlers:
+        if handler not in root_handlers:
+            handler.close()
 
     # 接入统一错误体系的 in-memory log buffer，给 E 级报错附 tail
     try:
@@ -965,7 +973,7 @@ def _config_ai_name() -> str:
 # 其实青柑普洱挺好喝的
 _DEFAULT_TIMEZONE = "Asia/Shanghai"
 _DEFAULT_UTC_OFFSET_HOURS = 8
-_timezone_cache: tuple[str, float, str] | None = None
+_timezone_cache: tuple[str, tuple[int, int], str] | None = None
 
 
 def get_timezone_name() -> str:
@@ -978,14 +986,15 @@ def get_timezone_name() -> str:
     try:
         config_path = config_file_path()
         try:
-            mtime = os.path.getmtime(config_path)
+            stat = os.stat(config_path)
+            revision = (int(stat.st_mtime_ns), int(stat.st_size))
         except OSError:
             return _DEFAULT_TIMEZONE
         cached = _timezone_cache
-        if cached is not None and cached[0] == config_path and cached[1] == mtime:
+        if cached is not None and cached[0] == config_path and cached[1] == revision:
             return cached[2]
         value = str(read_config_yaml().get("timezone") or "").strip() or _DEFAULT_TIMEZONE
-        _timezone_cache = (config_path, mtime, value)
+        _timezone_cache = (config_path, revision, value)
         return value
     except Exception:
         return _DEFAULT_TIMEZONE
@@ -1001,6 +1010,8 @@ def get_tzinfo():
     from datetime import timedelta, timezone as _timezone
 
     name = get_timezone_name()
+    if name.strip().upper() in {"UTC", "ETC/UTC", "GMT", "ETC/GMT"}:
+        return _timezone.utc
     try:
         from zoneinfo import ZoneInfo
 

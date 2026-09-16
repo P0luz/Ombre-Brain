@@ -32,6 +32,11 @@ from utils import parse_bool, parse_iso_datetime
 logger = logging.getLogger("ombre_brain.decay")
 
 
+def _metadata_flag(value, *, default: bool = False) -> bool:
+    """Compatibility name for the production anchor-decay contract."""
+    return parse_bool(value, default=default)
+
+
 # ============================================================
 # 调参面板 / Tunable constants
 # ------------------------------------------------------------

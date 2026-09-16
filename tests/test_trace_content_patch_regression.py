@@ -9,6 +9,11 @@ from tools import _runtime as rt
 from tools.trace.core import trace_core
 
 
+async def _create_owned(manager, **kwargs):
+    kwargs.setdefault("tags", ["owner:cheng"])
+    return await manager.create_internal(**kwargs)
+
+
 @pytest.fixture
 def trace_runtime(monkeypatch, bucket_mgr, test_config):
     monkeypatch.setattr(rt, "config", test_config, raising=False)
@@ -33,7 +38,7 @@ async def test_trace_patch_replaces_unique_tail_of_long_pinned_bucket(
     original = filler + old_str + suffix
     assert 32 * 1024 < len(original.encode("utf-8")) < 50 * 1024
 
-    bucket_id = await manager.create(
+    bucket_id = await _create_owned(manager,
         content=original,
         importance=10,
         pinned=True,
@@ -66,7 +71,7 @@ async def test_trace_patch_replaces_unique_tail_of_long_pinned_bucket(
 async def test_trace_patch_zero_or_multiple_matches_never_writes(trace_runtime):
     manager = trace_runtime
     original = "开头\n重复片段\n中间\n重复片段\n结尾"
-    bucket_id = await manager.create(content=original)
+    bucket_id = await _create_owned(manager, content=original)
 
     with pytest.raises(ToolInputError) as 找不到:
         await trace_core(
@@ -90,7 +95,7 @@ async def test_trace_patch_zero_or_multiple_matches_never_writes(trace_runtime):
     assert bucket["content"] == original
     assert bucket["metadata"]["importance"] == 5
 
-    overlap_id = await manager.create(content="aaa")
+    overlap_id = await _create_owned(manager, content="aaa")
     with pytest.raises(ToolInputError) as 重叠:
         await trace_core(
             overlap_id,
@@ -110,7 +115,7 @@ async def test_trace_patch_refreshes_appended_meaning_embedding(
     monkeypatch,
 ):
     manager = trace_runtime
-    bucket_id = await manager.create(content="old body")
+    bucket_id = await _create_owned(manager, content="old body")
     indexed_meaning = []
 
     async def capture_meaning(target_id, meaning):
@@ -142,7 +147,7 @@ async def test_trace_patch_supports_deletion_and_rejects_invalid_argument_pairs(
     trace_runtime,
 ):
     manager = trace_runtime
-    bucket_id = await manager.create(content="保留前文\n删除这一段\n保留后文")
+    bucket_id = await _create_owned(manager, content="保留前文\n删除这一段\n保留后文")
 
     deleted = await trace_core(
         bucket_id,
@@ -154,7 +159,7 @@ async def test_trace_patch_supports_deletion_and_rejects_invalid_argument_pairs(
     assert bucket is not None
     assert bucket["content"] == "保留前文\n保留后文"
 
-    whole_bucket_id = await manager.create(content="仅此正文")
+    whole_bucket_id = await _create_owned(manager, content="仅此正文")
     with pytest.raises(ToolInputError) as 清空:
         await trace_core(
             whole_bucket_id,
@@ -219,7 +224,7 @@ async def test_trace_patch_cannot_be_combined_with_delete_or_hard_delete(
 ):
     manager = trace_runtime
     original = "必须保留的正文"
-    bucket_id = await manager.create(content=original, test_data=test_data)
+    bucket_id = await _create_owned(manager, content=original, test_data=test_data)
 
     with pytest.raises(ToolInputError) as excinfo:
         await trace_core(
@@ -243,7 +248,7 @@ async def test_trace_patch_rejects_oversized_final_content_without_data_loss(
     manager = trace_runtime
     old_str = "UNIQUE-TARGET"
     original = "a" * 50_000 + old_str
-    bucket_id = await manager.create(content=original)
+    bucket_id = await _create_owned(manager, content=original)
 
     with pytest.raises(ToolInputError) as excinfo:
         await trace_core(
@@ -261,7 +266,7 @@ async def test_trace_patch_rejects_oversized_final_content_without_data_loss(
 @pytest.mark.asyncio
 async def test_concurrent_trace_patches_preserve_both_disjoint_edits(trace_runtime):
     manager = trace_runtime
-    bucket_id = await manager.create(
+    bucket_id = await _create_owned(manager,
         content="开头\n第一处旧文本\n中间\n第二处旧文本\n结尾"
     )
 
@@ -282,7 +287,7 @@ async def test_concurrent_plan_patches_append_both_change_log_entries(
     monkeypatch,
 ):
     manager = trace_runtime
-    bucket_id = await manager.create(
+    bucket_id = await _create_owned(manager,
         content="第一处旧文本\n第二处旧文本",
         bucket_type="plan",
         weight=0.7,
@@ -324,7 +329,7 @@ async def test_trace_patch_uses_latest_content_read_inside_bucket_lock(
     monkeypatch,
 ):
     manager = trace_runtime
-    bucket_id = await manager.create(content="目标旧文本\n原始结尾")
+    bucket_id = await _create_owned(manager, content="目标旧文本\n原始结尾")
     original_get = manager.get
     first_read = True
 
@@ -357,7 +362,7 @@ async def test_trace_patch_uses_latest_content_read_inside_bucket_lock(
 @pytest.mark.asyncio
 async def test_trace_patch_records_plan_edit_change_log(trace_runtime):
     manager = trace_runtime
-    bucket_id = await manager.create(
+    bucket_id = await _create_owned(manager,
         content="计划旧正文",
         bucket_type="plan",
         weight=0.7,
@@ -390,7 +395,7 @@ async def test_trace_patch_records_plan_edit_change_log(trace_runtime):
 @pytest.mark.asyncio
 async def test_trace_plan_status_change_records_actor(trace_runtime):
     manager = trace_runtime
-    bucket_id = await manager.create(
+    bucket_id = await _create_owned(manager,
         content="待完成计划",
         bucket_type="plan",
         weight=0.7,
@@ -425,7 +430,7 @@ async def test_trace_plan_status_change_records_actor(trace_runtime):
 @pytest.mark.asyncio
 async def test_trace_plan_patch_and_status_change_records_actor(trace_runtime):
     manager = trace_runtime
-    bucket_id = await manager.create(
+    bucket_id = await _create_owned(manager,
         content="旧计划正文",
         bucket_type="plan",
         weight=0.7,

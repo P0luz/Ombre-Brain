@@ -41,6 +41,7 @@ async def test_public_breath_schema_stays_empty_but_cached_query_args_are_forwar
         "importance_min",
         "tags",
         "catalog",
+        "mode",
     }
 
     output = await tool.run(
@@ -62,6 +63,7 @@ async def test_public_breath_schema_stays_empty_but_cached_query_args_are_forwar
         "importance_min": -1,
         "tags": "",
         "catalog": False,
+        "mode": "",
     }
 
 
@@ -118,7 +120,47 @@ async def test_parameter_free_breath_still_dispatches_with_all_defaults(monkeypa
         "importance_min": -1,
         "tags": "",
         "catalog": False,
+        "mode": "",
     }
+
+
+@pytest.mark.asyncio
+async def test_cached_handoff_mode_reaches_hidden_breath_callable(monkeypatch):
+    import server
+
+    seen = {}
+
+    async def fake_dispatch(**kwargs):
+        seen.update(kwargs)
+        return "handoff-dispatched"
+
+    monkeypatch.setattr(server._t_breath, "dispatch", fake_dispatch)
+    tool = server.mcp._tool_manager.get_tool("breath")
+
+    assert await tool.run({"mode": "handoff"}) == "handoff-dispatched"
+    assert seen["mode"] == "handoff"
+
+
+@pytest.mark.asyncio
+async def test_fresh_clients_can_request_handoff_through_breath_advanced(monkeypatch):
+    import server
+
+    seen = {}
+
+    async def fake_dispatch(**kwargs):
+        seen.update(kwargs)
+        return "handoff-dispatched"
+
+    monkeypatch.setattr(server._t_breath, "dispatch", fake_dispatch)
+    listed = next(
+        item for item in await server.mcp.list_tools()
+        if item.name == "breath_advanced"
+    )
+    assert "mode" in listed.inputSchema["properties"]
+
+    tool = server.mcp._tool_manager.get_tool("breath_advanced")
+    assert await tool.run({"mode": "handoff"}) == "handoff-dispatched"
+    assert seen["mode"] == "handoff"
 
 
 @pytest.mark.asyncio

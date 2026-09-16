@@ -23,7 +23,7 @@ tools/breath/importance.py — importance_min 模式
 
 from datetime import datetime  # noqa: F401 —— 供签名注解使用
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from .._common import is_importance_audit_candidate
 from ..plan.core import is_letter_bucket
 from ._date_range import bucket_in_created_range
@@ -118,6 +118,7 @@ async def surface_by_importance(
 ) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
+        all_buckets = _identity.filter_default(all_buckets)
     except Exception as e:
         return f"记忆系统暂时无法访问: {safe_error_detail(e)}"
     canonical_buckets = _deduplicate_buckets(all_buckets)
@@ -148,7 +149,8 @@ async def surface_by_importance(
             imp = b["metadata"].get("importance", 0)
             rendered, entry_tokens = render_stored_bucket(
                 b,
-                f"[importance:{imp}] [bucket_id:{b['id']}]",
+                f"[importance:{imp}] [bucket_id:{b['id']}]"
+                f"{_identity.attribution(b.get('metadata') or {})}",
                 _footprint(b),
             )
             if token_used + entry_tokens > max_tokens:

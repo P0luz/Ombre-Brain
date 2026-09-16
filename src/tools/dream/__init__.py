@@ -21,7 +21,7 @@ dispatch() 把这几步串起来，并给最终输出中实际出现的候选各
 from typing import Optional
 
 from ..i import record_dream_offer, record_dream_pass
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from .candidates import collect_candidates
 from .hints import build_connection_hint, build_crystal_hint, collect_self_candidates
 from .output import format_dream_output
@@ -34,12 +34,16 @@ async def dispatch(
 
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
+        all_buckets = _identity.filter_default(all_buckets)
     except Exception as e:
         rt.logger.error(f"Dream failed to list buckets: {e}")
         return "记忆系统暂时无法访问。"
 
     window_hours = max(1, min(int(window_hours or 48), 24 * 14))
     recent = collect_candidates(all_buckets, window_hours)
+    # Pinned/permanent memories are explicit/default-breath context, not dream
+    # material.  Keep dream from echoing core rules into its recent digest.
+    core_context = []
     try:
         self_review = await collect_self_candidates(all_buckets, window_hours)
     except Exception as exc:
@@ -65,6 +69,7 @@ async def dispatch(
         connection_hint=connection_hint,
         crystal_hint=crystal_hint,
         self_review=self_review,
+        core_context=core_context,
     )
 
     # them 追加在末尾，独立通道，不进融合打分（rule.md 13.3）。

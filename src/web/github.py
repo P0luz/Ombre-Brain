@@ -29,10 +29,17 @@ _import_lock = asyncio.Lock()
 
 try:
     from github_sync import GitHubSync  # type: ignore
-    from utils import parse_bool, atomic_update_config_yaml  # type: ignore
+    from utils import parse_bool, config_file_path as _config_file_path  # type: ignore
 except ImportError:  # pragma: no cover
     from ..github_sync import GitHubSync  # type: ignore
-    from ..utils import parse_bool, atomic_update_config_yaml  # type: ignore
+    from ..utils import parse_bool, config_file_path as _config_file_path  # type: ignore
+
+try:
+    from config_transaction import run_config_transaction  # type: ignore
+    from import_transaction import ADMIN_RESTORE_SCOPE  # type: ignore
+except ImportError:  # pragma: no cover
+    from ..config_transaction import run_config_transaction  # type: ignore
+    from ..import_transaction import ADMIN_RESTORE_SCOPE  # type: ignore
 
 
 def _save_github_config_to_disk(gh_cfg: dict) -> None:
@@ -42,7 +49,10 @@ def _save_github_config_to_disk(gh_cfg: dict) -> None:
     不再是「open(w) 直接整份覆盖、失败只记 warning」——那样调用方会误以为保存成功，
     内存里的新配置在下次重启（崩溃/热更新/手动重启按钮）读盘时被这份没写成功的旧文件覆盖，
     表现为「填好过一两个小时自动清空」。"""
-    atomic_update_config_yaml(lambda save_config: save_config.__setitem__("github_sync", gh_cfg))
+    run_config_transaction(
+        _config_file_path(),
+        lambda save_config: save_config.__setitem__("github_sync", gh_cfg),
+    )
 
 
 def _should_back_up_before_import(relative_path: str) -> bool:
@@ -351,6 +361,11 @@ def register(mcp) -> None:
         buckets_dir = sh.config.get("buckets_dir", "")
         if not buckets_dir:
             return JSONResponse({"ok": False, "error": "buckets_dir 未配置"}, status_code=500)
+        if sh.bucket_mgr is None:
+            return JSONResponse(
+                {"ok": False, "error": "bucket manager 未初始化"},
+                status_code=503,
+            )
         try:
             body = await sh._read_json_object(request)
         except Exception:
@@ -372,7 +387,20 @@ def register(mcp) -> None:
                     "backup_failed": True,
                 }, status_code=409)
             # 2) 从 GitHub 拉回。GitHubSync 内部再与定时 sync 共用同一把锁。
-            result = await sh.github_sync_instance.import_from_github(buckets_dir)
+            decisions = body.get("decisions", {})
+            assigned_owners = body.get("assigned_owners", {})
+            if not isinstance(decisions, dict) or not isinstance(assigned_owners, dict):
+                return JSONResponse(
+                    {"ok": False, "error": "decisions 与 assigned_owners 必须是对象"},
+                    status_code=400,
+                )
+            result = await sh.github_sync_instance.import_from_github(
+                buckets_dir,
+                bucket_manager=sh.bucket_mgr,
+                job_owner=ADMIN_RESTORE_SCOPE,
+                decisions=decisions,
+                assigned_owners=assigned_owners,
+            )
             # 导入不是事务：失败时前面已经装进去的文件仍留在磁盘上。
             # 有备份就按备份还原，让「失败」真的等于「什么都没变」。
             if not result.get("ok") and backup:
@@ -443,4 +471,9 @@ def register(mcp) -> None:
                     sh.bucket_mgr.invalidate_bm25()
             except Exception:
                 pass
-        return JSONResponse(result)
+        status_code = (
+            422
+            if not result.get("ok") and not result.get("markdown_committed")
+            else 200
+        )
+        return JSONResponse(result, status_code=status_code)

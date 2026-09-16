@@ -50,6 +50,7 @@ from dataclasses import dataclass
 from typing import Any, Optional
 
 import frontmatter
+from runtime_owner import spawn_background
 
 from ombrebrain.storage.backup_archive import (
     BackupArchiveError,
@@ -75,6 +76,25 @@ from ombrebrain.you.store import (
     validate_you_snapshot_file,
 )
 from ombrebrain.storage.vector_codec import decode_vector, encode_vector
+
+try:
+    from import_transaction import (  # type: ignore
+        BatchApplyResult,
+        ImportCandidate,
+        apply_import_batch,
+        mark_import_transaction_committed,
+        review_bucket_snapshot,
+        validate_job_owner,
+    )
+except ImportError:  # pragma: no cover
+    from .import_transaction import (
+        BatchApplyResult,
+        ImportCandidate,
+        apply_import_batch,
+        mark_import_transaction_committed,
+        review_bucket_snapshot,
+        validate_job_owner,
+    )
 
 try:
     from utils import (  # type: ignore
@@ -199,6 +219,8 @@ class ConflictInfo:
     import_created: str
     current_name: str
     current_created: str
+    current_sha256: str = ""
+    current_relative_path: str = ""
 
 
 # ============================================================
@@ -252,7 +274,7 @@ async def _to_thread_reaped(function: Any, *args: Any) -> Any:
     only then propagate cancellation to the caller.
     """
 
-    worker = asyncio.create_task(asyncio.to_thread(function, *args))
+    worker = spawn_background(asyncio.to_thread(function, *args))
     cancelled = False
     while not worker.done():
         try:
@@ -582,7 +604,7 @@ class MigrateEngine:
                 "error": f"当前状态为 {self._phase}，请等待任务完成后再上传",
             }
         self._reset_parse_state()
-        worker = asyncio.create_task(asyncio.to_thread(self._parse_zip_sync, zip_bytes))
+        worker = spawn_background(asyncio.to_thread(self._parse_zip_sync, zip_bytes))
         try:
             parsed = await asyncio.shield(worker)
             await self._accept_parsed(parsed)
@@ -639,7 +661,7 @@ class MigrateEngine:
 
         self._reset_parse_state()
         workspace = tempfile.mkdtemp(prefix="ombre-migrate-")
-        worker = asyncio.create_task(
+        worker = spawn_background(
             asyncio.to_thread(self._parse_zip_path_sync, archive_path, workspace)
         )
         try:
@@ -1028,20 +1050,32 @@ class MigrateEngine:
                 if isinstance(bucket_id, str) and bucket_id:
                     existing_by_id.setdefault(bucket_id, existing)
 
+        buckets_dir = str(self._config.get("buckets_dir", "buckets"))
         for pb in self._parsed_buckets:
-            if callable(list_all):
-                existing = existing_by_id.get(pb.bucket_id)
-            else:
-                existing = await self._bucket_mgr.get(pb.bucket_id)
-            if existing is not None:
-                emeta = existing.get("metadata", {})
-                conflicts.append(ConflictInfo(
-                    bucket_id=pb.bucket_id,
-                    import_name=pb.name,
-                    import_created=pb.created,
-                    current_name=_safe_str(emeta.get("name", pb.bucket_id), 200),
-                    current_created=_safe_str(emeta.get("created", ""), 32),
-                ))
+            existing = (
+                existing_by_id.get(pb.bucket_id)
+                if callable(list_all)
+                else await self._bucket_mgr.get(pb.bucket_id)
+            )
+            if existing is None:
+                continue
+            snapshot = await asyncio.to_thread(
+                review_bucket_snapshot,
+                buckets_dir,
+                pb.bucket_id,
+            )
+            emeta = existing.get("metadata", {})
+            conflicts.append(ConflictInfo(
+                bucket_id=pb.bucket_id,
+                import_name=pb.name,
+                import_created=pb.created,
+                current_name=_safe_str(emeta.get("name", pb.bucket_id), 200),
+                current_created=_safe_str(emeta.get("created", ""), 32),
+                current_sha256=str((snapshot or {}).get("sha256") or ""),
+                current_relative_path=str(
+                    (snapshot or {}).get("relative_path") or ""
+                ),
+            ))
         self._conflicts = conflicts
         self._conflict_ids_at_parse = frozenset(
             conflict.bucket_id for conflict in conflicts
@@ -1055,7 +1089,11 @@ class MigrateEngine:
         self,
         decisions: dict[str, str],
         *,
+        job_owner: str = "",
+        assigned_owners: dict[str, str] | None = None,
+        footprint_origin: dict | None = None,
         reservation_id: str | None = None,
+        fault_injector: Any = None,
     ) -> None:
         """执行导入。
 
@@ -1087,6 +1125,7 @@ class MigrateEngine:
         imported_id_map: dict[str, str] = {}
         imported_files: dict[str, str] = {}
         package_bucket_ids = frozenset(pb.bucket_id for pb in self._parsed_buckets)
+        transaction_result: BatchApplyResult | None = None
 
         try:
             # 先发布内容寻址的原文，然后才允许任何 bucket 引用落盘。
@@ -1100,31 +1139,83 @@ class MigrateEngine:
             )
             if callable(ensure_path_index):
                 await _to_thread_reaped(ensure_path_index)
-            for pb in self._parsed_buckets:
-                try:
-                    result = await self._apply_one_bucket(
-                        pb,
-                        decisions.get(pb.bucket_id, "skip"),
-                        buckets_dir,
-                        conflicted_at_parse=(
-                            pb.bucket_id in self._conflict_ids_at_parse
-                        ),
-                    )
-                    if result is None:
+            if job_owner:
+                owner = validate_job_owner(job_owner)
+                assignments = assigned_owners or {}
+                conflicts = {item.bucket_id: item for item in self._conflicts}
+                candidates: list[ImportCandidate] = []
+                for pb in self._parsed_buckets:
+                    conflict = conflicts.get(pb.bucket_id)
+                    requested = decisions.get(pb.bucket_id, "skip") if conflict else "import"
+                    if conflict and requested == "skip":
                         self._apply_skipped += 1
+                        self._apply_done += 1
                         continue
-                    target_id, target_path = result
-                    self._apply_imported += 1
-                    imported_id_map[pb.bucket_id] = target_id
-                    imported_files[target_id] = target_path
-
-                except Exception as e:
-                    err_msg = f"[{pb.bucket_id}] {pb.name[:60]}: {e}"
-                    logger.error(f"[migrate] apply error: {err_msg}", exc_info=True)
-                    self._apply_errors.append(err_msg)
-                    self._apply_skipped += 1
-
-                self._apply_done += 1
+                    if requested not in {"import", "overwrite", "keep_both"}:
+                        raise ValueError(f"非法冲突决策: {pb.bucket_id}")
+                    markdown = self._read_member(
+                        pb.md_bytes if pb.md_bytes is not None else pb.md_path,
+                        limit=(
+                            self._bucket_content_limit()
+                            + self._metadata_limit()
+                            + _FRONTMATTER_OVERHEAD_BYTES
+                        ),
+                        label=pb.arc_path,
+                    )
+                    candidates.append(ImportCandidate(
+                        source_id=pb.bucket_id,
+                        markdown=markdown,
+                        decision=requested,
+                        expected_live_sha256=(conflict.current_sha256 if conflict else ""),
+                        expected_live_relative_path=(
+                            conflict.current_relative_path if conflict else ""
+                        ),
+                        conflicted_at_review=conflict is not None,
+                        assigned_owner=str(assignments.get(pb.bucket_id) or ""),
+                    ))
+                if candidates:
+                    transaction_result = await apply_import_batch(
+                        buckets_dir=str(buckets_dir),
+                        bucket_manager=self._bucket_mgr,
+                        job_owner=owner,
+                        candidates=candidates,
+                        footprint_origin=footprint_origin,
+                        fault_injector=fault_injector,
+                    )
+                    imported_id_map.update(transaction_result.imported_id_map)
+                    self._apply_imported = len(imported_id_map)
+                    self._apply_done = self._apply_total
+                    for target_id in imported_id_map.values():
+                        imported = await self._bucket_mgr.get(target_id)
+                        target_path = str((imported or {}).get("path") or "")
+                        if target_path:
+                            imported_files[target_id] = target_path
+            else:
+                # Compatibility path for trusted in-process callers predating
+                # the administrative owner-scoped restore contract.
+                for pb in self._parsed_buckets:
+                    try:
+                        result = await self._apply_one_bucket(
+                            pb,
+                            decisions.get(pb.bucket_id, "skip"),
+                            buckets_dir,
+                            conflicted_at_parse=(
+                                pb.bucket_id in self._conflict_ids_at_parse
+                            ),
+                        )
+                        if result is None:
+                            self._apply_skipped += 1
+                            continue
+                        target_id, target_path = result
+                        self._apply_imported += 1
+                        imported_id_map[pb.bucket_id] = target_id
+                        imported_files[target_id] = target_path
+                    except Exception as e:
+                        err_msg = f"[{pb.bucket_id}] {pb.name[:60]}: {e}"
+                        logger.error(f"[migrate] apply error: {err_msg}", exc_info=True)
+                        self._apply_errors.append(err_msg)
+                        self._apply_skipped += 1
+                    self._apply_done += 1
 
             # ---- 向量数据处理 ----
             await _to_thread_reaped(
@@ -1190,13 +1281,34 @@ class MigrateEngine:
             invalidate = getattr(self._bucket_mgr, "_invalidate_bm25", None)
             if callable(invalidate):
                 invalidate()
+            if transaction_result is not None:
+                mark_import_transaction_committed(
+                    str(buckets_dir),
+                    transaction_result.txid,
+                    derived_error="; ".join(self._apply_errors),
+                )
             self._phase = PHASE_DONE
 
         except asyncio.CancelledError:
+            if transaction_result is not None and transaction_result.markdown_committed:
+                mark_import_transaction_committed(
+                    str(buckets_dir),
+                    transaction_result.txid,
+                    derived_error="derived work cancelled",
+                )
             self._phase = PHASE_ERROR
             self._error_message = "导入任务已取消"
             raise
         except Exception as e:
+            if transaction_result is not None and transaction_result.markdown_committed:
+                try:
+                    mark_import_transaction_committed(
+                        str(buckets_dir),
+                        transaction_result.txid,
+                        derived_error=f"{type(e).__name__}: {e}",
+                    )
+                except Exception:
+                    logger.exception("[migrate] transaction finalization failed")
             self._phase = PHASE_ERROR
             self._error_message = str(e)
             logger.error(f"[migrate] apply failed: {e}", exc_info=True)

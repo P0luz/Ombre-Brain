@@ -31,6 +31,7 @@ EXPECTED_TOOLS = {
     "hold",
     "grow",
     "trace",
+    "just_now",
     "anchor",
     "release",
     "pulse",
@@ -49,6 +50,7 @@ EXPECTED_TOOL_ORDER = (
     "hold",
     "grow",
     "trace",
+    "just_now",
     "dream",
     "anchor",
     "release",
@@ -148,6 +150,11 @@ EXPECTED_TOOL_PROPERTIES = {
         "quotes_replace",
         "reinforce",
     },
+    "just_now": {
+        "action", "source", "task_id", "role", "content", "occurred_at",
+        "source_cursor", "event_id", "session_id", "cursor", "limit",
+        "after_seq", "confirm",
+    },
     "anchor": {"bucket_id"},
     "release": {"bucket_id"},
     "pulse": {"include_archive"},
@@ -159,8 +166,14 @@ EXPECTED_TOOL_PROPERTIES = {
     "letter_lock_update": {"letter_id", "lock_type", "unlock_date"},
     "letter_read": {"query", "limit", "author", "date_from", "date_to"},
     "feel": {"query", "max_tokens"},
-    # supersedes：3.6.6 的「声明取代即挂起旧条目」。
-    "I": {"content", "aspect", "read", "limit", "promote", "supersedes"},
+    # supersedes：3.6.6 的「声明取代即挂起旧条目」；其余为 owner-safe
+    # evidence profile 的显式动作参数。
+    "I": {
+        "content", "aspect", "read", "limit", "promote", "supersedes",
+        "action", "confidence", "evidence_id", "source_bucket",
+        "source_refs", "confirm_stable", "bucket_id", "reason",
+        "include_inactive",
+    },
     "dream": {"window_hours"},
 }
 

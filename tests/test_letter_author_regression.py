@@ -15,6 +15,7 @@ import pytest
 from errors import ToolInputError
 
 import tools._runtime as rt
+from tools import _identity
 from tools.plan.core import letter_write, letter_read
 
 
@@ -29,6 +30,7 @@ def _install(bucket_mgr):
     rt.bucket_mgr = bucket_mgr
     rt.embedding_engine = DisabledEmbedding()
     rt.logger = MagicMock()
+    _identity.set_caller("cheng")
 
 
 async def _author_of(bucket_mgr, bucket_id):
@@ -114,7 +116,12 @@ async def test_letter_read_filter_ai_matches_legacy_claude(bucket_mgr, monkeypat
     monkeypatch.setenv("AI_NAME", "Ombre")
     _install(bucket_mgr)
     # 直接造一封 author=claude 的「历史」信件
-    legacy = await bucket_mgr.create(content="old claude letter", bucket_type="letter", domain=["letter"])
+    legacy = await bucket_mgr.create_internal(
+        content="old claude letter",
+        bucket_type="letter",
+        domain=["letter"],
+        tags=["owner:cheng"],
+    )
     await bucket_mgr.update(legacy, author="claude")
     await letter_write(author="user", content="user letter")
 

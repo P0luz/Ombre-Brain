@@ -21,7 +21,7 @@ breath_search(query=...) 精准拉取需要的记忆——代替把全部记忆�
 
 from datetime import datetime  # noqa: F401 —— 供签名注解使用
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from ..plan.core import is_letter_bucket, letter_lock_state
 from ombrebrain.storage.relation_store import relation_hint
 from utils import parse_bool
@@ -49,6 +49,7 @@ async def surface_catalog(
     """返回全部记忆桶的紧凑目录。每桶一行：名称 | 域 | 重要度 | Footprint。"""
     try:
         buckets = await rt.bucket_mgr.list_all(include_archive=False)
+        buckets = _identity.filter_default(buckets)
     except Exception as e:
         return f"获取记忆目录失败: {safe_error_detail(e)}"
 
@@ -105,7 +106,7 @@ async def surface_catalog(
         )
         line = (
             f"{pin_mark}{anchor_mark}{name} | {','.join(domains) or '未分类'} | {imp} "
-            f"| {_footprint(b, meta)}"
+            f"| {_footprint(b, meta)}{_identity.attribution(meta)}"
         )
         if not letter_locked:
             hint = relation_hint(b)

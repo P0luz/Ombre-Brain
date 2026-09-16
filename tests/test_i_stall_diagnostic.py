@@ -18,7 +18,7 @@ def _candidate(bucket_id, *, created, passes=(), **meta):
         "content": f"我觉得 {bucket_id}",
         "metadata": {
             "type": "dynamic",
-            "tags": ["__i_candidate__"],
+            "tags": ["__i_candidate__", "owner:cheng", "scope:self", "voice:self"],
             "i_stage": "candidate",
             "i_dream_dates": list(passes),
             "created": created,
@@ -49,6 +49,14 @@ class _FakeBucketManager:
 class _NoopDecay:
     async def ensure_started(self) -> None:
         return None
+
+
+@pytest.fixture(autouse=True)
+def _caller_context():
+    from tools import _identity
+
+    with _identity.caller_context("cheng"):
+        yield
 
 
 def _env(monkeypatch, buckets):

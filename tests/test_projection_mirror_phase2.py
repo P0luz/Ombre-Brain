@@ -112,7 +112,7 @@ def test_bucket_manager_ledger_report_includes_trace_catalog_projection(
 
     async def scenario():
         manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
-        bucket_id = await manager.create("projection source", domain=["测试"])
+        bucket_id = await manager.create_internal("projection source", domain=["测试"])
         await manager.update(bucket_id, resolved=True)
         return manager.ledger_integrity_report()
 
@@ -141,7 +141,7 @@ def test_bucket_manager_ledger_report_includes_sqlite_projection(
 
     async def scenario():
         manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
-        bucket_id = await manager.create("sqlite projection source", domain=["sqlite"])
+        bucket_id = await manager.create_internal("sqlite projection source", domain=["sqlite"])
         await manager.update(bucket_id, resolved=True)
         return manager, manager.ledger_integrity_report(rebuild_projections=True)
 
@@ -172,7 +172,7 @@ def test_bucket_manager_default_ledger_report_does_not_create_or_rewrite_sqlite_
 
     async def make_manager():
         manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
-        await manager.create("read-only ledger report", domain=["audit"])
+        await manager.create_internal("read-only ledger report", domain=["audit"])
         return manager
 
     manager = asyncio.run(make_manager())
@@ -207,7 +207,7 @@ def test_bucket_manager_default_ledger_report_does_not_refresh_existing_sqlite_p
 
     async def make_manager():
         manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
-        await manager.create("projection snapshot one", domain=["audit"])
+        await manager.create_internal("projection snapshot one", domain=["audit"])
         return manager
 
     manager = asyncio.run(make_manager())
@@ -217,7 +217,7 @@ def test_bucket_manager_default_ledger_report_does_not_refresh_existing_sqlite_p
     TraceSQLiteProjection(projection_path).rebuild(manager.ledger_mirror.iter_events())
     before = projection_path.read_bytes()
 
-    asyncio.run(manager.create("projection snapshot two", domain=["audit"]))
+    asyncio.run(manager.create_internal("projection snapshot two", domain=["audit"]))
     report = manager.ledger_integrity_report()
 
     assert projection_path.read_bytes() == before, "a read-only report refreshed the durable projection"

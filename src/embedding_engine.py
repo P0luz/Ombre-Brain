@@ -50,6 +50,11 @@ import numpy as np
 from openai import AsyncOpenAI
 
 try:
+    from embedding_publish import async_embedding_db_turn
+except ImportError:  # pragma: no cover
+    from .embedding_publish import async_embedding_db_turn  # type: ignore
+
+try:
     from utils import parse_bool, positive_float
 except ImportError:  # pragma: no cover
     from .utils import parse_bool, positive_float  # type: ignore
@@ -795,7 +800,7 @@ class EmbeddingEngine:
 
     # -------------------- 生成 + 存储 --------------------
 
-    async def _generate_async(self, text: str) -> list[float]:
+    async def _generate_async_unlocked(self, text: str) -> list[float]:
         if not self._backend:
             return []
         cache_identity = _provider_input_identity(text)
@@ -811,17 +816,26 @@ class EmbeddingEngine:
                 self._query_cache.popitem(last=False)
         return embedding
 
+    async def _generate_async(self, text: str) -> list[float]:
+        """Generate while the live embedding generation cannot be replaced."""
+
+        async with async_embedding_db_turn(self.db_path):
+            return await self._generate_async_unlocked(text)
+
     async def generate_and_store(self, bucket_id: str, content: str) -> bool:
         """为内容生成 embedding 并存入 SQLite。成功返回 True。"""
         if not self.enabled or not content or not content.strip():
             return False
         try:
-            embedding = await self._generate_async(content)
-            if not embedding:
-                return False
-            digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
-            self._store_embedding(bucket_id, embedding, digest)
-            return True
+            # Publication must not exchange the live DB after the provider has
+            # generated a vector but before the matching SQLite commit lands.
+            async with async_embedding_db_turn(self.db_path):
+                embedding = await self._generate_async_unlocked(content)
+                if not embedding:
+                    return False
+                digest = hashlib.sha256(content.encode("utf-8")).hexdigest()
+                self._store_embedding(bucket_id, embedding, digest)
+                return True
         except Exception as e:
             logger.warning(f"Embedding generation failed for {bucket_id}: {e}")
             return False

@@ -30,7 +30,7 @@ from ombrebrain.storage.relation_store import (
     reverse_relation_type,
 )
 
-from . import _runtime as rt
+from . import _identity, _runtime as rt
 
 # 这些类型不参与自动关联，与 relation_hint 的展示排除保持一致：
 # plan 是待办、feel 是感受、letter 是写给未来的信、i 是自我认知——
@@ -108,7 +108,9 @@ async def infer_links_for(bucket_id: str, content: str) -> list[dict]:
         if not target:
             continue
         target_meta = target.get("metadata") or {}
-        if not _eligible(target_meta):
+        if not _eligible(target_meta) or not _identity.owners_compatible(
+            target_meta, source_meta.get("tags") or []
+        ):
             continue
         relation_type = infer_auto_relation_type(
             float(score), _hours_apart(source_meta, target_meta)
@@ -133,7 +135,7 @@ async def infer_links_for(bucket_id: str, content: str) -> list[dict]:
 async def link_new_bucket(bucket_id: str, content: str) -> int:
     """推断并双向写入关系。返回实际建立的条数。
 
-    调用方应当 `asyncio.create_task(...)`，不要 await——写入返回不等这个。
+    调用方应当通过 `spawn_background(...)` 登记后台任务，不要 await——写入返回不等这个。
     """
     try:
         inferred = await infer_links_for(bucket_id, content)
@@ -175,9 +177,22 @@ async def link_new_bucket(bucket_id: str, content: str) -> int:
             return left_changed, right_changed, int(left_changed or right_changed)
 
         try:
-            result = await rt.bucket_mgr.mutate_relation_pair(
-                bucket_id, target_id, _mutation
-            )
+            source = await rt.bucket_mgr.get(bucket_id)
+            target = await rt.bucket_mgr.get(target_id)
+            if not source or not target or not _identity.owners_compatible(
+                target.get("metadata") or {},
+                (source.get("metadata") or {}).get("tags") or [],
+            ):
+                continue
+            source_owner = _identity.mutation_owner(source.get("metadata") or {})
+            target_owner = _identity.mutation_owner(target.get("metadata") or {})
+            with _identity.manager_mutation_guard(
+                rt.bucket_mgr,
+                {bucket_id: source_owner, target_id: target_owner},
+            ):
+                result = await rt.bucket_mgr.mutate_relation_pair(
+                    bucket_id, target_id, _mutation
+                )
         except Exception as exc:  # noqa: BLE001
             rt.logger.warning(
                 f"auto relation write failed / 自动关系写入失败 "

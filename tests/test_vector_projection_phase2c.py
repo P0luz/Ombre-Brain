@@ -202,7 +202,7 @@ def test_bucket_manager_ledger_report_includes_vector_projection(
 
     async def scenario():
         manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
-        bucket_id = await manager.create("vector projection source", domain=["vector"])
+        bucket_id = await manager.create_internal("vector projection source", domain=["vector"])
         return manager, bucket_id, manager.ledger_integrity_report()
 
     manager, bucket_id, report = asyncio.run(scenario())

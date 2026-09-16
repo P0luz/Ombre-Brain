@@ -25,11 +25,11 @@ tools/hold/core.py — hold 普通存入分支（含自动合并）
 ========================================
 """
 
-import asyncio
+from runtime_owner import spawn_background
 
 from utils import normalize_memory_title
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from .._common import merge_or_create, check_duplicate_for, check_plan_resolution
 
 
@@ -75,8 +75,15 @@ async def store_core(
     final_valence = valence if 0 <= valence <= 1 else (float(_v) if _v is not None else 0.5)
     final_arousal = arousal if 0 <= arousal <= 1 else (float(_a) if _a is not None else 0.3)
     _raw_tags = analysis.get("tags") or []
-    model_tags = _raw_tags if isinstance(_raw_tags, list) else []
-    all_tags = list(dict.fromkeys(extra_tags if extra_tags else model_tags))
+    model_tags = _identity.strip_owner_tags(_raw_tags)
+    explicit_non_owner = [
+        tag for tag in extra_tags if not str(tag).lower().startswith("owner:")
+    ]
+    owner_tags = [
+        tag for tag in extra_tags if str(tag).lower().startswith("owner:")
+    ]
+    selected_tags = explicit_non_owner if explicit_non_owner else model_tags
+    all_tags = list(dict.fromkeys([*selected_tags, *owner_tags]))
     suggested_name = analysis.get("suggested_name", "")
     final_title = title or normalize_memory_title(suggested_name)
 
@@ -100,9 +107,9 @@ async def store_core(
     )
 
     action = "合并→" if is_merged else "新建→"
-    asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
+    spawn_background(check_plan_resolution(content, source_bucket_id=result_name))
     if not is_merged:
-        asyncio.create_task(check_duplicate_for(result_name, content))
+        spawn_background(check_duplicate_for(result_name, content))
     result = f"{action}{result_name} {','.join(str(d) for d in final_domain if d is not None)}"
     if embed_warn:
         result += f"\n⚠️ {embed_warn}"

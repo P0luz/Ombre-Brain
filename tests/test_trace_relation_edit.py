@@ -27,6 +27,11 @@ from ombrebrain.storage.relation_store import (
 from tools.trace import dispatch as trace_dispatch
 
 
+async def _create_owned(manager, **kwargs):
+    kwargs.setdefault("tags", ["owner:cheng"])
+    return await manager.create_internal(**kwargs)
+
+
 class _NoEmbedding:
     enabled = False
 
@@ -87,8 +92,8 @@ async def _links_of(mgr, bucket_id: str) -> list[dict]:
 
 
 async def _pair(mgr, **kwargs) -> tuple[str, str]:
-    a = await mgr.create(content="上线成功那一刻的踏实感，记一笔。", importance=5)
-    b = await mgr.create(content="今天把镜像推上去了，回滚脚本也备好了。", importance=5)
+    a = await _create_owned(mgr, content="上线成功那一刻的踏实感，记一笔。", importance=5)
+    b = await _create_owned(mgr, content="今天把镜像推上去了，回滚脚本也备好了。", importance=5)
     await _attach(mgr, a, b, **kwargs)
     return a, b
 
@@ -105,8 +110,8 @@ async def test_relink_refuses_to_create_a_relation_that_does_not_exist(bucket_mg
     这是 relink 与被删掉的 relation_attach 之间唯一的区别。守不住这条，
     3.0.0「关联是发现不是决定」就等于被从后门撤销了。
     """
-    a = await bucket_mgr.create(content="毫无关系的甲", importance=5)
-    b = await bucket_mgr.create(content="毫无关系的乙", importance=5)
+    a = await _create_owned(bucket_mgr, content="毫无关系的甲", importance=5)
+    b = await _create_owned(bucket_mgr, content="毫无关系的乙", importance=5)
 
     with pytest.raises(ToolInputError) as excinfo:
         await trace_dispatch(bucket_id=a, relink=b, relation_type="same_event")
@@ -139,8 +144,8 @@ async def test_unlink_reports_when_there_was_nothing_to_remove(bucket_mgr):
 
     否则「删掉了」和「压根没连上，我看错了」在返回里长得一样。
     """
-    a = await bucket_mgr.create(content="甲", importance=5)
-    b = await bucket_mgr.create(content="乙", importance=5)
+    a = await _create_owned(bucket_mgr, content="甲", importance=5)
+    b = await _create_owned(bucket_mgr, content="乙", importance=5)
 
     result = await trace_dispatch(bucket_id=a, unlink=b)
 
@@ -163,7 +168,7 @@ async def test_unlink_cleans_up_one_way_leftovers(bucket_mgr):
 @pytest.mark.asyncio
 async def test_unlink_leaves_other_relations_alone(bucket_mgr):
     a, b = await _pair(bucket_mgr)
-    c = await bucket_mgr.create(content="第三条", importance=5)
+    c = await _create_owned(bucket_mgr, content="第三条", importance=5)
     await _attach(bucket_mgr, a, c, "same_event")
 
     await trace_dispatch(bucket_id=a, unlink=b)
@@ -288,7 +293,7 @@ async def test_unknown_type_is_rejected(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_self_reference_is_rejected(bucket_mgr):
-    a = await bucket_mgr.create(content="只有自己", importance=5)
+    a = await _create_owned(bucket_mgr, content="只有自己", importance=5)
 
     with pytest.raises(ToolInputError) as excinfo:
         await trace_dispatch(bucket_id=a, unlink=a)
@@ -297,7 +302,7 @@ async def test_self_reference_is_rejected(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_missing_target_bucket_is_rejected(bucket_mgr):
-    a = await bucket_mgr.create(content="存在的那条", importance=5)
+    a = await _create_owned(bucket_mgr, content="存在的那条", importance=5)
 
     with pytest.raises(ToolInputError) as excinfo:
         await trace_dispatch(bucket_id=a, unlink="20990101-not-a-bucket")
@@ -307,7 +312,7 @@ async def test_missing_target_bucket_is_rejected(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_missing_source_bucket_is_rejected(bucket_mgr):
-    b = await bucket_mgr.create(content="存在的那条", importance=5)
+    b = await _create_owned(bucket_mgr, content="存在的那条", importance=5)
 
     with pytest.raises(ToolInputError) as excinfo:
         await trace_dispatch(bucket_id="20990101-not-a-bucket", unlink=b)

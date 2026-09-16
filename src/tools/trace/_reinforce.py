@@ -24,9 +24,11 @@
 
 from __future__ import annotations
 
+from contextlib import nullcontext
+
 from errors import ToolInputError
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 
 
 async def apply(bucket_id: str) -> str:
@@ -34,6 +36,10 @@ async def apply(bucket_id: str) -> str:
     bucket = await rt.bucket_mgr.get(bucket_id)
     if not bucket:
         raise ToolInputError(f"找不到记忆 {bucket_id}；本次未强化。")
+    try:
+        owner = _identity.mutation_owner(bucket.get("metadata") or {})
+    except ValueError as exc:
+        raise ToolInputError(str(exc)) from exc
 
     meta = bucket.get("metadata") or {}
     try:
@@ -41,7 +47,16 @@ async def apply(bucket_id: str) -> str:
     except (TypeError, ValueError):
         before = 0
 
-    await rt.bucket_mgr.touch(bucket_id, ripple=True)
+    admission = getattr(rt.bucket_mgr, "ripple_admission", None)
+    guard = (
+        admission(_identity.admitted_mutation)
+        if callable(admission)
+        else nullcontext()
+    )
+    with _identity.manager_mutation_guard(
+        rt.bucket_mgr, {bucket_id: owner}
+    ), guard:
+        await rt.bucket_mgr.touch(bucket_id, ripple=True)
 
     rt.logger.info(f"op=trace_reinforce {bucket_id} activation_count={before}->{before + 1}")
     return (

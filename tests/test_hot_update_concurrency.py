@@ -706,8 +706,8 @@ async def test_archived_letter_maintenance_get_is_authenticated_dry_run(
 
     calls = []
 
-    async def fake_restore(manager, *, ids=None, apply=False):
-        calls.append((manager, ids, apply))
+    async def fake_restore(manager, *, ids=None, revisions=None, apply=False):
+        calls.append((manager, ids, revisions, apply))
         return {
             "candidate_count": 1,
             "candidate_ids": ["letter-1"],
@@ -735,7 +735,7 @@ async def test_archived_letter_maintenance_get_is_authenticated_dry_run(
         "excluded_count": 0,
         "exclusions": [],
     }
-    assert calls == [(manager, None, False)]
+    assert calls == [(manager, None, None, False)]
 
 
 @pytest.mark.asyncio
@@ -746,8 +746,8 @@ async def test_archived_letter_maintenance_post_requires_bounded_exact_ids(
 
     calls = []
 
-    async def fake_restore(manager, *, ids=None, apply=False):
-        calls.append((manager, ids, apply))
+    async def fake_restore(manager, *, ids=None, revisions=None, apply=False):
+        calls.append((manager, ids, revisions, apply))
         return {
             "requested_count": len(ids or []),
             "restored_count": len(ids or []),
@@ -784,7 +784,13 @@ async def test_archived_letter_maintenance_post_requires_bounded_exact_ids(
     assert calls == []
 
     response = await handler(
-        _JsonRequest({"ids": ["letter-1", "letter-1", "letter-2"]})
+        _JsonRequest({
+            "ids": ["letter-1", "letter-1", "letter-2"],
+            "revisions": {
+                "letter-1": "a" * 64,
+                "letter-2": "b" * 64,
+            },
+        })
     )
 
     assert response.status_code == 200
@@ -795,7 +801,12 @@ async def test_archived_letter_maintenance_post_requires_bounded_exact_ids(
         {"id": "letter-1", "reason": "restored"},
         {"id": "letter-2", "reason": "restored"},
     ]
-    assert calls == [(manager, ["letter-1", "letter-2"], True)]
+    assert calls == [(
+        manager,
+        ["letter-1", "letter-2"],
+        {"letter-1": "a" * 64, "letter-2": "b" * 64},
+        True,
+    )]
 
 
 @pytest.mark.asyncio

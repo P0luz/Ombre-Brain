@@ -25,6 +25,13 @@ from contextlib import asynccontextmanager
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from tools.i import disputing_candidates, superseded_by
+from letter_display import format_letter_written_age
+from tools import _identity
+from tools.i.profile_contract import (
+    SCHEMA as PROFILE_SCHEMA,
+    is_active_profile,
+    owners_of,
+)
 from tools.plan.core import (
     is_letter_bucket,
     letter_lock_state,
@@ -101,6 +108,28 @@ def _is_hook_request_authorized(request) -> bool:
         return bool(sh._is_authenticated(request))
     except Exception:
         return False
+
+
+def _select_i_buckets_for_caller(all_buckets: list, caller: str) -> list:
+    """Return only the exact caller's active I/profile entries."""
+    caller = _identity.normalize_caller(caller)
+    if not caller:
+        return []
+    selected = []
+    for bucket in all_buckets:
+        metadata = bucket.get("metadata") or {}
+        tags = metadata.get("tags") or []
+        if metadata.get("type") != "i" and "__i__" not in tags:
+            continue
+        if owners_of(metadata) != (caller,):
+            continue
+        if (
+            metadata.get("profile_schema") == PROFILE_SCHEMA
+            and not is_active_profile(metadata)
+        ):
+            continue
+        selected.append(bucket)
+    return selected
 
 
 def _valid_hook_token(request) -> bool:
@@ -389,11 +418,11 @@ def register(mcp) -> None:
                             # actual writer name.  Even the owner's full-text
                             # excerpt must not introduce generic side labels.
                             tag = str(meta.get("writer_name") or "").strip() or tag
-                        date = meta.get("letter_date") or str(meta.get("created", ""))[:10]
+                        written_age = format_letter_written_age(meta)
                         title = _bounded_text(meta.get("title") or meta.get("name"), 200)
                         excerpt = strip_wikilinks(str(letter.get("content") or ""))[:400]
                         append_block(
-                            f"💌 [{tag}] {date}{(' · ' + title) if title else ''}\n{excerpt}"
+                            f"💌 [{tag}] {written_age}{(' · ' + title) if title else ''}\n{excerpt}"
                         )
 
                     # Locked incoming Letters are an independent existence

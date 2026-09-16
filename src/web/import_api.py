@@ -27,6 +27,14 @@ from starlette.requests import Request
 from starlette.responses import FileResponse, Response
 
 from . import _shared as sh
+from runtime_owner import spawn_background
+from ombrebrain.eventsourcing.footprint import import_origin
+from tools import _identity
+
+try:
+    from import_transaction import ADMIN_RESTORE_SCOPE  # type: ignore
+except ImportError:  # pragma: no cover
+    from ..import_transaction import ADMIN_RESTORE_SCOPE  # type: ignore
 
 try:
     from utils import normalize_memory_title, parse_bool, sanitize_name  # type: ignore
@@ -282,7 +290,7 @@ def _import_llm_ready() -> bool:
 async def _await_history_worker(func, *args, **kwargs):
     """Run preview parsing off-loop and reap it before releasing admission."""
 
-    worker = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    worker = spawn_background(asyncio.to_thread(func, *args, **kwargs))
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
@@ -546,6 +554,18 @@ def register(mcp) -> None:
 
             preserve_raw = request.query_params.get("preserve_raw", "").lower() in ("1", "true")
             resume = request.query_params.get("resume", "").lower() in ("1", "true")
+            owner = (
+                request.query_params.get("owner", "")
+                .strip()
+                .lower()
+                .replace("-", "_")
+            )
+            if owner not in _identity.known_owner_values():
+                release_job()
+                return JSONResponse(
+                    {"error": "导入必须明确选择合法 owner；不会自动认领未标注或 foreign 记忆"},
+                    status_code=400,
+                )
 
         except asyncio.CancelledError:
             release_job()
@@ -564,6 +584,8 @@ def register(mcp) -> None:
                     preserve_raw,
                     resume,
                     reservation_id=job_id,
+                    owner=owner,
+                    footprint_origin=import_origin("web_dashboard", "human"),
                 )
                 raw_content = ""
                 result = await start_coro
@@ -584,7 +606,7 @@ def register(mcp) -> None:
 
         import_coro = _run_import()
         try:
-            import_task = asyncio.create_task(import_coro)
+            import_task = spawn_background(import_coro)
             import_task.add_done_callback(lambda _task: release_job())
         except Exception as e:
             import_coro.close()
@@ -1462,7 +1484,7 @@ def register(mcp) -> None:
                 logger.warning("export: stats unavailable: %s", exc)
 
             emb_path = str(getattr(sh.embedding_engine, "db_path", "") or "")
-            build_task = asyncio.create_task(
+            build_task = spawn_background(
                 asyncio.to_thread(
                     build_export_archive_file,
                     buckets_dir,
@@ -1573,10 +1595,18 @@ def register(mcp) -> None:
             return JSONResponse({"error": f"读取上传内容失败: {e}"}, status_code=400)
 
         try:
-            result = await sh.migrate_engine.parse_zip_file(
-                upload_path,
-                reservation_id=reservation_id,
-            )
+            parse_file = getattr(sh.migrate_engine, "parse_zip_file", None)
+            if callable(parse_file):
+                result = await parse_file(
+                    upload_path,
+                    reservation_id=reservation_id,
+                )
+            else:
+                with open(upload_path, "rb") as upload:
+                    result = await sh.migrate_engine.parse_zip(
+                        upload.read(),
+                        reservation_id=reservation_id,
+                    )
         finally:
             try:
                 os.unlink(upload_path)
@@ -1626,8 +1656,38 @@ def register(mcp) -> None:
             return JSONResponse({"error": "too many migration decisions"}, status_code=400)
         valid_opts = {"skip", "overwrite", "keep_both"}
         for bid, decision in raw_decisions.items():
-            if isinstance(bid, str) and isinstance(decision, str) and decision in valid_opts:
-                decisions[bid] = decision
+            if (
+                not isinstance(bid, str)
+                or not bid
+                or not isinstance(decision, str)
+                or decision not in valid_opts
+            ):
+                return JSONResponse(
+                    {"error": "decisions 包含非法 bucket_id 或决策值"},
+                    status_code=400,
+                )
+            decisions[bid] = decision
+
+        assigned_owners: dict[str, str] = {}
+        raw_assignments = body.get("assigned_owners", {})
+        if not isinstance(raw_assignments, dict):
+            return JSONResponse(
+                {"error": "assigned_owners 必须是对象"},
+                status_code=400,
+            )
+        for bid, owner in raw_assignments.items():
+            normalized = str(owner or "").strip().lower().replace("-", "_")
+            if (
+                not isinstance(bid, str)
+                or not bid
+                or not isinstance(owner, str)
+                or normalized not in _identity.known_owner_values()
+            ):
+                return JSONResponse(
+                    {"error": "assigned_owners 包含非法 bucket_id 或 owner"},
+                    status_code=400,
+                )
+            assigned_owners[bid] = normalized
 
         job_id = str(body.get("job_id") or "").strip()
         if not job_id or job_id != sh.migrate_engine.job_id:
@@ -1652,6 +1712,9 @@ def register(mcp) -> None:
             try:
                 await sh.migrate_engine.apply(
                     decisions,
+                    job_owner=ADMIN_RESTORE_SCOPE,
+                    assigned_owners=assigned_owners,
+                    footprint_origin=import_origin("web_dashboard", "human"),
                     reservation_id=reservation_id,
                 )
             except Exception as e:
@@ -1659,7 +1722,7 @@ def register(mcp) -> None:
 
         apply_coro = _run_apply()
         try:
-            asyncio.create_task(apply_coro)
+            spawn_background(apply_coro)
         except Exception as exc:
             apply_coro.close()
             abandon = getattr(sh.migrate_engine, "abandon_apply", None)
@@ -1668,12 +1731,13 @@ def register(mcp) -> None:
             logger.error("[migrate] failed to schedule apply: %s", exc)
             return JSONResponse(
                 {"error": "无法调度迁移任务，请重试", "job_id": job_id},
-                status_code=503,
+                status_code=500,
             )
 
         return JSONResponse(
             {
-                "ok": True,
+                "accepted": True,
+                "completed": False,
                 "job_id": job_id,
                 "message": "导入任务已启动，请轮询 GET /api/migrate/status 查看进度",
             },

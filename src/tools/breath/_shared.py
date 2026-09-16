@@ -7,7 +7,7 @@ surface / feel / catalog / importance / search 里各抄了一份（surface 抄�
 
 from __future__ import annotations
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 
 _UNAVAILABLE = "👣 Footprint：暂时无法读取"
 
@@ -78,7 +78,8 @@ def render_within_budget(
         created = bucket["metadata"].get("created", "")
         entry, cost = render_stored_bucket(
             bucket,
-            f"[{created}] [bucket_id:{bucket['id']}]",
+            f"[{created}] [bucket_id:{bucket['id']}]"
+            f"{_identity.attribution(bucket.get('metadata') or {})}",
             footprint(bucket),
         )
         if used + cost > max_tokens:

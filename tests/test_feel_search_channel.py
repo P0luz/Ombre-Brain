@@ -61,7 +61,7 @@ def _install(bucket_mgr, engine):
 
 
 async def _make_feel(bucket_mgr, content: str) -> str:
-    return await bucket_mgr.create(
+    return await bucket_mgr.create_internal(
         content=content, tags=[], importance=5, domain=["feel"],
         valence=0.5, arousal=0.3, name=None, bucket_type="feel",
     )

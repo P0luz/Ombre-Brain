@@ -422,9 +422,38 @@ def register(mcp) -> None:
                 meta = bucket.get("metadata", {})
                 bid = bucket["id"]
                 try:
-                    topic = calc_topic_score(query, bucket, content_weight=sh.bucket_mgr.content_weight) if query else 0.0
-                    emotion = calc_emotion_score(q_valence if q_valence is not None else 0.5, q_arousal if q_arousal is not None else 0.5, meta)
-                    time_s = calc_time_score(meta)
+                    manager_topic = getattr(sh.bucket_mgr, "_calc_topic_score", None)
+                    manager_emotion = getattr(sh.bucket_mgr, "_calc_emotion_score", None)
+                    manager_time = getattr(sh.bucket_mgr, "_calc_time_score", None)
+                    topic = (
+                        manager_topic(query, bucket)
+                        if query and callable(manager_topic)
+                        else calc_topic_score(
+                            query,
+                            bucket,
+                            content_weight=getattr(
+                                sh.bucket_mgr, "content_weight", 1.0
+                            ),
+                        ) if query else 0.0
+                    )
+                    emotion = (
+                        manager_emotion(
+                            q_valence if q_valence is not None else 0.5,
+                            q_arousal if q_arousal is not None else 0.5,
+                            meta,
+                        )
+                        if callable(manager_emotion)
+                        else calc_emotion_score(
+                            q_valence if q_valence is not None else 0.5,
+                            q_arousal if q_arousal is not None else 0.5,
+                            meta,
+                        )
+                    )
+                    time_s = (
+                        manager_time(meta)
+                        if callable(manager_time)
+                        else calc_time_score(meta)
+                    )
                     imp = max(1, min(10, int(meta.get("importance") or 5))) / 10.0
 
                     raw_total = (

@@ -34,18 +34,22 @@ async def test_breath_dispatch_records_v3_tool_event(monkeypatch) -> None:
 @pytest.mark.asyncio
 async def test_hold_dispatch_records_v3_tool_event_without_content_body(monkeypatch) -> None:
     calls = []
+    stored = {}
 
-    async def fake_store_core(**_kwargs):
+    async def fake_store_core(**kwargs):
+        stored.update(kwargs)
         return "hold result"
 
     rt.init(config={}, decay_engine=_Decay(), mark_op=None)
     monkeypatch.setattr(rt, "record_v3_tool_event", lambda name, payload: calls.append((name, payload)))
     monkeypatch.setattr(hold_mod, "check_content_size", lambda _content: None)
     monkeypatch.setattr(hold_mod, "store_core", fake_store_core)
+    monkeypatch.setattr(hold_mod._identity, "get_caller", lambda: "cheng")
 
     result = await hold_mod.dispatch(content="private memory body", tags="x,y", importance=7)
 
-    assert result == "hold result"
+    assert result == "hold result\nowner:cheng"
+    assert stored["extra_tags"] == ["x", "y", "owner:cheng"]
     assert calls[0][0] == "hold"
     assert calls[0][1]["content_length"] == len("private memory body")
     assert "content" not in calls[0][1]
@@ -62,13 +66,14 @@ async def test_hold_dispatch_normalizes_and_forwards_domain(monkeypatch) -> None
     rt.init(config={}, decay_engine=_Decay(), mark_op=None)
     monkeypatch.setattr(hold_mod, "check_content_size", lambda _content: None)
     monkeypatch.setattr(hold_mod, "store_core", fake_store_core)
+    monkeypatch.setattr(hold_mod._identity, "get_caller", lambda: "cheng")
 
     result = await hold_mod.dispatch(
         content="domain memory",
         domain=" 工作, 生活,工作 ",
     )
 
-    assert result == "hold result"
+    assert result == "hold result\nowner:cheng"
     assert captured["explicit_domain"] == ["工作", "生活"]
 
 

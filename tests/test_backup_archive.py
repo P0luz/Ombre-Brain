@@ -480,7 +480,7 @@ async def test_export_restore_round_trip_preserves_source_evidence(tmp_path):
     source_store = SourceStore(source_vault)
     raw = "开场\n需要核对的原话\n尾声\n"
     ref = source_store.put(raw)
-    bucket_id = await source_manager.create(
+    bucket_id = await source_manager.create_internal(
         content="整理后事件",
         title="核对标题",
         source_refs=[{"ref": ref, "ranges": [[2, 2]]}],
@@ -518,7 +518,7 @@ async def test_legacy_backup_with_dangling_source_ref_warns_but_restores_bucket(
     source_manager = BucketManager(source_config, embedding_engine=source_engine)
     source_store = SourceStore(source_vault)
     ref = source_store.put("旧版没有打包这份原文")
-    bucket_id = await source_manager.create(
+    bucket_id = await source_manager.create_internal(
         content="旧版事件",
         title="旧版标题",
         source_refs=[{"ref": ref, "ranges": [[1, 1]]}],

@@ -191,7 +191,7 @@ def test_bucket_manager_ledger_report_includes_formal_invariants(test_config, fa
 
     async def scenario():
         manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
-        await manager.create("formal invariant source", domain=["policy"])
+        await manager.create_internal("formal invariant source", domain=["policy"])
         return manager.ledger_integrity_report()
 
     report = asyncio.run(scenario())

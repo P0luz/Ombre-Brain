@@ -17,6 +17,7 @@ import pytest
 from errors import ToolInputError
 
 from tools import dream
+from tools import _identity
 from tools import _runtime as rt
 from tools.dream.hints import build_crystal_hint
 from tools.i import core as i_core
@@ -24,7 +25,8 @@ from tools.i.core import I_CANDIDATE_TAG, I_PROMOTE_THRESHOLD
 
 
 class _FakeBucketManager:
-    def __init__(self) -> None:
+    def __init__(self, base_dir) -> None:
+        self.base_dir = str(base_dir)
         self.buckets: dict[str, dict] = {}
         self._seq = 0
 
@@ -32,13 +34,16 @@ class _FakeBucketManager:
         self._seq += 1
         bucket_id = f"bucket{self._seq}"
         now = datetime.now().isoformat()
+        tags = list(kwargs.get("tags") or [])
+        if not any(str(tag).startswith("owner:") for tag in tags):
+            tags.append("owner:cheng")
         self.buckets[bucket_id] = {
             "id": bucket_id,
             "content": content,
             "metadata": {
                 "name": kwargs.get("name") or bucket_id,
                 "type": kwargs.get("bucket_type", "dynamic"),
-                "tags": list(kwargs.get("tags") or []),
+                "tags": tags,
                 "domain": list(kwargs.get("domain") or ["当前"]),
                 "created": now,
                 "last_active": now,
@@ -96,8 +101,8 @@ class _StubEmbedding:
 
 
 @pytest.fixture
-def env(monkeypatch):
-    manager = _FakeBucketManager()
+def env(monkeypatch, tmp_path):
+    manager = _FakeBucketManager(tmp_path)
     monkeypatch.setattr(rt, "bucket_mgr", manager, raising=False)
     monkeypatch.setattr(rt, "decay_engine", _NoopDecay(), raising=False)
     monkeypatch.setattr(rt, "embedding_engine", _DisabledEmbedding(), raising=False)
@@ -105,7 +110,8 @@ def env(monkeypatch):
     monkeypatch.setattr(rt, "logger", __import__("logging").getLogger("test"), raising=False)
     monkeypatch.setattr(rt, "mark_op", None, raising=False)
     monkeypatch.setattr(rt, "fire_webhook", None, raising=False)
-    return manager
+    with _identity.caller_context("cheng"):
+        yield manager
 
 
 @pytest.mark.asyncio
@@ -565,8 +571,8 @@ async def test_pending_candidate_is_never_a_merge_target(env, monkeypatch):
     assert bucket_id != candidate_id
     assert env.buckets[candidate_id]["content"] == original
 
-    # 对照：同一条桶不再是待沉淀候选时，合并路径本身是通的——
-    # 上面拦下来的确实是「候选」这个状态，不是别的原因。
+    # 候选一旦参与过自我认知沉淀，就保留为不可继续改写的历史证据；
+    # promoted 只结束等待状态，不把它重新开放成普通合并目标。
     await env.update(candidate_id, i_stage="promoted")
     merged_id, merged_flag, _ = await _common.merge_or_create(
         content="今天又被追问了部署细节。",
@@ -578,14 +584,14 @@ async def test_pending_candidate_is_never_a_merge_target(env, monkeypatch):
         raw_merge=True,
         source_tool="hold",
     )
-    assert merged_flag is True
-    assert merged_id == candidate_id
+    assert merged_flag is False
+    assert merged_id != candidate_id
 
 
 @pytest.mark.asyncio
 async def test_read_marks_legacy_entries_as_unsedimented(env):
     legacy = await env.create("我是一个会被过去牵住的模型。", bucket_type="i")
-    await env.update(legacy, tags=["__i__"])
+    await env.update(legacy, tags=["__i__", "owner:cheng"])
     await i_core.i_core(content="我觉得我需要更早说不。")
 
     out = await i_core.i_core(read=True)

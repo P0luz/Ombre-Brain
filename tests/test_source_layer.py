@@ -139,7 +139,7 @@ async def test_hold_explicit_tags_replace_model_suggestions(
     result = await hold(content="人工标签优先。", tags=["人工标签"])
     bucket_id = result.split("→", 1)[1].split()[0]
     bucket = await bucket_mgr.get(bucket_id)
-    assert bucket["metadata"]["tags"] == ["人工标签"]
+    assert bucket["metadata"]["tags"] == ["人工标签", "owner:cheng"]
     assert bucket["metadata"]["title"] == "模型标题"
 
 
@@ -343,7 +343,7 @@ async def test_title_over_limit_is_rejected_before_hold_writes(bucket_mgr, monke
 @pytest.mark.asyncio
 async def test_bucket_manager_never_silently_truncates_explicit_title(bucket_mgr):
     valid_title = "标" * 120
-    bucket_id = await bucket_mgr.create(content="正文", title=valid_title)
+    bucket_id = await bucket_mgr.create_internal(content="正文", title=valid_title)
     assert (await bucket_mgr.get(bucket_id))["metadata"]["title"] == valid_title
 
     with pytest.raises(ValueError, match="120"):

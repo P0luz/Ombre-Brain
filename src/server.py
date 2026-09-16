@@ -33,7 +33,8 @@ import sys
 import logging
 import asyncio
 import time
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, nullcontext
+from pathlib import Path
 from typing import Optional, Awaitable
 import httpx
 
@@ -57,7 +58,8 @@ from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
 from ombrebrain.protocol.strict_schema import harden_registered_tools
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
-from utils import get_version, load_config, setup_logging
+from utils import config_file_path, get_version, load_config, setup_logging
+from runtime_owner import RuntimeAdmissionMiddleware, runtime_admitted
 
 # --- iter 2.1：MCP 工具实现已按代码路径拆分到 tools/ 子包 ---
 # 本文件只保留 MCP 注册 + 路由（HTTP custom_route）+ 共享辅助。
@@ -72,6 +74,7 @@ from tools import anchor as _t_anchor
 from tools import plan as _t_plan
 from tools import dream as _t_dream
 from tools import i as _t_i
+from tools import just_now as _t_just_now
 from tools import them as _t_them
 from tools import you as _t_you
 
@@ -214,6 +217,64 @@ except ImportError:
         ToolInputError,
     )
 configure_errors_path(config.get("buckets_dir", "buckets"))
+
+# Recover durable publication generations before any component opens a cache
+# or derived database against the selected Markdown generation.
+from restore_publication import (
+    TRANSACTION_ROOT_NAME,
+    recover_restore_publications_before_startup,
+)
+from embedding_publish import recover_pending_publish
+from import_transaction import recover_import_transactions
+
+_m04_live_root = Path(str(config.get("buckets_dir", "buckets"))).expanduser().resolve()
+_m04_transaction_root = _m04_live_root.parent / TRANSACTION_ROOT_NAME
+if _m04_transaction_root.exists() or _m04_transaction_root.is_symlink():
+    recover_restore_publications_before_startup(
+        _m04_transaction_root,
+        quiescence=lambda: nullcontext(),
+    )
+_embedding_cfg = config.get("embedding", {}) or {}
+_live_embedding_db = str(_embedding_cfg.get("db_path") or "").strip() or os.path.join(
+    config.get("buckets_dir", "buckets"), "embeddings.db"
+)
+recover_pending_publish(config_file_path(), _live_embedding_db)
+_recovered_config = load_config()
+config.clear()
+config.update(_recovered_config)
+recover_import_transactions(str(config.get("buckets_dir", "buckets")))
+
+# Remainder startup recovery resolves PREPARED sidecars left by a crash only
+# after every Markdown generation publisher has recovered, and before any
+# component opens a cache or derived index against the live vault.
+try:
+    from remainder_integration import (
+        recover_remainders_before_startup as _recover_remainders,
+    )
+
+    _remainder_result = _recover_remainders(
+        str(config.get("buckets_dir", "buckets"))
+    )
+    if _remainder_result.get("recovered"):
+        logger.warning(
+            "[startup] recovered %d remainder sidecar entries "
+            "(%d committed, %d aborted)",
+            _remainder_result["recovered"],
+            _remainder_result.get("committed", 0),
+            _remainder_result.get("aborted", 0),
+        )
+except Exception as _remainder_recovery_error:
+    logger.error(
+        "[STARTUP FAILED] remainder recovery failed: %s",
+        type(_remainder_recovery_error).__name__,
+    )
+    write_fatal_log(
+        "OB-F-REM-RECOVERY",
+        f"{type(_remainder_recovery_error).__name__}: "
+        f"{_remainder_recovery_error}",
+        buckets_dir=config.get("buckets_dir"),
+    )
+    raise
 
 try:
     embedding_engine = EmbeddingEngine(config)            # Embedding engine first (BucketManager depends on it)
@@ -693,6 +754,7 @@ _tools_runtime.init(
 # 每个入口都不超过 10 行，便于一眼看清参数与归属
 # =============================================================
 @mcp.tool()
+@runtime_admitted
 async def breath(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,
@@ -703,19 +765,22 @@ async def breath(
     importance_min: Optional[int] = -1,
     tags: Optional[str] = "",
     catalog: Optional[bool] = False,
+    mode: Optional[str] = "",
 ) -> str:
-    """无参数,睁眼看看自己记得什么:返回权重最高、未解决且未标记 digested 的记忆 + 置顶核心准则。digested 从默认/被动浮现及 dream 隐藏，仍可由 breath_search(query=...) 显式找回。0 参数是刻意设计——claude.ai 按需加载工具时会跳过参数复杂的工具,拆成 0 参数才能保证每次对话自动浮现,不用手动触发。要按关键词找记忆用 breath_search(query=...);要用 catalog/tags/importance_min/valence/arousal/max_tokens 等高级模式用 breath_advanced(...)。domain=只在某个主题域里找(逗号分隔),max_results=最多返回几条——这两个 breath 也认,但 breath 的本意就是不带参数睁眼看看。"""
+    """无参数,睁眼看看自己记得什么:返回权重最高、未解决且未标记 digested 的记忆 + 置顶核心准则。digested 从默认/被动浮现及 dream 隐藏，仍可由 breath_search(query=...) 显式找回。0 参数是刻意设计——claude.ai 按需加载工具时会跳过参数复杂的工具,拆成 0 参数才能保证每次对话自动浮现,不用手动触发。要按关键词找记忆用 breath_search(query=...);要用 catalog/tags/importance_min/valence/arousal/max_tokens 等高级模式用 breath_advanced(...)。domain=只在某个主题域里找(逗号分隔),max_results=最多返回几条——这两个 breath 也认,但 breath 的本意就是不带参数睁眼看看。mode="handoff" 返回严格 owner-safe 的冷启动交接；普通浮现保持默认 mode。"""
     return await _with_notice(
         _t_breath.dispatch(
             query=query, max_tokens=max_tokens, domain=domain,
             valence=valence, arousal=arousal, max_results=max_results,
             importance_min=importance_min, tags=tags, catalog=catalog,
+            mode=mode,
         ),
         op="breath",
         args={
             "query": query, "max_tokens": max_tokens, "domain": domain,
             "valence": valence, "arousal": arousal, "max_results": max_results,
             "importance_min": importance_min, "tags": tags, "catalog": catalog,
+            "mode": mode,
         },
     )
 
@@ -747,6 +812,7 @@ except (AttributeError, RuntimeError, TypeError, ValueError) as _breath_compat_e
 
 
 @mcp.tool()
+@runtime_admitted
 async def breath_search(
     query: str,
     domain: Optional[str] = "",
@@ -778,6 +844,7 @@ async def breath_search(
 
 
 @mcp.tool()
+@runtime_admitted
 async def breath_advanced(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,
@@ -819,6 +886,7 @@ async def breath_advanced(
 
 
 @mcp.tool()
+@runtime_admitted
 async def hold(
     content: str,
     title: Optional[str] = "",
@@ -865,6 +933,7 @@ async def hold(
 
 
 @mcp.tool()
+@runtime_admitted
 async def grow(
     content: str = "", items: Optional[list] = None, test_data: Optional[bool] = False
 ) -> str:
@@ -908,6 +977,7 @@ async def _decide_deletion_request(
 
 
 @mcp.tool()
+@runtime_admitted
 async def trace(
     bucket_id: str,
     name: Optional[str] = "",
@@ -1084,6 +1154,46 @@ except (AttributeError, RuntimeError, TypeError, ValueError) as _trace_schema_ex
 
 
 @mcp.tool()
+@runtime_admitted
+async def just_now(
+    action: Optional[str] = "read",
+    source: Optional[str] = "",
+    task_id: Optional[str] = "",
+    role: Optional[str] = "",
+    content: Optional[str] = "",
+    occurred_at: Optional[str] = "",
+    source_cursor: Optional[str] = "",
+    event_id: Optional[str] = "",
+    session_id: Optional[str] = "",
+    cursor: Optional[str] = "",
+    limit: Optional[int] = 0,
+    after_seq: Optional[int] = 0,
+    confirm: Optional[bool] = False,
+) -> str:
+    """短期消息账本，不进入长期记忆桶，只按 caller+source+task_id 精确操作。action 选择 append/read/ack/clear；append 使用 role、content、occurred_at、source_cursor、event_id、session_id 写事件；read 使用 cursor、limit、after_seq 分页；clear 必须 confirm=True。"""
+    return await _with_notice(
+        _t_just_now.dispatch(
+            action=action,
+            source=source,
+            task_id=task_id,
+            role=role,
+            content=content,
+            occurred_at=occurred_at,
+            source_cursor=source_cursor,
+            event_id=event_id,
+            session_id=session_id,
+            cursor=cursor,
+            limit=limit,
+            after_seq=after_seq,
+            confirm=confirm,
+        ),
+        op="just_now",
+        args={"action": action, "source": source, "task_id": task_id},
+    )
+
+
+@mcp.tool()
+@runtime_admitted
 async def dream(
     window_hours: Optional[int] = 48,
 ) -> str:
@@ -1103,6 +1213,7 @@ async def dream(
 
 
 @mcp.tool()
+@runtime_admitted
 async def anchor(bucket_id: str) -> str:
     """把指定桶标记为 anchor(坐标系)。anchor 不主动出现在默认 breath，但 query/domain/emotion 命中时仍返回。硬上限 24，已满时拒绝并提示先 release。"""
     return await _with_notice(
@@ -1113,6 +1224,7 @@ async def anchor(bucket_id: str) -> str:
 
 
 @mcp.tool()
+@runtime_admitted
 async def release(bucket_id: str) -> str:
     """解除指定桶的 anchor 标记。桶恢复为普通状态，重新参与默认 breath；pinned 状态保留。"""
     return await _with_notice(
@@ -1123,8 +1235,9 @@ async def release(bucket_id: str) -> str:
 
 
 @mcp.tool()
+@runtime_admitted
 async def pulse(include_archive: Optional[bool] = False) -> str:
-    """返回记忆系统状态摘要:固化/动态/归档/feel/plan/letter 数量、总占用、衰减引擎运行状态,以及所有桶的摘要列表；anchor 行带独立 ⚓ [anchor] 冷参考标记。include_archive=True 同时返回归档区。"""
+    """返回当前 caller 可见记忆的状态摘要与桶列表；owner-bound MCP 只显示本人及 shared/shared_core，callerless 本地维护入口保留全库诊断。anchor 行带独立 ⚓ [anchor] 冷参考标记。include_archive=True 同时返回可见归档区。"""
     return await _with_notice(
         _t_anchor.pulse(include_archive=include_archive),
         op="pulse",
@@ -1133,6 +1246,7 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
 
 
 @mcp.tool()
+@runtime_admitted
 async def plan(
     content: str,
     status: Optional[str] = "active",
@@ -1156,6 +1270,7 @@ async def plan(
 
 
 @mcp.tool()
+@runtime_admitted
 async def letter_write(
     author: str,
     content: str,
@@ -1199,6 +1314,7 @@ user_name 可选;ai_name 可选(默认取环境变量 AI_NAME,回退 \"AI\");tit
 
 
 @mcp.tool()
+@runtime_admitted
 async def letter_lock_update(
     letter_id: str,
     lock_type: str,
@@ -1229,6 +1345,7 @@ lock_type=\"none\" 解锁 / \"timed\" 到期打开(必须同时给未来的 unlo
 
 
 @mcp.tool()
+@runtime_admitted
 async def letter_read(
     query: Optional[str] = "",
     limit: Optional[int] = 10,
@@ -1251,6 +1368,7 @@ async def letter_read(
 
 
 @mcp.tool()
+@runtime_admitted
 async def feel(
     query: str,
     max_tokens: Optional[int] = 0,
@@ -1264,6 +1382,7 @@ async def feel(
 
 
 @mcp.tool()
+@runtime_admitted
 async def I(
     content: Optional[str] = "",
     aspect: Optional[str] = "",
@@ -1271,17 +1390,31 @@ async def I(
     limit: Optional[int] = 20,
     promote: Optional[str] = "",
     supersedes: Optional[str] = "",
+    action: Optional[str] = "auto",
+    confidence: Optional[float] = -1.0,
+    evidence_id: Optional[str] = "",
+    source_bucket: Optional[str] = "",
+    source_refs: Optional[str] = "",
+    confirm_stable: Optional[bool] = False,
+    bucket_id: Optional[str] = "",
+    reason: Optional[str] = "",
+    include_inactive: Optional[bool] = False,
 ) -> str:
-    """写下或读取自我认知。I 是沉淀物不是日记：content=一个「我觉得……」，先落成一条普通记忆（候选），会浮现也会衰减，每次 dream 都跟相关记忆摆在一起碰撞。aspect=维度:nature(本质)/values(看重的)/patterns(规律)/limits(局限)/becoming(变化方向)/uncertainty(不确定的)/stance(立场)(可选)。read=True 或全空=读正式条目+待沉淀候选。limit=返回条数上限(默认 20)。promote=候选桶ID，被 3 次不同日期的 dream 见证后才能升级成正式条目（可同时传 content 用提炼后的措辞）。supersedes=正式I条目ID，表示这条新认识要取代它：旧条目立刻不再作为当前信念读出去（一个字不删，随时可查，质疑撤了它就回来），而新的仍要照常攒够见证；只能在同一 aspect 内取代。正式条目不参与普通 breath/dream，SessionStart 时自动附最近 3 条。"""
+    """写下或读取 owner-safe 自我认知。content 是候选或画像正文；aspect 是 nature/values/patterns/limits/becoming/uncertainty/stance；read 与 limit 控制传统 I 读取；promote 升级候选，supersedes 声明取代旧条目。action 可选 auto/read/write/promote/create_profile/list_profiles/revoke_profile/invalidate_profile/supersede_profile；create_profile 还需 confidence、evidence_id 或 source_bucket/source_refs，以及 confirm_stable=True；画像状态转换用 bucket_id 与 reason；list_profiles 可用 include_inactive。"""
     return await _with_notice(
         _t_i.dispatch(
             content=content, aspect=aspect, read=read, limit=limit,
-            promote=promote, supersedes=supersedes,
+            promote=promote, supersedes=supersedes, action=action,
+            confidence=confidence, evidence_id=evidence_id,
+            source_bucket=source_bucket, source_refs=source_refs,
+            confirm_stable=confirm_stable, bucket_id=bucket_id,
+            reason=reason, include_inactive=include_inactive,
         ),
         op="I",
         args={
             "content_len": len(content or ""), "aspect": aspect, "read": read,
             "limit": limit, "promote": promote, "supersedes": supersedes,
+            "action": action, "bucket_id": bucket_id,
         },
     )
 
@@ -1422,7 +1555,11 @@ migrate_engine.attach_them_runtime(them_service, them_tool_gate)
 # OAuth 2.0 — MCP Remote Auth —— 已拆分到 web/oauth.py（路由在其 register 内注册）。
 # 这里把启动期 MCP 鉴权中间件要用的两个校验函数 import 回来；hybrid 会同时注入。
 # ============================================================
-from web.oauth import _is_valid_mcp_token, _is_valid_static_mcp_token  # noqa: F401
+from web.oauth import (  # noqa: F401
+    _caller_for_mcp_token,
+    _is_valid_mcp_token,
+    _is_valid_static_mcp_token,
+)
 
 
 # ============================================================
@@ -1442,6 +1579,96 @@ if __name__ == "__main__":
         RuntimeLifecycle,
         build_http_app,
     )
+    from runtime_control import BackgroundComponent
+    from runtime_owner import (
+        blocking_background_component,
+        configure_service_quiescence,
+    )
+    from restore_derived_adapter import rebuild_and_publish_embeddings_sync
+    from web import embedding as _embedding_web
+    from web import ollama_local as _ollama_runtime
+    import migration_engine as _embedding_migration_runtime
+
+    async def _m04_stop_github() -> None:
+        global _github_auto_task
+        if _github_auto_task is not None and not _github_auto_task.done():
+            _github_auto_task.cancel()
+            try:
+                await _github_auto_task
+            except asyncio.CancelledError:
+                pass
+        _github_auto_task = None
+
+    async def _m04_start_github() -> None:
+        _restart_github_auto_task(_gh_auto_interval)
+
+    async def _m04_close_derived() -> None:
+        # EmbeddingEngine opens SQLite per operation, so quiescing admission
+        # and workers is sufficient; there is no persistent handle to close.
+        return None
+
+    async def _m04_reopen_derived() -> None:
+        embedding_engine.status()
+
+    _m04_service_quiescence = configure_service_quiescence(
+        components=(
+            BackgroundComponent(
+                name="decay-engine",
+                is_running=lambda: bool(decay_engine.is_running),
+                stop=decay_engine.stop,
+                start=decay_engine.start,
+            ),
+            BackgroundComponent(
+                name="github-auto-sync",
+                is_running=lambda: bool(
+                    _github_auto_task is not None and not _github_auto_task.done()
+                ),
+                stop=_m04_stop_github,
+                start=_m04_start_github,
+            ),
+            BackgroundComponent(
+                name="ollama-managed-child",
+                is_running=lambda: bool(
+                    getattr(_ollama_runtime, "_child_managed", False)
+                ),
+                stop=_ollama_runtime.stop_child,
+                start=_ollama_runtime.ensure_child_on_boot,
+            ),
+            blocking_background_component(
+                "conversation-import", lambda: bool(import_engine.is_running)
+            ),
+            blocking_background_component(
+                "memory-package-migrate", lambda: bool(migrate_engine.is_busy)
+            ),
+            blocking_background_component(
+                "embedding-migration", _embedding_migration_runtime.is_running
+            ),
+            blocking_background_component(
+                "embedding-backfill",
+                lambda: bool(
+                    _embedding_web._backfill_task is not None
+                    and not _embedding_web._backfill_task.done()
+                ),
+            ),
+            blocking_background_component(
+                "ollama-model-pull",
+                lambda: bool(
+                    _embedding_web._ollama_pull_task is not None
+                    and not _embedding_web._ollama_pull_task.done()
+                ),
+            ),
+        ),
+        close_derived=_m04_close_derived,
+        reopen_derived=_m04_reopen_derived,
+    )
+
+    def _m04_rebuild_derived(live_markdown_root, manifest):
+        return rebuild_and_publish_embeddings_sync(
+            live_markdown_root,
+            manifest,
+            config=config,
+            live_engine=embedding_engine,
+        )
 
     if transport == "streamable-http":
         import uvicorn
@@ -1484,7 +1711,13 @@ if __name__ == "__main__":
             token_validator=_mcp_token_validator,
             lifecycle=_runtime_lifecycle,
             static_token_validator=_mcp_static_token_validator,
+            caller_resolver=(
+                _caller_for_mcp_token
+                if _http_settings.auth_mode in ("oauth", "hybrid")
+                else None
+            ),
         )
+        _app.add_middleware(RuntimeAdmissionMiddleware)
         if transport == "streamable-http":
             logger.info(
                 "MCP /mcp：16 个基础工具（单连接器），You / Them 各按独立开关动态显隐"

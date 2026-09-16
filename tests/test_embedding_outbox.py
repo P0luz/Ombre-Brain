@@ -9,12 +9,20 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from tools import _identity
+
 from bucket_manager import BucketManager
 from embedding_engine import EmbeddingEngine
 from ombrebrain.storage.embedding_outbox import EmbeddingOutbox, content_hash
 from tools import _common as common
 from tools import _runtime as rt
 from web import embedding as embedding_web
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_caller():
+    with _identity.caller_context("cheng"):
+        yield
 
 
 def _config(tmp_path, **embedding):
@@ -59,6 +67,9 @@ class RecordingEngine:
 
     def list_content_hashes(self):
         return dict(self.hashes)
+
+    def get_content_hash(self, bucket_id):
+        return self.hashes.get(bucket_id, "")
 
     def delete_embedding(self, bucket_id):
         self.hashes.pop(bucket_id, None)
@@ -336,7 +347,7 @@ async def test_transient_failure_survives_stale_reconcile_and_recovers(
     outbox = EmbeddingOutbox(config, manager, engine)
     manager.attach_embedding_outbox(outbox)
     outbox._running = True
-    bucket_id = await manager.create(content="retry after stale reconcile")
+    bucket_id = await manager.create_internal(content="retry after stale reconcile")
     outbox._running = False
 
     assert await outbox.process_once() is True
@@ -474,7 +485,7 @@ async def test_background_indexing_never_blocks_markdown_write(tmp_path):
     await outbox.start(reconcile=False)
     try:
         bucket_id = await asyncio.wait_for(
-            manager.create(content="memory survives a slow provider"),
+            manager.create_internal(content="memory survives a slow provider"),
             timeout=0.2,
         )
         bucket = await manager.get(bucket_id)
@@ -509,9 +520,10 @@ async def test_merge_or_create_returns_while_embedding_worker_is_blocked(
 
     existing_id = ""
     if preexisting:
-        existing_id = await manager.create(
+        existing_id = await manager.create_internal(
             content=content,
             defer_derived_index=True,
+            tags=["owner:cheng"],
         )
         outbox.discard(existing_id)
 
@@ -564,7 +576,7 @@ async def test_retry_state_survives_restart_and_recovers(tmp_path):
     manager.attach_embedding_outbox(outbox)
 
     await outbox.start(reconcile=False)
-    bucket_id = await manager.create(content="retry me after restart")
+    bucket_id = await manager.create_internal(content="retry me after restart")
     await _wait_for(lambda: outbox.status()["retrying"] == 1)
     await outbox.stop()
 
@@ -593,7 +605,7 @@ async def test_content_changed_during_indexing_is_requeued(tmp_path):
 
     await outbox.start(reconcile=False)
     try:
-        bucket_id = await manager.create(content="old content")
+        bucket_id = await manager.create_internal(content="old content")
         await asyncio.wait_for(engine.started.wait(), timeout=0.5)
         assert await manager.update(bucket_id, content="new content")
 
@@ -622,7 +634,7 @@ async def test_all_memory_types_persist_while_embedding_is_disabled(tmp_path):
         ids = []
         for bucket_type in ("dynamic", "permanent", "feel", "plan", "letter"):
             ids.append(
-                await manager.create(
+                await manager.create_internal(
                     content=f"offline {bucket_type}",
                     bucket_type=bucket_type,
                 )
@@ -649,17 +661,23 @@ async def test_provider_circuit_breaker_stops_failure_storm_and_recovers(tmp_pat
     outbox = EmbeddingOutbox(config, manager, failing)
     manager.attach_embedding_outbox(outbox)
 
+    bucket_ids = [
+        await manager.create_internal(content=f"circuit memory {index}")
+        for index in range(4)
+    ]
+    calls_before_worker = len(failing.calls)
     await outbox.start(reconcile=False)
     try:
-        bucket_ids = [
-            await manager.create(content=f"circuit memory {index}")
-            for index in range(4)
-        ]
         await _wait_for(lambda: outbox.status()["circuit"]["state"] == "open")
         calls_at_trip = len(failing.calls)
         await asyncio.sleep(0.05)
 
-        assert calls_at_trip == 2
+        # All candidates are queued before the worker starts, so the provider
+        # trips after exactly two distinct buckets rather than depending on
+        # event-loop timing while the fixture is still enqueueing work.
+        worker_calls = failing.calls[calls_before_worker:calls_at_trip]
+        assert len(worker_calls) == 2
+        assert len({bucket_id for bucket_id, _content in worker_calls}) == 2
         assert len(failing.calls) == calls_at_trip
         assert outbox.status()["pending"] == 4
         assert outbox.status()["circuit"]["trips"] == 1
@@ -707,7 +725,7 @@ async def test_poison_item_does_not_trip_circuit_or_block_other_items(tmp_path):
 
     await outbox.start(reconcile=False)
     try:
-        await manager.create(content=poison_content)
+        await manager.create_internal(content=poison_content)
 
         # 毒药桶自己反复重试很多次（远超 circuit_failure_threshold=2），
         # 熔断绝不能因此打开。
@@ -716,7 +734,7 @@ async def test_poison_item_does_not_trip_circuit_or_block_other_items(tmp_path):
         assert outbox.status()["circuit"]["trips"] == 0
 
         # 熔断没开着，新写入的合法记忆必须正常被处理，不会陪毒药桶一起卡住。
-        good_id = await manager.create(content="一条完全正常的记忆")
+        good_id = await manager.create_internal(content="一条完全正常的记忆")
         await _wait_for(
             lambda: any(bid == good_id for bid, _c in engine.calls), timeout=1.0
         )
@@ -747,7 +765,7 @@ async def test_cancel_after_meaning_commit_survives_outbox_reload(
 
     engine = MeaningEngine()
     manager = BucketManager(config, embedding_engine=engine)
-    bucket_id = await manager.create("durable meaning base")
+    bucket_id = await manager.create_internal("durable meaning base")
     outbox = EmbeddingOutbox(config, manager, engine)
     manager.attach_embedding_outbox(outbox)
 

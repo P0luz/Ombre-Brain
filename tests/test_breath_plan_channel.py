@@ -44,7 +44,7 @@ def _install_runtime(bucket_mgr):
 
 
 async def _make_plan(bucket_mgr, content: str, status: str = "active") -> str:
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content=content,
         tags=["__plan__"],
         importance=7,
@@ -64,7 +64,7 @@ async def test_domain_plan_returns_plan_bodies_not_core_principles(bucket_mgr):
     _install_runtime(bucket_mgr)
     await _make_plan(bucket_mgr, "把工具精简的第二步做完")
     # 一条 pinned 核心准则：修复前它会顶替 plan 出现在返回里
-    await bucket_mgr.create(
+    await bucket_mgr.create_internal(
         content="这是置顶核心准则，不该在 domain=plan 时返回",
         tags=[], importance=10, domain=["general"],
         valence=0.5, arousal=0.5, name=None, pinned=True,
@@ -80,7 +80,7 @@ async def test_domain_plan_returns_plan_bodies_not_core_principles(bucket_mgr):
 async def test_domain_plan_says_no_plan_instead_of_returning_nothing(bucket_mgr):
     """一条 plan 都没有时要明说，不能返回空或退化成浮现内容。"""
     _install_runtime(bucket_mgr)
-    await bucket_mgr.create(
+    await bucket_mgr.create_internal(
         content="一条普通记忆，不是 plan",
         tags=[], importance=5, domain=["general"],
         valence=0.5, arousal=0.5, name=None,

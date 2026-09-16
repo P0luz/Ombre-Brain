@@ -92,7 +92,7 @@ def install_search_runtime(bucket_mgr, decay_eng, dehydrator):
 
 @pytest.mark.asyncio
 async def test_default_breath_surfaces_type_permanent_bucket_without_pinned_flag(bucket_mgr, decay_eng):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Core rule alpha must always be visible.",
         bucket_type="permanent",
         importance=10,
@@ -108,7 +108,7 @@ async def test_default_breath_surfaces_type_permanent_bucket_without_pinned_flag
 
 @pytest.mark.asyncio
 async def test_default_breath_respects_dont_surface_even_for_core_bucket(bucket_mgr, decay_eng):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Core rule beta should stay hidden from spontaneous breath.",
         bucket_type="permanent",
         importance=10,
@@ -130,7 +130,7 @@ async def test_search_breath_returns_raw_content_without_dehydration(
     monkeypatch,
 ):
     """主动检索的两个派生服务都离线时，Markdown 原文仍然可读。"""
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Candlelit protocol belongs to the permanent rules.",
         bucket_type="permanent",
         importance=10,
@@ -189,13 +189,13 @@ async def test_search_breath_filters_terminal_states_but_keeps_dont_surface(deca
 
 @pytest.mark.asyncio
 async def test_search_domain_filter_matches_legacy_scalar_domain_on_permanent(bucket_mgr):
-    permanent_id = await bucket_mgr.create(
+    permanent_id = await bucket_mgr.create_internal(
         content="Legacy scalar domain permanent rule.",
         bucket_type="permanent",
         importance=10,
         domain=["rules"],
     )
-    await bucket_mgr.create(
+    await bucket_mgr.create_internal(
         content="Dynamic bucket in the same domain but without the query phrase.",
         domain=["rules"],
     )
@@ -214,7 +214,7 @@ async def test_search_domain_filter_matches_legacy_scalar_domain_on_permanent(bu
 
 @pytest.mark.asyncio
 async def test_decay_cycle_preserves_explicit_permanent_bucket_without_pinned_flag(bucket_mgr, decay_eng):
-    permanent_id = await bucket_mgr.create(
+    permanent_id = await bucket_mgr.create_internal(
         content="Permanent memory is a first-class bucket type.",
         bucket_type="permanent",
         importance=10,
@@ -231,7 +231,7 @@ async def test_decay_cycle_preserves_explicit_permanent_bucket_without_pinned_fl
 
 @pytest.mark.asyncio
 async def test_direct_pinned_create_writes_permanent_type_and_unpin_moves_to_dynamic(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Direct pinned create should keep type and path in sync.",
         pinned=True,
     )
@@ -254,7 +254,7 @@ async def test_importance_breath_falls_back_to_raw_permanent_content_when_dehydr
     bucket_mgr,
     decay_eng,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Permanent importance fallback should be readable.",
         bucket_type="permanent",
         importance=10,
@@ -270,7 +270,7 @@ async def test_importance_breath_falls_back_to_raw_permanent_content_when_dehydr
 
 @pytest.mark.asyncio
 async def test_repair_pinned_desync_does_not_demote_explicit_permanent_bucket(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Permanent repair guard should stay in permanent storage.",
         bucket_type="permanent",
         importance=10,
@@ -290,7 +290,7 @@ async def test_repair_pinned_desync_does_not_demote_explicit_permanent_bucket(bu
 
 @pytest.mark.asyncio
 async def test_idempotent_unpinned_update_preserves_explicit_permanent_bucket(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Permanent buckets should survive an idempotent pinned false update.",
         bucket_type="permanent",
         importance=10,
