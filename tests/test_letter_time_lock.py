@@ -332,6 +332,7 @@ async def test_dashboard_creates_human_lock_hides_it_from_ai_and_rejects_ai_prox
     bucket = await bucket_mgr.get(data["id"])
     assert response.status_code == 200
     assert bucket["metadata"]["locked_by"] == "human"
+    assert "owner:shared" in bucket["metadata"]["tags"]
     assert letter_lock_state(bucket, "ai")["locked"] is True
 
     rejected = await create(JsonRequest({
@@ -856,7 +857,7 @@ def _owner_safe_letter_fixtures(bucket_mgr, monkeypatch):
 
     async def create_owned(*args, **kwargs):
         tags = list(kwargs.pop("tags", []) or [])
-        if "owner:cheng" not in tags:
+        if not any(str(tag).lower().startswith("owner:") for tag in tags):
             tags.append("owner:cheng")
         return await create_internal(*args, tags=tags, **kwargs)
 

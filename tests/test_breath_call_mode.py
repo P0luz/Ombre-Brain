@@ -122,6 +122,11 @@ async def test_manual_is_the_default(manager):
 
 
 @pytest.mark.asyncio
+async def test_empty_wire_mode_keeps_zero_argument_breath_compatible(manager):
+    assert await dispatch(mode="") == await dispatch(mode="manual")
+
+
+@pytest.mark.asyncio
 async def test_automatic_drops_dont_surface(manager):
     out = await dispatch(query="记忆", mode="automatic")
 

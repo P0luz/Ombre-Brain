@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 import httpx
 import pytest
 
+from tests.docker_oauth_helper import issue_oauth_token
+
 
 def _bucket_id(text: str) -> str:
     match = re.search(r"(?<![0-9a-f])[0-9a-f]{12}(?![0-9a-f])", text)
@@ -32,6 +34,7 @@ def _configured_base_url() -> str:
 BASE_URL = _configured_base_url()
 SETUP_TOKEN = os.environ.get("OMBRE_DOCKER_SETUP_TOKEN", "").strip()
 HOOK_TOKEN = os.environ.get("OMBRE_DOCKER_HOOK_TOKEN", "").strip()
+DASHBOARD_PASSWORD = "docker-audit-password"
 pytestmark = pytest.mark.skipif(
     not BASE_URL,
     reason="Docker Web integration service is not configured",
@@ -66,7 +69,7 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
         if SETUP_TOKEN:
             remote_without_token = client.post(
                 "/auth/setup",
-                json={"password": "docker-audit-password"},
+                json={"password": DASHBOARD_PASSWORD},
             )
             assert remote_without_token.status_code == 403
 
@@ -79,7 +82,7 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
 
         setup = client.post(
             "/auth/setup",
-            json={"password": "docker-audit-password"},
+            json={"password": DASHBOARD_PASSWORD},
             headers=setup_headers,
         )
         assert setup.status_code == 200
@@ -100,7 +103,7 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
         assert config.status_code == 200
         config_payload = config.json()
         assert config_payload["transport_effective"] == "streamable-http"
-        assert config_payload["mcp_require_auth_effective"] is False
+        assert config_payload["mcp_require_auth_effective"] is True
         assert "api_key" not in config_payload.get("dehydration", {})
         assert "api_key" not in config_payload.get("embedding", {})
 
@@ -173,6 +176,11 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
         assert human_item["lock_type"] == "permanent"
         assert human_item["writer_name"]
 
+        mcp_token = issue_oauth_token(
+            base_url=BASE_URL,
+            password=DASHBOARD_PASSWORD,
+            caller="cheng",
+        )
         request_id = 0
 
         def mcp_request(method, params=None, path="/mcp"):
@@ -180,7 +188,11 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
             request_id += 1
             response = client.post(
                 path,
-                headers={"Accept": "application/json", "Content-Type": "application/json"},
+                headers={
+                    "Accept": "application/json",
+                    "Content-Type": "application/json",
+                    "Authorization": f"Bearer {mcp_token}",
+                },
                 json={"jsonrpc": "2.0", "id": request_id, "method": method, "params": params or {}},
             )
             assert response.status_code == 200, response.text
@@ -298,14 +310,18 @@ def test_desktop_management_api_first_run_and_authenticated_flow():
         )
         assert chunked_oversize.status_code == 413
 
-        assert client.get("/.well-known/oauth-protected-resource/mcp").status_code == 404
+        metadata = client.get("/.well-known/oauth-protected-resource/mcp")
+        assert metadata.status_code == 200
+        assert metadata.json()["resource"] == f"{BASE_URL}/mcp"
         assert client.get("/.well-known/oauth-protected-resource/not-a-route").status_code == 404
         # /mcp-extra 自 3.4.0 随信件并回主链路而再次退役：这条路不存在了，
         # 要的就是 404。3.2.0–3.3.0 期间它是信件连接器，那时 GET 拿的是 406
         # （streamable-http 只接受 POST + JSON Accept）。
         assert client.get("/mcp-extra").status_code == 404
         # 主连接器仍在，GET 拿 406 而不是 404
-        assert client.get("/mcp").status_code == 406
+        assert client.get(
+            "/mcp", headers={"Authorization": f"Bearer {mcp_token}"}
+        ).status_code == 406
 
         invalid_transport = client.post(
             "/api/transport",

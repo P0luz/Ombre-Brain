@@ -110,7 +110,7 @@ async def dispatch(
     date_from = "" if date_from is None else str(date_from)
     date_to = "" if date_to is None else str(date_to)
     quotes = parse_bool(quotes, default=False)
-    mode = "manual" if mode is None else str(mode).strip().lower()
+    mode = "manual" if mode is None else (str(mode).strip().lower() or "manual")
     with_ids = parse_bool(with_ids, default=False)
     if mode not in {"manual", "automatic", "handoff"}:
         # Search mode historically treats unknown values as manual.  Preserve

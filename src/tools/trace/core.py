@@ -286,7 +286,7 @@ async def trace_core(
     if restore or delete or hard_delete:
         guarded_reader = (
             getattr(rt.bucket_mgr, "get_including_archive", None)
-            if restore else None
+            if restore or hard_delete else None
         )
         if not callable(guarded_reader):
             guarded_reader = rt.bucket_mgr.get

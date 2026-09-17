@@ -12,13 +12,18 @@ import os
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
 
+from tests.docker_oauth_helper import issue_oauth_token
+
 
 MCP_URL = os.environ.get("OMBRE_DOCKER_INTEGRATION_URL", "").strip()
 MCP_TOKEN = os.environ.get("OMBRE_DOCKER_MCP_TOKEN", "").strip()
+MCP_PASSWORD = os.environ.get("OMBRE_DOCKER_MCP_PASSWORD", "").strip()
+MCP_CALLER = os.environ.get("OMBRE_DOCKER_MCP_CALLER", "cheng").strip()
 EXPECT_COMPRESSION_PROVIDER = os.environ.get(
     "OMBRE_DOCKER_EXPECT_COMPRESSION_PROVIDER", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -291,6 +296,24 @@ class MCPClientContext(MCPClient):
 
     def __exit__(self, *_args):
         self.close()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def caller_bound_mcp_token():
+    global MCP_TOKEN
+    if MCP_TOKEN:
+        return
+    assert MCP_PASSWORD, (
+        "OMBRE_DOCKER_MCP_PASSWORD or OMBRE_DOCKER_MCP_TOKEN is required "
+        "for caller-bound remote write coverage"
+    )
+    parsed = urlsplit(MCP_URL)
+    MCP_TOKEN = issue_oauth_token(
+        base_url=f"{parsed.scheme}://{parsed.netloc}",
+        password=MCP_PASSWORD,
+        caller=MCP_CALLER,
+        resource=MCP_URL,
+    )
 
 
 @pytest.fixture(scope="module")

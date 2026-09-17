@@ -191,7 +191,11 @@ def register(mcp) -> None:
         try:
             bid = await sh.bucket_mgr.create(
                 content=content,
-                tags=["__letter__"],
+                # Dashboard letters are intentionally addressed across local
+                # identities.  Give them the shared owner gate so an OAuth-
+                # bound MCP caller can read the envelope while the Letter lock
+                # still protects its title/body.
+                tags=["__letter__", "owner:shared"],
                 importance=10,
                 domain=["letter"],
                 valence=0.5,

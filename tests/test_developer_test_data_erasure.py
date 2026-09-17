@@ -141,6 +141,30 @@ async def test_test_data_cleanup_requires_reason_and_rejects_conflicting_modes(
     assert FormalInvariantChecker.default().evaluate_ledger(events).ok is True
 
 
+@pytest.mark.asyncio
+async def test_trace_can_hard_delete_an_owned_test_bucket_after_archiving(bucket_mgr):
+    test_id = await bucket_mgr.create_internal(
+        content="archived synthetic payload",
+        domain=["test"],
+        tags=["owner:cheng"],
+        source_tool="hold",
+        test_data=True,
+    )
+    _install_trace_runtime(bucket_mgr)
+
+    assert "存入档案" in await trace_core(test_id, delete=True)
+    assert await bucket_mgr.get(test_id) is None
+    assert await bucket_mgr.get_including_archive(test_id) is not None
+
+    deleted = await trace_core(
+        test_id,
+        hard_delete=True,
+        delete_reason="archived integration cleanup",
+    )
+    assert deleted == f"已永久删除测试桶: {test_id}"
+    assert await bucket_mgr.get_including_archive(test_id) is None
+
+
 def test_dashboard_separates_normal_batch_actions_from_developer_erasure():
     text = Path("frontend/dashboard.html").read_text(encoding="utf-8")
     assert "全选当前页" in text
