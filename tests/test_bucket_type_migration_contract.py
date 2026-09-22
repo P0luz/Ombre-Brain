@@ -5,10 +5,16 @@ which the Markdown source of truth lives.  Editing ``metadata.type`` without
 relocating that file makes later scans disagree about what the bucket is.
 """
 
+import os
 from pathlib import Path
 
 import frontmatter
 import pytest
+
+
+windows_safe_commit_only = pytest.mark.skipif(
+    os.name != "nt", reason="historical Letter safe commit is Windows-only"
+)
 
 
 def _bucket_files(bucket_mgr, bucket_id: str) -> list[Path]:
@@ -42,7 +48,7 @@ async def test_type_update_relocates_source_to_the_canonical_tree(
     source_type,
     expected_tree,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content=f"move to {target_type}",
         domain=["migration-domain"],
         bucket_type=source_type,
@@ -63,7 +69,7 @@ async def test_type_update_relocates_source_to_the_canonical_tree(
 
 @pytest.mark.asyncio
 async def test_type_update_rejects_archived_and_keeps_source_unchanged(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="archive is a lifecycle action",
         domain=["migration-domain"],
         bucket_type="dynamic",
@@ -95,7 +101,7 @@ async def test_archived_bucket_is_terminal_for_all_regular_updates(
     bucket_mgr,
     updates,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="terminal archived memory",
         domain=["migration-domain"],
         bucket_type="dynamic",
@@ -119,7 +125,7 @@ async def test_archived_bucket_is_terminal_for_all_regular_updates(
 async def test_soft_deleted_tombstone_cannot_be_resurrected_by_pin_update(
     bucket_mgr,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="terminal tombstone memory",
         domain=["migration-domain"],
         bucket_type="dynamic",
@@ -147,7 +153,7 @@ async def test_guarded_permanent_bucket_cannot_be_retyped_out_of_permanent(
     guard_field,
 ):
     create_kwargs = {guard_field: True}
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content=f"guarded by {guard_field}",
         domain=["migration-domain"],
         bucket_type="permanent",
@@ -173,7 +179,7 @@ async def test_create_rejects_pinned_and_protected_without_writing(bucket_mgr):
     before = set(Path(bucket_mgr.base_dir).rglob("*.md"))
 
     with pytest.raises(ValueError, match="pinned 与 protected"):
-        await bucket_mgr.create(
+        await bucket_mgr.create_internal(
             content="互斥保护状态不能成为新的持久化脏数据。",
             pinned=True,
             protected=True,
@@ -184,7 +190,7 @@ async def test_create_rejects_pinned_and_protected_without_writing(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_type_move_collision_never_overwrites_existing_target(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="source must survive a collision",
         domain=["collision-domain"],
         bucket_type="permanent",
@@ -223,7 +229,7 @@ async def test_type_move_collision_never_overwrites_existing_target(bucket_mgr):
 async def test_type_move_failure_rolls_back_metadata_and_path(bucket_mgr, monkeypatch):
     import bucket_manager as bucket_manager_module
 
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="move failure must be atomic",
         domain=["migration-domain"],
         bucket_type="dynamic",
@@ -261,7 +267,7 @@ async def test_type_metadata_write_failure_does_not_move_source(
 ):
     import bucket_manager as bucket_manager_module
 
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="write failure must be atomic",
         domain=["migration-domain"],
         bucket_type="dynamic",
@@ -293,7 +299,7 @@ async def test_archive_move_failure_keeps_active_type_and_source(
     """Archive uses the same copy-on-commit boundary as an explicit type move."""
     import bucket_manager as bucket_manager_module
 
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="archive failure must not split metadata from storage",
         domain=["migration-domain"],
         bucket_type="dynamic",
@@ -323,7 +329,7 @@ async def test_archive_move_failure_keeps_active_type_and_source(
 @pytest.mark.asyncio
 async def test_restore_archived_pin_is_one_atomic_storage_transition(bucket_mgr):
     """恢复清 pin，但保留 protection，并同时刷新活跃时间与唯一真源。"""
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="restore lifecycle state atomically",
         domain=["migration-domain"],
         pinned=True,
@@ -363,7 +369,7 @@ async def test_restore_archived_pin_is_one_atomic_storage_transition(bucket_mgr)
 
 @pytest.mark.asyncio
 async def test_restore_archived_protected_anchor_requires_atomic_unprotect(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="dirty archived protection must be resolved atomically",
         domain=["migration-domain"],
         protected=True,
@@ -418,7 +424,7 @@ async def test_restore_move_failure_keeps_archived_pin_and_single_source(
     """恢复提交失败时不得提前清 pin，也不得留下活跃区副本。"""
     import bucket_manager as bucket_manager_module
 
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="restore failure preserves archived state",
         domain=["migration-domain"],
         pinned=True,
@@ -452,9 +458,10 @@ async def test_restore_move_failure_keeps_archived_pin_and_single_source(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_compat_restore_preserves_verbatim_state(bucket_mgr):
     """历史 Letter 兼容恢复只改类型与物理位置，不伪造一次活跃。"""
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="historical letter body",
         tags=["__letter__", "private"],
         importance=10,
@@ -483,7 +490,10 @@ async def test_archived_letter_compat_restore_preserves_verbatim_state(bucket_mg
 
     result = await bucket_mgr.recover_archived_letter(bucket_id)
 
-    assert result == {"ok": True, "id": bucket_id, "reason": "restored"}
+    assert result["ok"] is True
+    assert result["id"] == bucket_id
+    assert result["reason"] == "restored"
+    assert result["derived_state"] == "applied"
     restored = await bucket_mgr.get(bucket_id)
     assert restored["content"] == "historical letter body"
     assert restored["metadata"]["type"] == "letter"
@@ -503,6 +513,7 @@ async def test_archived_letter_compat_restore_preserves_verbatim_state(bucket_mg
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 @pytest.mark.parametrize(
     ("dirty_fields", "reason"),
     [
@@ -520,7 +531,7 @@ async def test_archived_letter_compat_restore_rejects_terminal_and_protected_sta
     dirty_fields,
     reason,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="must remain archived",
         tags=["__letter__"],
         domain=["letter"],
@@ -544,10 +555,11 @@ async def test_archived_letter_compat_restore_rejects_terminal_and_protected_sta
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_compat_restore_requires_strong_marker_and_unique_source(
     bucket_mgr,
 ):
-    ambiguous_id = await bucket_mgr.create(
+    ambiguous_id = await bucket_mgr.create_internal(
         content="domain alone is ambiguous",
         domain=["letter"],
         bucket_type="dynamic",
@@ -565,7 +577,7 @@ async def test_archived_letter_compat_restore_requires_strong_marker_and_unique_
     }
     assert ambiguous_path.read_bytes() == ambiguous_before
 
-    duplicate_id = await bucket_mgr.create(
+    duplicate_id = await bucket_mgr.create_internal(
         content="canonical archived source",
         tags=["__letter__"],
         domain=["letter"],
@@ -590,13 +602,14 @@ async def test_archived_letter_compat_restore_requires_strong_marker_and_unique_
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_compat_restore_rolls_back_failed_source_removal(
     bucket_mgr,
     monkeypatch,
 ):
-    import bucket_manager as bucket_manager_module
+    import windows_safe_rename as wsr
 
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="compat restore rollback",
         tags=["__letter__"],
         domain=["letter"],
@@ -606,14 +619,10 @@ async def test_archived_letter_compat_restore_rolls_back_failed_source_removal(
     assert await bucket_mgr.archive(bucket_id) is True
     archived_path = Path((await bucket_mgr.get_including_archive(bucket_id))["path"])
     archived_bytes = archived_path.read_bytes()
-    real_remove = bucket_manager_module.os.remove
+    def fail_safe_commit(*_args, **_kwargs):
+        raise OSError("simulated compat restore commit failure")
 
-    def fail_archived_source_removal(path, *_args, **_kwargs):
-        if Path(path) == archived_path:
-            raise OSError("simulated compat restore source removal failure")
-        return real_remove(path, *_args, **_kwargs)
-
-    monkeypatch.setattr(bucket_manager_module.os, "remove", fail_archived_source_removal)
+    monkeypatch.setattr(wsr, "safe_transform_rename_no_replace", fail_safe_commit)
 
     result = await bucket_mgr.recover_archived_letter(bucket_id)
 
@@ -623,10 +632,11 @@ async def test_archived_letter_compat_restore_rolls_back_failed_source_removal(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_compat_restore_never_overwrites_target_collision(
     bucket_mgr,
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="archived source stays authoritative",
         tags=["__letter__"],
         domain=["letter"],
@@ -646,7 +656,7 @@ async def test_archived_letter_compat_restore_never_overwrites_target_collision(
 
     result = await bucket_mgr.recover_archived_letter(bucket_id)
 
-    assert result == {"ok": False, "id": bucket_id, "reason": "commit_failed"}
+    assert result == {"ok": False, "id": bucket_id, "reason": "target_collision"}
     assert archived_path.read_bytes() == archived_bytes
     assert target_path.read_bytes() == target_bytes
     assert _bucket_files(bucket_mgr, bucket_id) == [archived_path]
@@ -659,7 +669,7 @@ async def test_soft_delete_move_failure_rolls_back_tombstone_and_copy(
 ):
     import bucket_manager as bucket_manager_module
 
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="soft delete failure must keep one live source",
         domain=["migration-domain"],
     )
@@ -688,7 +698,7 @@ async def test_soft_delete_move_failure_rolls_back_tombstone_and_copy(
 
 @pytest.mark.asyncio
 async def test_legacy_scalar_domain_uses_the_whole_value_for_migration(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="legacy scalar domain",
         domain=["temporary-domain"],
     )

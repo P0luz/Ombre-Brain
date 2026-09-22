@@ -20,15 +20,15 @@ merge_or_create，省一次 LLM 拆分调用。
 ========================================
 """
 
-import asyncio
 import uuid
+from runtime_owner import spawn_background
 
 try:
     from errors import llm_step_failed_error
 except ImportError:  # pragma: no cover - 包内导入兜底
     from ...errors import llm_step_failed_error  # type: ignore
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from .._common import merge_or_create, check_duplicate_for, check_plan_resolution
 
 
@@ -57,7 +57,7 @@ async def grow_shortpath(content: str, test_data: bool = False) -> str:
     batch_id = f"g_{uuid.uuid4().hex[:12]}"
     result_name, is_merged, embed_warn = await merge_or_create(
         content=content.strip(),
-        tags=analysis.get("tags", []),
+        tags=_identity.strip_owner_tags(analysis.get("tags")),
         importance=importance,
         domain=analysis.get("domain", ["未分类"]),
         valence=analysis.get("valence", 0.5),
@@ -71,9 +71,9 @@ async def grow_shortpath(content: str, test_data: bool = False) -> str:
         test_data=test_data,
     )
     action = "合并" if is_merged else "新建"
-    asyncio.create_task(check_plan_resolution(content, source_bucket_id=result_name))
+    spawn_background(check_plan_resolution(content, source_bucket_id=result_name))
     if not is_merged:
-        asyncio.create_task(check_duplicate_for(result_name, content.strip()))
+        spawn_background(check_duplicate_for(result_name, content.strip()))
     result = (
         "短内容已按 hold 路径保存为单条记忆，没有拆分。\n"
         f"{action} → {result_name} | "

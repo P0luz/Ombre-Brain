@@ -12,6 +12,7 @@ import asyncio
 import contextvars
 import functools
 import os
+import hmac
 import httpx
 import json as _json_lib
 import threading
@@ -20,6 +21,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from . import _shared as sh
+from runtime_owner import spawn_background
 
 logger = sh.logger
 
@@ -27,6 +29,19 @@ try:
     from errors import OBStartupError  # type: ignore
 except ImportError:  # pragma: no cover
     from ..errors import OBStartupError  # type: ignore
+
+try:
+    from embedding_publish import (  # type: ignore
+        create_shadow_path,
+        embedding_db_turn,
+        reserve_migration,
+    )
+except ImportError:  # pragma: no cover
+    from ..embedding_publish import (  # type: ignore
+        create_shadow_path,
+        embedding_db_turn,
+        reserve_migration,
+    )
 
 
 def _persist_embedding_yaml(updates: dict) -> None:
@@ -74,7 +89,6 @@ _migration_request_state: contextvars.ContextVar[dict | None] = (
     contextvars.ContextVar("ombre_embedding_migration_request_state", default=None)
 )
 
-
 def _reserve_ollama_pull() -> object | None:
     """Atomically reserve the one process-wide Ollama pull slot."""
 
@@ -103,12 +117,7 @@ def _release_ollama_pull(owner: object) -> bool:
 
 
 def _with_migration_reservation(handler):
-    """Reserve migration ownership before the route's first await.
-
-    The reservation remains request-owned during target construction, stale
-    staging cleanup, provider probing, and outbox shutdown.  Once the worker is
-    created, ``start_migration`` owns the same token until its ``finally``.
-    """
+    """Reserve the cross-process migration slot before the first request await."""
 
     @functools.wraps(handler)
     async def _wrapped(request: Request) -> Response:
@@ -117,24 +126,16 @@ def _with_migration_reservation(handler):
         err = sh._require_auth(request)
         if err:
             return err
-        try:
-            from migration_engine import (  # type: ignore
-                release_migration_reservation,
-                reserve_migration,
+        db_path = str(getattr(sh.embedding_engine, "db_path", "") or "")
+        if not db_path:
+            return JSONResponse(
+                {"ok": False, "error": "live embedding database path is unavailable"},
+                status_code=500,
             )
-        except ImportError:
-            from ..migration_engine import (
-                release_migration_reservation,
-                reserve_migration,
-            )
-
-        reservation = reserve_migration()
+        reservation = reserve_migration(db_path)
         if reservation is None:
             return JSONResponse(
-                {
-                    "ok": False,
-                    "error": "另一个迁移任务正在进行；请稍后再试或等其完成",
-                },
+                {"ok": False, "error": "另一个跨进程迁移正在进行"},
                 status_code=409,
             )
 
@@ -145,7 +146,7 @@ def _with_migration_reservation(handler):
         finally:
             _migration_request_state.reset(context_token)
             if not state["transferred"]:
-                release_migration_reservation(reservation)
+                reservation.close()
 
     return _wrapped
 
@@ -410,17 +411,18 @@ def register(mcp) -> None:
         try:
             import sqlite3
             if info["db_path"] and os.path.exists(str(info["db_path"])):
-                conn = sqlite3.connect(str(info["db_path"]))
-                try:
-                    info["db_count"] = conn.execute(
-                        "SELECT COUNT(*) FROM embeddings"
-                    ).fetchone()[0]
-                    rows = conn.execute(
-                        "SELECT key, value FROM embeddings_meta"
-                    ).fetchall()
-                    info["db_meta"] = {k: v for k, v in rows}
-                finally:
-                    conn.close()
+                with embedding_db_turn(str(info["db_path"])):
+                    conn = sqlite3.connect(str(info["db_path"]))
+                    try:
+                        info["db_count"] = conn.execute(
+                            "SELECT COUNT(*) FROM embeddings"
+                        ).fetchone()[0]
+                        rows = conn.execute(
+                            "SELECT key, value FROM embeddings_meta"
+                        ).fetchall()
+                        info["db_meta"] = {k: v for k, v in rows}
+                    finally:
+                        conn.close()
         except Exception as e:
             info["db_error"] = str(e)
         return JSONResponse(info)
@@ -441,20 +443,39 @@ def register(mcp) -> None:
         已有任务在跑返回 409。
         """
         from starlette.responses import JSONResponse
-
         try:
-            body = await sh._read_json_object(request)
+            body = await request.json()
         except Exception:
             return JSONResponse({"ok": False, "error": "invalid JSON"}, status_code=400)
 
-        migration_fields = (
-            "target_backend", "api_format", "api_key", "base_url", "model"
-        )
-        if any(key in body and not isinstance(body[key], str) for key in migration_fields):
-            return JSONResponse({"ok": False, "error": "migration fields must be strings"}, status_code=400)
-        if any(len(body.get(key, "")) > 8192 for key in migration_fields):
-            return JSONResponse({"ok": False, "error": "migration field is too large"}, status_code=400)
-        target_backend_raw = str(body.get("target_backend", "")).strip().lower()
+        if not isinstance(body, dict):
+            return JSONResponse(
+                {"ok": False, "error": "JSON body must be an object"},
+                status_code=400,
+            )
+
+        def _safe_text(name: str, *, limit: int) -> str:
+            value = body.get(name, "")
+            if value is None:
+                return ""
+            if not isinstance(value, str):
+                raise ValueError(f"{name} must be a string")
+            normalized = value.strip()
+            if len(normalized) > limit:
+                raise ValueError(f"{name} is too long")
+            if any(ord(char) < 32 for char in normalized):
+                raise ValueError(f"{name} contains control characters")
+            return normalized
+
+        try:
+            target_backend_raw = _safe_text("target_backend", limit=32).lower()
+            req_api_format = _safe_text("api_format", limit=64).lower()
+            requested_key = _safe_text("api_key", limit=8192)
+            requested_base_url = _safe_text("base_url", limit=2048)
+            requested_model = _safe_text("model", limit=512)
+        except ValueError as exc:
+            return JSONResponse({"ok": False, "error": str(exc)}, status_code=400)
+
         # local/ollama 底层也是 openai_compat（backend=api），用 api_format 区分云端/本地
         target_backend = "api" if target_backend_raw in ("api", "gemini", "local", "ollama", "") else target_backend_raw
         if target_backend != "api":
@@ -464,212 +485,300 @@ def register(mcp) -> None:
             }, status_code=400)
 
         # 解析目标 api_format：显式传入优先；否则按 target_backend 推断
-        req_api_format = str(body.get("api_format", "")).strip().lower()
         if not req_api_format:
             if target_backend_raw in ("local", "ollama"):
                 req_api_format = "ollama"
             elif target_backend_raw == "gemini":
                 req_api_format = "gemini"
+        if req_api_format not in ("", "gemini", "openai_compat", "ollama", "local"):
+            return JSONResponse(
+                {"ok": False, "error": "api_format 不受支持"},
+                status_code=400,
+            )
 
         try:
             from migration_engine import (  # type: ignore
-                MigrationConfig, start_migration,
+                MigrationConfig, start_migration, is_running,
                 status_path_for as _mig_status_path_for,
-                staging_db_path_for, reset_stale_migration_state, target_signature,
             )
         except ImportError:
             from ..migration_engine import (  # type: ignore
-                MigrationConfig, start_migration,
+                MigrationConfig, start_migration, is_running,
                 status_path_for as _mig_status_path_for,
-                staging_db_path_for, reset_stale_migration_state, target_signature,
             )
 
-        # 构造目标引擎（不替换 global，跑完才替）
-        target_cfg = _json_lib.loads(_json_lib.dumps(sh.config))  # 深拷贝
-        target_emb_cfg = target_cfg.setdefault("embedding", {})
-        target_emb_cfg["enabled"] = True
-        target_emb_cfg["backend"] = target_backend
-        if req_api_format:
-            target_emb_cfg["api_format"] = req_api_format
-        if body.get("api_key"):
-            target_emb_cfg["api_key"] = str(body["api_key"]).strip()
-        # Field presence and truthiness are different here: switching from a
-        # cloud provider to Ollama deliberately sends an empty base_url so the
-        # old cloud endpoint is cleared and the local default can take over.
-        if "base_url" in body:
-            target_emb_cfg["base_url"] = str(body["base_url"]).strip()
-        if body.get("model"):
-            target_emb_cfg["model"] = str(body["model"]).strip()
-
-        # 迁移过程只写这个 staging db，绝不碰 live db，直到全部成功才原子替换
-        # （见 migration_engine.py 的 _run_migration）。
-        _live_db_path = getattr(sh.embedding_engine, "db_path", "") or os.path.join(
-            sh.config.get("buckets_dir", "buckets"), "embeddings.db"
-        )
-        try:
-            from embedding_engine import EmbeddingEngine  # type: ignore
-        except ImportError:
-            from ..embedding_engine import EmbeddingEngine  # type: ignore
-        target_emb_cfg["db_path"] = staging_db_path_for(_live_db_path)
-        try:
-            target_engine = EmbeddingEngine(target_cfg)
-        except OBStartupError as oe:
+        if is_running():
             return JSONResponse({
                 "ok": False,
-                "error": f"目标引擎构造失败：{oe.error_code} {oe.detail}",
-            }, status_code=400)
-        except Exception as e:
-            return JSONResponse({
-                "ok": False,
-                "error": f"目标引擎构造失败：{type(e).__name__}: {e}",
-            }, status_code=400)
-
-        target_backend_obj = getattr(target_engine, "_backend", None)
-
-        # 目标签名（真正解析出来的 model/dim，不是请求里可能留空的原始参数）
-        # 跟上次不一致，说明 staging db 里如果有残留向量是另一个模型留下的，
-        # checkpoint 记的 done_ids 同样作废——必须先清掉再继续，否则断点续传
-        # 会把不兼容的旧向量当成「这个新目标已经完成」，直接原子替换进主库。
-        # _init_db() 是幂等的 CREATE TABLE IF NOT EXISTS，清空后必须重跑一次，
-        # 否则 target_engine 后续 sqlite3.connect() 会在空文件上直接建表失败。
-        if target_backend_obj is not None:
-            _signature = target_signature(
-                target_backend,
-                target_backend_obj.model_name(),
-                target_backend_obj.vector_dim(),
-            )
-            reset_stale_migration_state(
-                sh.config.get("buckets_dir", "buckets"), _live_db_path, _signature
-            )
-            target_engine._init_db()
-
-        # 预检（fail-fast）：先用目标引擎试嵌入一小段，确认后端真的可用，
-        # 再决定要不要启动全库重算。否则切到本地但 bge-m3 没下载 / ollama 没起，
-        # 会让 392 个桶逐个失败几分钟才发现 —— 体验极差。
-        if target_backend_obj is None or not getattr(target_engine, "enabled", False):
-            return JSONResponse({
-                "ok": False,
-                "error": "目标 embedding 引擎不可用（可能缺 key / 本地模型未就绪）。本地模式请先在「本地向量模型」面板下载 bge-m3。",
-            }, status_code=400)
-        try:
-            _probe = await target_engine._generate_async("connectivity probe / 连接性探针")
-        except Exception as e:
-            _probe = []
-            _probe_err = f"{type(e).__name__}: {e}"
-        else:
-            _probe_err = ""
-        if not _probe:
-            _hint = "本地模式：确认 ollama 容器在跑且 bge-m3 已下载（设置页「本地向量模型」面板）。" \
-                if req_api_format in ("ollama", "local") else "云端模式：确认 API key / base_url / 网络可用。"
-            return JSONResponse({
-                "ok": False,
-                "error": f"目标后端嵌入测试失败，已取消重算（不会动现有向量）。{_hint}" + (f"（{_probe_err}）" if _probe_err else ""),
-            }, status_code=400)
-
-        # 准备桶内容供给函数
-        async def _fetch_buckets() -> list[tuple[str, str]]:
-            all_buckets = await sh.bucket_mgr.list_all(include_archive=True)
-            return [(b["id"], b["content"]) for b in all_buckets]
+                "error": "另一个迁移任务正在进行；请稍后再试或等其完成",
+            }, status_code=409)
 
         buckets_dir = sh.config.get("buckets_dir", "buckets")
-        db_path = getattr(sh.embedding_engine, "db_path", "")
-
-        mig_cfg = MigrationConfig(
-            buckets_dir=buckets_dir,
-            db_path=db_path,
-            target_backend=target_backend,
-            target_model=target_backend_obj.model_name() if target_backend_obj else "",
-            target_dim=target_backend_obj.vector_dim() if target_backend_obj else 0,
-            target_engine=target_engine,
-            fetch_buckets=_fetch_buckets,
-        )
-
-        outbox = sh.embedding_outbox
-        outbox_was_running = bool(
-            outbox is not None and getattr(outbox, "running", False)
-        )
-
-        def _restart_outbox() -> None:
-            if not outbox_was_running or outbox is None:
-                return
-            try:
-                import asyncio as _aio
-                _aio.create_task(outbox.start(reconcile=True))
-            except Exception as e:
-                logger.error(f"[migration] embedding outbox restart failed: {e}")
-
-        def _on_complete(success: bool) -> None:
-            try:
-                if not success:
-                    logger.warning("[migration] task finished with failures; sh.embedding_engine NOT swapped")
-                    return
-                # 成功 → 把 global engine 切到目标
-                sh.replace_embedding_engine(target_engine)
-                # 持久化到 config（进程内 + config.yaml，重启/重建不丢）
-                cfg_emb = sh.config.setdefault("embedding", {})
-                cfg_emb["backend"] = target_backend
-                cfg_emb["enabled"] = True
-                _yaml_updates: dict = {"backend": target_backend, "enabled": True}
-                # 持久化真实向量维度。迁移过程已生成过向量，target_backend_obj 的 _dim
-                # 此刻是该模型的真实输出维度（如 bge-m3=1024）。若不落盘 dim，重启后
-                # EmbeddingEngine 会按 openai_compat 默认 768 重新初始化 → 与 db(1024)
-                # 对账误报 OB-W005、且重算十几遍/redeploy 都不消失（每次都在向量自校正
-                # 之前对账）。这里把真实维度一并写进 config.yaml，重启即维度一致。
-                _real_dim = target_backend_obj.vector_dim() if target_backend_obj else 0
-                if _real_dim:
-                    cfg_emb["dim"] = _real_dim
-                    _yaml_updates["dim"] = _real_dim
-                if req_api_format:
-                    cfg_emb["api_format"] = req_api_format
-                    _yaml_updates["api_format"] = req_api_format
-                if body.get("api_key"):
-                    cfg_emb["api_key"] = str(body["api_key"]).strip()
-                    _yaml_updates["api_key"] = str(body["api_key"]).strip()
-                if "base_url" in body:
-                    cfg_emb["base_url"] = str(body["base_url"]).strip()
-                    _yaml_updates["base_url"] = str(body["base_url"]).strip()
-                if body.get("model"):
-                    cfg_emb["model"] = str(body["model"]).strip()
-                    _yaml_updates["model"] = str(body["model"]).strip()
-                _persist_embedding_yaml(_yaml_updates)
-                logger.info(f"[migration] sh.embedding_engine swapped to backend={target_backend} format={req_api_format or '(unchanged)'}; persisted to config.yaml")
-            except Exception as e:
-                logger.error(f"[migration] post-swap failed: {e}")
-                raise
-            finally:
-                _restart_outbox()
-
-        # Migration rewrites the same SQLite index. Stop the normal queue
-        # worker for the migration window, then restart it in the callback.
+        db_path = str(getattr(sh.embedding_engine, "db_path", "") or "")
         request_state = _migration_request_state.get()
         if request_state is None:  # pragma: no cover - decorator invariant
             raise RuntimeError("migration route lost its reservation")
-        try:
-            if outbox_was_running:
-                await outbox.stop()
-            task = start_migration(
-                mig_cfg,
-                on_complete=_on_complete,
-                reservation=request_state["reservation"],
-            )
-        except BaseException:
-            # A request cancellation during ``outbox.stop()`` must not leave
-            # the normal index writer disabled after the reservation unwinds.
-            _restart_outbox()
-            raise
-        if task is None:
-            _restart_outbox()
-            return JSONResponse({
-                "ok": False,
-                "error": "无法启动迁移任务（锁未获得）",
-            }, status_code=409)
-        request_state["transferred"] = True
+        reservation = request_state["reservation"]
 
-        return JSONResponse({
-            "ok": True,
-            "status_path": _mig_status_path_for(buckets_dir),
-            "target_backend": target_backend,
-        }, status_code=202)
+        shadow_path = None
+        task_started = False
+        try:
+            shadow_path = create_shadow_path(db_path, reservation=reservation)
+
+            # E-MIG-01 manifest must never contain a provider key or its inverse.
+            # A one-off different key would make crash recovery unable to
+            # reconstruct the old config without persisting a secret. Require
+            # callers to establish the effective key through the existing
+            # credential route before migration.
+            current_embedding = sh.config.get("embedding", {}) or {}
+            current_key = str(
+                current_embedding.get("api_key")
+                or os.environ.get("OMBRE_EMBED_API_KEY", "")
+                or ""
+            ).strip()
+            if requested_key and (
+                not current_key or not hmac.compare_digest(requested_key, current_key)
+            ):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": (
+                            "E-MIG-01 不在迁移事务中更换或持久化 API key；"
+                            "请先通过凭据配置入口保存目标 key，再启动迁移"
+                        ),
+                    },
+                    status_code=400,
+                )
+            # 构造目标引擎（不替换 global，跑完并完成可补偿发布后才替）。
+            # db_path is an internally generated same-volume shadow leaf.
+            target_cfg = _json_lib.loads(_json_lib.dumps(sh.config))
+            target_emb_cfg = target_cfg.setdefault("embedding", {})
+            target_emb_cfg["enabled"] = True
+            target_emb_cfg["backend"] = target_backend
+            target_emb_cfg["db_path"] = str(shadow_path)
+            if req_api_format:
+                target_emb_cfg["api_format"] = req_api_format
+            if current_key:
+                target_emb_cfg["api_key"] = current_key
+            if "base_url" in body:
+                target_emb_cfg["base_url"] = requested_base_url
+            if requested_model:
+                target_emb_cfg["model"] = requested_model
+
+            try:
+                from embedding_engine import EmbeddingEngine  # type: ignore
+            except ImportError:
+                from ..embedding_engine import EmbeddingEngine
+            try:
+                target_engine = EmbeddingEngine(target_cfg)
+            except OBStartupError as oe:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": f"目标引擎构造失败：{oe.error_code}",
+                    },
+                    status_code=400,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[migration] target engine construction failed: %s",
+                    type(exc).__name__,
+                )
+                return JSONResponse(
+                    {"ok": False, "error": "目标引擎构造失败"},
+                    status_code=400,
+                )
+
+            target_backend_obj = getattr(target_engine, "_backend", None)
+            if target_backend_obj is None or not getattr(target_engine, "enabled", False):
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": (
+                            "目标 embedding 引擎不可用；"
+                            "请先确认凭据、模型和本地服务状态"
+                        ),
+                    },
+                    status_code=400,
+                )
+
+            # Provider probe only touches the private shadow engine configuration.
+            # It does not open or mutate the live embeddings.db.
+            try:
+                probe = await target_engine._generate_async(
+                    "connectivity probe / 连接性探针"
+                )
+            except Exception as exc:
+                logger.warning(
+                    "[migration] target provider probe failed: %s",
+                    type(exc).__name__,
+                )
+                probe = []
+            if not probe:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "目标后端嵌入测试失败，已取消；生产向量库未触碰",
+                    },
+                    status_code=400,
+                )
+
+            async def _fetch_buckets() -> list[tuple[str, str]]:
+                all_buckets = await sh.bucket_mgr.list_all(include_archive=True)
+                return [
+                    (str(bucket["id"]), str(bucket.get("content") or ""))
+                    for bucket in all_buckets
+                    if str(bucket.get("content") or "").strip()
+                ]
+
+            try:
+                from utils import config_file_path
+            except ImportError:  # pragma: no cover
+                from ..utils import config_file_path
+
+            runtime_state: dict[str, object] = {
+                "snapshot": None,
+                "applied": False,
+                "old_embedding_config": _json_lib.loads(
+                    _json_lib.dumps(sh.config.get("embedding", {}) or {})
+                ),
+            }
+
+            def _runtime_close() -> None:
+                # EmbeddingEngine owns no persistent sqlite3.Connection. The
+                # exclusive publish gate has already drained every leased
+                # provider/read/write operation before this callback runs.
+                return None
+
+            def _runtime_apply() -> None:
+                # The provider may discover/correct its effective model or
+                # dimension only after generating the shadow.  The migration
+                # core persists those actual values; publish the same values
+                # into the in-process config instead of the route-time probe.
+                published_backend = getattr(target_engine, "_backend", None)
+                if published_backend is not None:
+                    forward_patch["model"] = str(
+                        published_backend.model_name() or forward_patch["model"]
+                    )
+                    forward_patch["dim"] = int(
+                        published_backend.vector_dim() or forward_patch["dim"]
+                    )
+                target_engine.db_path = db_path
+                live_embedding_config = sh.config.setdefault("embedding", {})
+                if not isinstance(live_embedding_config, dict):
+                    raise RuntimeError("runtime embedding config is not mutable")
+                for key, value in forward_patch.items():
+                    if value is None:
+                        live_embedding_config.pop(key, None)
+                    else:
+                        live_embedding_config[key] = value
+                runtime_state["snapshot"] = sh.publish_embedding_runtime(
+                    target_engine
+                )
+                runtime_state["applied"] = True
+
+            def _runtime_restore() -> None:
+                snapshot = runtime_state.get("snapshot")
+                if snapshot is not None:
+                    sh.restore_embedding_runtime(snapshot)  # type: ignore[arg-type]
+                previous = runtime_state["old_embedding_config"]
+                live_embedding_config = sh.config.setdefault("embedding", {})
+                if not isinstance(live_embedding_config, dict):
+                    raise RuntimeError("runtime embedding config rollback is not mutable")
+                live_embedding_config.clear()
+                live_embedding_config.update(previous)  # type: ignore[arg-type]
+                runtime_state["applied"] = False
+
+            def _runtime_probe() -> None:
+                selected = (
+                    target_engine
+                    if runtime_state.get("applied")
+                    else sh.embedding_engine
+                )
+                if os.path.abspath(str(getattr(selected, "db_path", ""))) != os.path.abspath(db_path):
+                    raise RuntimeError("runtime embedding engine points to a non-live DB")
+                backend = getattr(selected, "_backend", None)
+                if runtime_state.get("applied") and backend is not None:
+                    if int(backend.vector_dim() or 0) <= 0:
+                        raise RuntimeError("runtime embedding dimension is invalid")
+                    live_embedding_config = sh.config.get("embedding", {})
+                    if not isinstance(live_embedding_config, dict):
+                        raise RuntimeError("runtime embedding config is not a mapping")
+                    for key, value in forward_patch.items():
+                        if live_embedding_config.get(key) != value:
+                            raise RuntimeError(
+                                f"runtime embedding config did not publish {key}"
+                            )
+
+            initial_model = str(target_backend_obj.model_name() or "")
+            initial_dim = int(target_backend_obj.vector_dim() or len(probe))
+            forward_patch: dict[str, object] = {
+                "backend": target_backend,
+                "enabled": True,
+                "model": initial_model,
+                "dim": initial_dim,
+            }
+            if req_api_format:
+                forward_patch["api_format"] = req_api_format
+            if "base_url" in body:
+                forward_patch["base_url"] = requested_base_url
+            mig_cfg = MigrationConfig(
+                buckets_dir=buckets_dir,
+                db_path=db_path,
+                target_backend=target_backend,
+                target_model=initial_model,
+                target_dim=initial_dim,
+                target_engine=target_engine,
+                fetch_buckets=_fetch_buckets,
+                config_path=config_file_path(),
+                config_forward_patch=forward_patch,
+                runtime_close=_runtime_close,
+                runtime_apply=_runtime_apply,
+                runtime_restore=_runtime_restore,
+                runtime_open_probe=_runtime_probe,
+            )
+
+            task = start_migration(mig_cfg, reservation=reservation)
+            if task is None:
+                return JSONResponse(
+                    {
+                        "ok": False,
+                        "error": "无法启动迁移任务（迁移 reservation 未获得）",
+                    },
+                    status_code=409,
+                )
+            task_started = True
+            request_state["transferred"] = True
+            return JSONResponse(
+                {
+                    "ok": True,
+                    "accepted": True,
+                    "completed": False,
+                    "status_path": _mig_status_path_for(buckets_dir),
+                    "target_backend": target_backend,
+                    "txid": reservation.txid,
+                    "message": "迁移已接受；最终结果请读取 status，202 不代表发布完成",
+                },
+                status_code=202,
+            )
+        finally:
+            if not task_started:
+                reservation.close()
+                if shadow_path is not None:
+                    for candidate in (
+                        shadow_path,
+                        shadow_path.with_name(shadow_path.name + "-wal"),
+                        shadow_path.with_name(shadow_path.name + "-shm"),
+                        shadow_path.with_name(shadow_path.name + "-journal"),
+                    ):
+                        try:
+                            if candidate.exists():
+                                candidate.unlink()
+                        except OSError:
+                            pass
+
+        # Unreachable; every path above returns a response.
+        return JSONResponse({"ok": False, "error": "migration setup failed"}, status_code=500)
 
     @mcp.custom_route("/api/embedding/migrate/status", methods=["GET"])
     async def api_embedding_migrate_status(request: Request) -> Response:
@@ -739,13 +848,12 @@ def register(mcp) -> None:
                 "ok": False, "error": "已有补齐任务在进行中。",
             }, status_code=409)
 
-        import asyncio as _aio
         _backfill_state = {
             "running": True, "scanned": 0, "missing": 0, "done": 0,
             "failed": 0, "queued": 0, "orphaned": 0, "cleaned": 0,
             "cleanup_failed": 0, "status": "scanning", "error": "",
         }
-        _backfill_task = _aio.create_task(_backfill_run())
+        _backfill_task = spawn_background(_backfill_run())
         return JSONResponse({
             "ok": True,
             "status_path": "/api/embedding/backfill/status",
@@ -829,12 +937,11 @@ def register(mcp) -> None:
                 error=str(e)[:200],
             )
             return JSONResponse({"ok": False, "error": f"无法连接 ollama（{base}）：{str(e)[:120]}"}, status_code=502)
-        import asyncio as _aio
         global _ollama_pull_task
         request_state = _ollama_pull_request_state.get()
         if request_state is None:  # pragma: no cover - decorator invariant
             raise RuntimeError("Ollama pull route lost its reservation")
-        _ollama_pull_task = _aio.create_task(
+        _ollama_pull_task = spawn_background(
             _ollama_pull_run(
                 base,
                 name,

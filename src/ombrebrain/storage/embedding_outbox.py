@@ -19,6 +19,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from utils import now_iso, parse_bool, positive_float
+from runtime_owner import spawn_background
 
 
 logger = logging.getLogger("ombre_brain.embedding_outbox")
@@ -662,9 +663,8 @@ class EmbeddingOutbox:
                 await self.reconcile(include_archive=True)
             except Exception as exc:
                 logger.warning("Embedding outbox startup reconciliation failed: %s", exc)
-        self._task = asyncio.create_task(
-            self._run(), name="ombre-embedding-outbox"
-        )
+        self._task = spawn_background(self._run())
+        self._task.set_name("ombre-embedding-outbox")
         self._wake()
         logger.info(
             "Embedding outbox started / embedding 后台索引队列已启动: pending=%s",

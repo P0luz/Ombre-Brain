@@ -35,13 +35,14 @@ import random
 from datetime import datetime
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from ..plan.core import is_letter_bucket
 from ombrebrain.storage.attribution import names_from_config
 from ombrebrain.storage.quote_store import quotes_from_metadata, render_quotes
 from ._date_range import bucket_in_created_range, parse_created_range
 from ._shared import bucket_has_tags, footprint_reader
 from ._verbatim import render_stored_bucket
+from .footprint_projection import append_projection_if_fits
 from utils import count_tokens_approx, parse_bool
 
 _SURFACE_POLICY = SurfacePolicyVM.default()
@@ -125,6 +126,7 @@ def _render_archived_hit(bucket: dict, footprint: str) -> tuple[str, int]:
     header = (
         f"{protected_mark}[query 命中·已删除到档案] [bucket_id:{bucket_id}] "
         "[状态:已退出日常记忆，原文仍保留]"
+        f"{_identity.attribution(bucket.get('metadata') or {})}"
     )
     rendered, _ = render_stored_bucket(bucket, header, footprint)
     rendered += (
@@ -293,9 +295,14 @@ async def surface_search(
             rendered, entry_tokens = render_stored_bucket(
                 exact_bucket,
                 f"{protected_mark}[exact_bucket_id:true] "
-                f"[bucket_id:{exact_bucket['id']}]",
-                _footprint(exact_bucket),
+                f"[bucket_id:{exact_bucket['id']}]"
+                f"{_identity.attribution(meta)}",
+                "",
             )
+            rendered, origin_cost = append_projection_if_fits(
+                rendered, exact_bucket, max(0, max_tokens - entry_tokens)
+            )
+            entry_tokens += origin_cost
             if entry_tokens > max_tokens:
                 return _BUDGET_NOTICE
             # 3.6.0：按完整 ID 取桶同样只读。这条路径存在的理由就是「改之前先读一眼
@@ -379,27 +386,40 @@ async def surface_search(
         meta = bucket["metadata"]
         bucket_id = bucket["id"]
         if _is_archived(bucket):
-            rendered, entry_tokens = _render_archived_hit(bucket, _footprint(bucket))
+            rendered, entry_tokens = _render_archived_hit(bucket, "")
         elif parse_bool(meta.get("protected"), default=False):
-            header = f"🛡️ [受保护记忆] [bucket_id:{bucket_id}]"
+            header = (
+                f"🛡️ [受保护记忆] [bucket_id:{bucket_id}]"
+                f"{_identity.attribution(meta)}"
+            )
             rendered, entry_tokens = render_stored_bucket(
-                bucket, header, _footprint(bucket)
+                bucket, header, ""
             )
         elif meta.get("pinned") or meta.get("type") == "permanent":
-            header = f"📌 [核心准则] [bucket_id:{bucket_id}]"
+            header = (
+                f"📌 [核心准则] [bucket_id:{bucket_id}]"
+                f"{_identity.attribution(meta)}"
+            )
             rendered, entry_tokens = render_stored_bucket(
-                bucket, header, _footprint(bucket)
+                bucket, header, ""
             )
         elif bucket.get("vector_match"):
-            header = f"[语义关联] [bucket_id:{bucket_id}]"
+            header = (
+                f"[语义关联] [bucket_id:{bucket_id}]"
+                f"{_identity.attribution(meta)}"
+            )
             rendered, entry_tokens = render_stored_bucket(
-                bucket, header, _footprint(bucket)
+                bucket, header, ""
             )
         else:
-            header = f"[bucket_id:{bucket_id}]"
+            header = f"[bucket_id:{bucket_id}]{_identity.attribution(meta)}"
             rendered, entry_tokens = render_stored_bucket(
-                bucket, header, _footprint(bucket)
+                bucket, header, ""
             )
+        rendered, origin_cost = append_projection_if_fits(
+            rendered, bucket, max(0, max_tokens - token_used - entry_tokens)
+        )
+        entry_tokens += origin_cost
         # 引语：唯一的出口就在这里。默认不附加——每一条浮现路径
         # （breath / dream / catalog / feel）走的都是白名单渲染，读不到这个字段。
         # 只有我在这次调用里明确说了「我想知道当时是怎么说的」，它才出现。
@@ -438,6 +458,7 @@ async def surface_search(
     if not budget_blocked and len(matches) < min(3, max_results):
         try:
             all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
+            all_buckets = _identity.filter_default(all_buckets)
             matched_ids = {b["id"] for b in matches}
             low_weight = [
                 b for b in all_buckets
@@ -463,9 +484,14 @@ async def surface_search(
                 for b in drifted:
                     rendered, entry_tokens = render_stored_bucket(
                         b,
-                        f"[联想浮现·非检索命中] [bucket_id:{b['id']}]",
-                        _footprint(b),
+                        f"[surface_type: random] [联想浮现·非检索命中] [bucket_id:{b['id']}]"
+                        f"{_identity.attribution(b.get('metadata') or {})}",
+                        "",
                     )
+                    rendered, origin_cost = append_projection_if_fits(
+                        rendered, b, max(0, max_tokens - token_used - entry_tokens)
+                    )
+                    entry_tokens += origin_cost
                     if token_used + entry_tokens > max_tokens:
                         budget_blocked = True
                         break

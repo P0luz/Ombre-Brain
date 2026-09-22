@@ -17,6 +17,7 @@ import threading
 
 from starlette.requests import Request
 from starlette.responses import Response
+from runtime_owner import spawn_background
 
 from . import _shared as sh
 
@@ -53,7 +54,7 @@ _password_work_semaphore = _CrossLoopSemaphore(_PASSWORD_WORK_MAX_CONCURRENCY)
 
 
 async def _await_password_worker(func, *args, **kwargs):
-    worker = asyncio.create_task(asyncio.to_thread(func, *args, **kwargs))
+    worker = spawn_background(asyncio.to_thread(func, *args, **kwargs))
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:

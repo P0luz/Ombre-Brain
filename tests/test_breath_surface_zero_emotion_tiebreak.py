@@ -60,11 +60,11 @@ async def test_zero_emotion_bucket_sorts_below_a_genuinely_low_but_nonzero_one(
     monkeypatch.setattr(decay_eng, "calculate_score", lambda meta: 1.0)
     install_runtime(bucket_mgr, decay_eng)
 
-    zero_id = await bucket_mgr.create(
+    zero_id = await bucket_mgr.create_internal(
         content="效价唤醒度都恰好为零的记忆", importance=5,
         valence=0.0, arousal=0.0,
     )
-    low_id = await bucket_mgr.create(
+    low_id = await bucket_mgr.create_internal(
         content="效价唤醒度真实偏低但不为零的记忆", importance=5,
         valence=0.4, arousal=0.25,  # av = 0.1
     )

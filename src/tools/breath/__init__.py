@@ -40,6 +40,7 @@ from .._common import (
 from ._date_range import parse_created_range
 from .catalog import surface_catalog
 from .feel import surface_feels
+from .handoff import surface_handoff
 from .importance import surface_by_importance
 from .surface import surface_default, surface_plans
 from .search import surface_search
@@ -109,8 +110,16 @@ async def dispatch(
     date_from = "" if date_from is None else str(date_from)
     date_to = "" if date_to is None else str(date_to)
     quotes = parse_bool(quotes, default=False)
-    mode = "manual" if mode is None else str(mode)
+    mode = "manual" if mode is None else (str(mode).strip().lower() or "manual")
     with_ids = parse_bool(with_ids, default=False)
+    if mode not in {"manual", "automatic", "handoff"}:
+        # Search mode historically treats unknown values as manual.  Preserve
+        # that tolerant wire contract, while cold-start mode stays strict so a
+        # misspelled handoff can never fall through to ordinary surfacing.
+        if query.strip():
+            mode = "manual"
+        else:
+            raise ValueError("breath mode 仅支持 manual、automatic 或 handoff")
 
     # 抛而不是 return：return 出去在 MCP 侧是 isError=False，模型会以为
     # 「查过了，没结果」，然后据此得出「这件事没记过」——比报错糟得多。
@@ -142,7 +151,14 @@ async def dispatch(
         "date_from": date_from,
         "date_to": date_to,
         "quotes": quotes,
+        "mode": mode,
     })
+
+    # Handoff is a read-only cold-start projection.  It must short-circuit all
+    # ordinary surfacing/search branches and does not need the decay engine.
+    if mode == "handoff":
+        return await surface_handoff()
+
     await rt.decay_engine.ensure_started()
 
     surfacing_cfg = rt.config.get("surfacing", {}) or {}

@@ -4,6 +4,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+import remainder_integration
 import web.system as system
 
 
@@ -229,6 +230,21 @@ Diagnostics regression tests.
     # Keep this unit test independent of the host running pytest. The test
     # exercises diagnostics fields, not Docker mount detection.
     monkeypatch.setattr(system.sh, "in_docker", lambda: False)
+    monkeypatch.setattr(
+        remainder_integration,
+        "runtime_status",
+        lambda _root: {
+            "wiring": "active",
+            "startup_state": "complete",
+            "unresolved": 0,
+            "sidecar_health": {
+                "ok": True,
+                "prepared_count": 0,
+                "conflict_count": 0,
+                "quarantined_buckets": [],
+            },
+        },
+    )
 
     (buckets_dir / ".tunnel_config.json").write_text(
         json.dumps({"token": "configured", "auto_start": True}),
@@ -245,6 +261,15 @@ Diagnostics regression tests.
     assert payload["ok"] is False
     assert payload["summary"]["error"] >= 2
     assert by_id["storage"]["status"] == "ok"
+    assert by_id["remainder_recovery"]["status"] == "ok"
+    assert by_id["remainder_recovery"]["details"] == {
+        "wiring": "active",
+        "startup_state": "complete",
+        "unresolved": 0,
+        "prepared_count": 0,
+        "conflict_count": 0,
+        "quarantined_count": 0,
+    }
     assert by_id["auth"]["status"] == "error"
     assert by_id["auth"]["details"]["public_exposure_risk"] is True
     assert "隧道" in by_id["auth"]["message"]

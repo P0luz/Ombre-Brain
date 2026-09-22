@@ -46,7 +46,7 @@ from typing import Optional
 from errors import ToolInputError
 from ombrebrain.domain.memory_messages import resolved_hint
 from utils import normalize_memory_title, parse_bool
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from .._common import (
     _quota_turn,
     check_content_size,
@@ -213,6 +213,14 @@ async def trace_core(
     if not bucket_id or not bucket_id.strip():
         raise ToolInputError("请提供有效的 bucket_id。")
 
+    def _authorize(bucket: dict | None) -> str:
+        if not bucket:
+            return ""
+        try:
+            return _identity.mutation_owner(bucket.get("metadata") or {})
+        except ValueError as exc:
+            raise ToolInputError(str(exc)) from exc
+
     # 关系修正是独立分支：它只动 relation_links，不参与下面的字段收集，
     # 所以在这里就地返回，不和 delete / content 改写等混在一起。
     unlink = str(unlink or "").strip()
@@ -223,10 +231,13 @@ async def trace_core(
             raise ToolInputError("quotes_replace 不能与关系修正同时使用，请分开调用；本次未修改。")
         if parse_bool(reinforce, default=False):
             raise ToolInputError("reinforce 不能与关系修正同时使用，请分开调用；本次未修改。")
-        if not await rt.bucket_mgr.get(bucket_id):
+        source_bucket = await rt.bucket_mgr.get(bucket_id)
+        if not source_bucket:
             raise ToolInputError(f"找不到记忆 {bucket_id}；本次未修改。")
+        source_owner = _authorize(source_bucket)
         return await _relation_edit.apply(
-            bucket_id.strip(), unlink, relink, relation_type
+            bucket_id.strip(), unlink, relink, relation_type,
+            source_owner=source_owner,
         )
 
     # 引语订正同样是独立早返回分支，理由与关系修正一致：它只动 metadata.quotes，
@@ -271,14 +282,16 @@ async def trace_core(
             )
         return await _reinforce.apply(bucket_id.strip())
 
+    guarded_owner = ""
     if restore or delete or hard_delete:
         guarded_reader = (
             getattr(rt.bucket_mgr, "get_including_archive", None)
-            if restore else None
+            if restore or hard_delete else None
         )
         if not callable(guarded_reader):
             guarded_reader = rt.bucket_mgr.get
         guarded_bucket = await guarded_reader(bucket_id)
+        guarded_owner = _authorize(guarded_bucket)
         if (
             guarded_bucket
             and is_letter_bucket(guarded_bucket)
@@ -425,11 +438,14 @@ async def trace_core(
                 if quota_err:
                     return quota_err
 
-            result = await rt.bucket_mgr.restore_archived(
-                bucket_id,
-                importance_override=importance_override,
-                protected_override=False if restore_unprotect else None,
-            )
+            with _identity.manager_mutation_guard(
+                rt.bucket_mgr, {bucket_id: guarded_owner}
+            ):
+                result = await rt.bucket_mgr.restore_archived(
+                    bucket_id,
+                    importance_override=importance_override,
+                    protected_override=False if restore_unprotect else None,
+                )
         if result.get("ok"):
             return f"已重新回忆并恢复记忆桶: {bucket_id}"
         if result.get("error") == "not_archived":
@@ -467,9 +483,12 @@ async def trace_core(
                 "并且必须提供非空 delete_reason；本次未删除、未归档。")
         if len(delete_reason) > 500:
             raise ToolInputError("拒绝永久删除：delete_reason 不能超过 500 个字符；本次未删除、未归档。")
-        result = await rt.bucket_mgr.hard_delete_test_bucket(
-            bucket_id, reason=delete_reason
-        )
+        with _identity.manager_mutation_guard(
+            rt.bucket_mgr, {bucket_id: guarded_owner}
+        ):
+            result = await rt.bucket_mgr.hard_delete_test_bucket(
+                bucket_id, reason=delete_reason
+            )
         if result.get("ok"):
             return f"已永久删除测试桶: {bucket_id}"
         if result.get("error") == "not_erasable_test_data":
@@ -486,7 +505,10 @@ async def trace_core(
         raise ToolInputError(f"永久删除失败：{result.get('error', 'unknown_error')}；本次未删除、未归档。")
 
     if delete:
-        success = await rt.bucket_mgr.delete(bucket_id)
+        with _identity.manager_mutation_guard(
+            rt.bucket_mgr, {bucket_id: guarded_owner}
+        ):
+            success = await rt.bucket_mgr.delete(bucket_id)
         if not success:
             # 与上面 hard_delete 的 not_found 同一回事：桶不存在，这次什么都没归档。
             # 之前这里 return 字符串，同一个函数里三种「找不到桶」两种处理，
@@ -497,6 +519,7 @@ async def trace_core(
     bucket = await rt.bucket_mgr.get(bucket_id)
     if not bucket:
         raise ToolInputError(f"未找到记忆桶: {bucket_id}")
+    bucket_owner = _authorize(bucket)
 
     meta = bucket.get("metadata", {})
     current_pinned = parse_bool(meta.get("pinned"), default=False)
@@ -507,7 +530,12 @@ async def trace_core(
         {"expected_lock_state": letter_lock_revision(bucket)}
         if logical_letter else {}
     )
-    if logical_letter and letter_lock_state(bucket, "ai")["locked"]:
+    lock_identity = (
+        _identity.normalize_caller(_identity.get_caller())
+        if "locked_by_principal" in meta
+        else "ai"
+    )
+    if logical_letter and letter_lock_state(bucket, lock_identity)["locked"]:
         raise ToolInputError("这封信尚未向你开放；请使用 Letter 专用入口管理锁状态。")
     pin_state_changed = (
         pinned in (0, 1) and bool(pinned) != current_pinned
@@ -623,7 +651,13 @@ async def trace_core(
         if 1 <= importance <= 10:
             updates["importance"] = final_importance
         if tags:
-            updates["tags"] = [t.strip() for t in tags.split(",") if t.strip()]
+            requested_tags = [t.strip() for t in tags.split(",") if t.strip()]
+            try:
+                updates["tags"] = _identity.preserve_mutation_owner(
+                    meta, requested_tags
+                )
+            except ValueError as exc:
+                raise ToolInputError(str(exc)) from exc
         if resolved in (0, 1):
             updates["resolved"] = bool(resolved)
         if pinned in (0, 1):
@@ -715,15 +749,18 @@ async def trace_core(
             updates["resolution_suggested"] = None
 
         if patch_args_supplied:
-            patch_result = await rt.bucket_mgr.update_content_fragment(
-                bucket_id,
-                old_str=old_str,
-                new_str=new_str,
-                append_plan_history=append_plan_history_in_patch,
-                event_actor="llm",
-                **lock_precondition,
-                **updates,
-            )
+            with _identity.manager_mutation_guard(
+                rt.bucket_mgr, {bucket_id: bucket_owner}
+            ):
+                patch_result = await rt.bucket_mgr.update_content_fragment(
+                    bucket_id,
+                    old_str=old_str,
+                    new_str=new_str,
+                    append_plan_history=append_plan_history_in_patch,
+                    event_actor="llm",
+                    **lock_precondition,
+                    **updates,
+                )
             if not patch_result.get("ok"):
                 patch_error = patch_result.get("error")
                 if patch_error == "not_found":
@@ -744,12 +781,15 @@ async def trace_core(
                     raise ToolInputError("old_str 与 new_str 替换后正文没有变化；本次未修改。")
                 raise ToolInputError(f"修改失败: {bucket_id}")
         else:
-            success = await rt.bucket_mgr.update(
-                bucket_id,
-                event_actor="llm",
-                **lock_precondition,
-                **updates,
-            )
+            with _identity.manager_mutation_guard(
+                rt.bucket_mgr, {bucket_id: bucket_owner}
+            ):
+                success = await rt.bucket_mgr.update(
+                    bucket_id,
+                    event_actor="llm",
+                    **lock_precondition,
+                    **updates,
+                )
             if not success:
                 raise ToolInputError(f"修改失败: {bucket_id}")
 

@@ -95,7 +95,7 @@ async def test_letter_read_returns_a_letter_whose_naive_lock_has_passed(bucket_m
         "一封早就该解锁的信",
         id="oldlock01",
         name="2026-04-12 08-30-00 T",
-        tags=["__letter__"],
+        tags=["__letter__", "owner:cheng"],
         domain=["letter"],
         type="letter",
         importance=10,

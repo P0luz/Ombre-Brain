@@ -50,6 +50,13 @@ def install_runtime(bucket_mgr, limits=None):
     rt.mark_op = None
 
 
+async def _create_owned(bucket_mgr, *args, **kwargs):
+    """Create a private test bucket compatible with authenticated mutations."""
+
+    kwargs.setdefault("tags", ["owner:cheng"])
+    return await bucket_mgr.create_internal(*args, **kwargs)
+
+
 class StaticBucketManager:
     """Minimal counter fixture for legacy/imported physical row shapes."""
 
@@ -93,7 +100,7 @@ async def test_unpin_via_trace_frees_pinned_quota(bucket_mgr):
 
     ids = []
     for i in range(3):
-        ids.append(await bucket_mgr.create(content=f"核心准则 {i}", pinned=True))
+        ids.append(await _create_owned(bucket_mgr, content=f"核心准则 {i}", pinned=True))
 
     # 满额：钉新桶被拒（enforce 返回 False = 走普通桶）
     assert await count_pinned() == 3
@@ -110,7 +117,7 @@ async def test_unpin_via_trace_frees_pinned_quota(bucket_mgr):
 @pytest.mark.asyncio
 async def test_trace_can_unpin_and_lower_importance_atomically(bucket_mgr):
     install_runtime(bucket_mgr)
-    pinned_id = await bucket_mgr.create(content="lower while unpinning", pinned=True)
+    pinned_id = await _create_owned(bucket_mgr, content="lower while unpinning", pinned=True)
 
     result = await trace_core(pinned_id, pinned=0, importance=7)
 
@@ -125,7 +132,7 @@ async def test_trace_can_unpin_and_lower_importance_atomically(bucket_mgr):
 @pytest.mark.asyncio
 async def test_trace_rejects_unpin_without_same_call_importance(bucket_mgr):
     install_runtime(bucket_mgr)
-    pinned_id = await bucket_mgr.create(content="must choose importance", pinned=True)
+    pinned_id = await _create_owned(bucket_mgr, content="must choose importance", pinned=True)
 
     with pytest.raises(ToolInputError) as excinfo:
         await trace_core(pinned_id, pinned=0)
@@ -145,10 +152,10 @@ async def test_permanent_type_does_not_occupy_pinned_quota(bucket_mgr):
     install_runtime(bucket_mgr, limits={"max_pinned": 3})
 
     # 2 个真 pinned + 2 个曾 pinned 后解钉的（type 仍是 permanent）
-    await bucket_mgr.create(content="真钉 A", pinned=True)
-    await bucket_mgr.create(content="真钉 B", pinned=True)
+    await _create_owned(bucket_mgr, content="真钉 A", pinned=True)
+    await _create_owned(bucket_mgr, content="真钉 B", pinned=True)
     for i in range(2):
-        bid = await bucket_mgr.create(content=f"曾钉 {i}", pinned=True)
+        bid = await _create_owned(bucket_mgr, content=f"曾钉 {i}", pinned=True)
         await trace_core(bid, pinned=0, importance=7)
 
     # 只数 metadata.pinned=True 的：2，不是 4
@@ -177,13 +184,13 @@ async def test_pinned_counter_normalizes_booleans_and_logical_ids():
 @pytest.mark.asyncio
 async def test_active_protected_uses_an_independent_configured_quota(bucket_mgr):
     install_runtime(bucket_mgr, limits={"max_pinned": 1, "max_protected": 1})
-    await bucket_mgr.create(content="ordinary pinned slot", pinned=True)
-    await bucket_mgr.create(
+    await _create_owned(bucket_mgr, content="ordinary pinned slot", pinned=True)
+    await _create_owned(bucket_mgr,
         content="the sole protected slot",
         protected=True,
         bucket_type="dynamic",
     )
-    await bucket_mgr.create(
+    await _create_owned(bucket_mgr,
         content="unprotected permanent does not use protected quota",
         bucket_type="permanent",
     )
@@ -192,7 +199,7 @@ async def test_active_protected_uses_an_independent_configured_quota(bucket_mgr)
     assert await count_protected() == 1
     assert await check_protected_quota() is not None
 
-    candidate_id = await bucket_mgr.create(
+    candidate_id = await _create_owned(bucket_mgr,
         content="protected quota overflow candidate",
         importance=5,
     )
@@ -209,14 +216,14 @@ async def test_active_protected_uses_an_independent_configured_quota(bucket_mgr)
 @pytest.mark.asyncio
 async def test_restore_archived_protected_rejects_when_quota_is_full(bucket_mgr):
     install_runtime(bucket_mgr, limits={"max_protected": 1})
-    archived_id = await bucket_mgr.create(
+    archived_id = await _create_owned(bucket_mgr,
         content="archived protected memory",
         protected=True,
     )
     assert await bucket_mgr.archive(archived_id) is True
     assert await count_protected() == 0
 
-    await bucket_mgr.create(content="active protected slot", protected=True)
+    await _create_owned(bucket_mgr, content="active protected slot", protected=True)
     assert await count_protected() == 1
 
     result = await trace_core(archived_id, restore=True)
@@ -234,7 +241,7 @@ async def test_trace_restore_dirty_protected_anchor_requires_atomic_unprotect(
 ):
     install_runtime(bucket_mgr)
 
-    archived_id = await bucket_mgr.create(
+    archived_id = await _create_owned(bucket_mgr,
         content="historical protected anchor conflict",
         protected=True,
     )
@@ -284,7 +291,7 @@ async def test_concurrent_merge_promotions_preserve_both_events_and_one_slot(
     monkeypatch,
 ):
     install_runtime(bucket_mgr)
-    target_id = await bucket_mgr.create(content="merge base", importance=5)
+    target_id = await _create_owned(bucket_mgr, content="merge base", importance=5)
 
     async def find_target(*_args, **_kwargs):
         row = await bucket_mgr.get(target_id)

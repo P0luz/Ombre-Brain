@@ -90,7 +90,7 @@ async def run_search(query, *, domain="", tags=None):
 async def test_dynamic_memory_remains_readable_without_summary_provider(
     bucket_mgr, decay_eng, monkeypatch
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="The cedar notebook contains the recovery phrase.",
         domain=["operations"],
     )
@@ -114,7 +114,7 @@ async def test_dynamic_memory_remains_readable_without_summary_provider(
 async def test_vector_provider_failure_falls_back_to_keyword_search(
     bucket_mgr, decay_eng, monkeypatch
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Project Halcyon uses the blue deployment lane.",
         domain=["work"],
     )
@@ -134,7 +134,7 @@ async def test_vector_provider_failure_falls_back_to_keyword_search(
 async def test_semantic_only_candidate_is_recalled_with_one_vector_query(
     bucket_mgr, decay_eng, monkeypatch
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="A quiet recollection with no lexical overlap.",
         domain=["journal"],
     )
@@ -154,7 +154,7 @@ async def test_semantic_only_candidate_is_recalled_with_one_vector_query(
 async def test_semantic_search_logs_index_outbox_and_rank_diagnostics(
     bucket_mgr, decay_eng
 ):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="A semantic diagnostic target.",
         domain=["journal"],
     )
@@ -184,11 +184,11 @@ async def test_semantic_search_logs_index_outbox_and_rank_diagnostics(
 async def test_semantic_candidate_cannot_bypass_domain_filter(
     bucket_mgr, decay_eng, monkeypatch
 ):
-    allowed_id = await bucket_mgr.create(
+    allowed_id = await bucket_mgr.create_internal(
         content="Allowed workspace memory contains the quartz marker.",
         domain=["work"],
     )
-    blocked_id = await bucket_mgr.create(
+    blocked_id = await bucket_mgr.create_internal(
         content="Private journal memory unrelated to work.",
         domain=["private"],
     )
@@ -205,11 +205,11 @@ async def test_semantic_candidate_cannot_bypass_domain_filter(
 @pytest.mark.asyncio
 async def test_missing_vector_does_not_reduce_keyword_candidate_score(bucket_mgr):
     bucket_mgr._bm25 = None
-    target_id = await bucket_mgr.create(
+    target_id = await bucket_mgr.create_internal(
         content="Orchid release checklist is ready.",
         domain=["work"],
     )
-    other_id = await bucket_mgr.create(
+    other_id = await bucket_mgr.create_internal(
         content="A separate memory with a vector.",
         domain=["misc"],
     )

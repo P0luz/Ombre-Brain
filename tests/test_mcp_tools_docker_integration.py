@@ -12,13 +12,18 @@ import os
 import re
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from urllib.parse import urlsplit
 
 import httpx
 import pytest
 
+from tests.docker_oauth_helper import issue_oauth_token
+
 
 MCP_URL = os.environ.get("OMBRE_DOCKER_INTEGRATION_URL", "").strip()
 MCP_TOKEN = os.environ.get("OMBRE_DOCKER_MCP_TOKEN", "").strip()
+MCP_PASSWORD = os.environ.get("OMBRE_DOCKER_MCP_PASSWORD", "").strip()
+MCP_CALLER = os.environ.get("OMBRE_DOCKER_MCP_CALLER", "cheng").strip()
 EXPECT_COMPRESSION_PROVIDER = os.environ.get(
     "OMBRE_DOCKER_EXPECT_COMPRESSION_PROVIDER", ""
 ).strip().lower() in {"1", "true", "yes", "on"}
@@ -31,6 +36,7 @@ EXPECTED_TOOLS = {
     "hold",
     "grow",
     "trace",
+    "just_now",
     "anchor",
     "release",
     "pulse",
@@ -49,6 +55,7 @@ EXPECTED_TOOL_ORDER = (
     "hold",
     "grow",
     "trace",
+    "just_now",
     "dream",
     "anchor",
     "release",
@@ -148,6 +155,11 @@ EXPECTED_TOOL_PROPERTIES = {
         "quotes_replace",
         "reinforce",
     },
+    "just_now": {
+        "action", "source", "task_id", "role", "content", "occurred_at",
+        "source_cursor", "event_id", "session_id", "cursor", "limit",
+        "after_seq", "confirm",
+    },
     "anchor": {"bucket_id"},
     "release": {"bucket_id"},
     "pulse": {"include_archive"},
@@ -159,8 +171,14 @@ EXPECTED_TOOL_PROPERTIES = {
     "letter_lock_update": {"letter_id", "lock_type", "unlock_date"},
     "letter_read": {"query", "limit", "author", "date_from", "date_to"},
     "feel": {"query", "max_tokens"},
-    # supersedes：3.6.6 的「声明取代即挂起旧条目」。
-    "I": {"content", "aspect", "read", "limit", "promote", "supersedes"},
+    # supersedes：3.6.6 的「声明取代即挂起旧条目」；其余为 owner-safe
+    # evidence profile 的显式动作参数。
+    "I": {
+        "content", "aspect", "read", "limit", "promote", "supersedes",
+        "action", "confidence", "evidence_id", "source_bucket",
+        "source_refs", "confirm_stable", "bucket_id", "reason",
+        "include_inactive",
+    },
     "dream": {"window_hours"},
 }
 
@@ -278,6 +296,24 @@ class MCPClientContext(MCPClient):
 
     def __exit__(self, *_args):
         self.close()
+
+
+@pytest.fixture(scope="module", autouse=True)
+def caller_bound_mcp_token():
+    global MCP_TOKEN
+    if MCP_TOKEN:
+        return
+    assert MCP_PASSWORD, (
+        "OMBRE_DOCKER_MCP_PASSWORD or OMBRE_DOCKER_MCP_TOKEN is required "
+        "for caller-bound remote write coverage"
+    )
+    parsed = urlsplit(MCP_URL)
+    MCP_TOKEN = issue_oauth_token(
+        base_url=f"{parsed.scheme}://{parsed.netloc}",
+        password=MCP_PASSWORD,
+        caller=MCP_CALLER,
+        resource=MCP_URL,
+    )
 
 
 @pytest.fixture(scope="module")

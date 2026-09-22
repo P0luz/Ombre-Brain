@@ -35,7 +35,11 @@ from pathlib import Path
 from typing import Any
 
 from errors import safe_error_detail
+from ombrebrain.eventsourcing.footprint import import_origin, validate_origin
+from tools import _identity
+from tools._common import merge_or_create as _owner_safe_merge_or_create
 from tools.plan.core import is_letter_bucket
+from runtime_owner import spawn_background
 from utils import atomic_write_text, clean_llm_json, count_tokens_approx, now_iso, parse_bool
 
 logger = logging.getLogger("ombre_brain.import")
@@ -294,7 +298,7 @@ def _parse_structured_memory_json(
 async def _await_import_worker(func, *args):
     """Reap an unkillable parser thread before releasing its job reservation."""
 
-    worker = asyncio.create_task(asyncio.to_thread(func, *args))
+    worker = spawn_background(asyncio.to_thread(func, *args))
     try:
         return await asyncio.shield(worker)
     except asyncio.CancelledError:
@@ -952,6 +956,8 @@ class ImportEngine:
         self._job_guard = threading.Lock()
         self._chunks: list[dict] = []
         self._exact_content_hashes: set[str] | None = None
+        self._job_owner: str = ""
+        self._job_origin: dict = {}
 
     @property
     def is_running(self) -> bool:
@@ -1028,11 +1034,31 @@ class ImportEngine:
         resume: bool = False,
         *,
         reservation_id: str | None = None,
+        owner: str = "",
+        footprint_origin: dict | None = None,
     ) -> dict:
         """
         Start or resume an import.
         开始或恢复导入。
         """
+        explicit_owner = str(owner or "").strip().lower().replace("-", "_")
+        if explicit_owner not in _identity.known_owner_values():
+            return {
+                "error": (
+                    "Import requires an explicit valid owner; untagged or "
+                    "unknown owners are not auto-claimed"
+                )
+            }
+        try:
+            origin = validate_origin(footprint_origin)
+        except Exception:
+            return {"error": "Import requires a valid footprint origin"}
+        if origin.get("via") != "import":
+            return {"error": "Import requires an explicit via=import footprint origin"}
+
+        self._job_owner = explicit_owner
+        self._job_origin = origin
+
         job_id = reservation_id
         if job_id is None:
             job_id = self.reserve_start()
@@ -1081,6 +1107,14 @@ class ImportEngine:
 
             # 检查是否续传
             if resume_state_loaded and self.state.can_resume:
+                saved_owner = str(self.state.data.get("owner") or "")
+                if saved_owner and saved_owner != self._job_owner:
+                    return {
+                        "error": (
+                            "Import resume owner differs from the original "
+                            "job owner"
+                        )
+                    }
                 if self.state.data["source_hash"] == source_hash:
                     self._chunks = prepared_chunks
                     if len(self._chunks) == self.state.data["total_chunks"]:
@@ -1129,6 +1163,7 @@ class ImportEngine:
                 len(self._chunks),
                 job_id=job_id,
             )
+            self.state.data["owner"] = self._job_owner
             state_initialized = True
             self.state.save()
 
@@ -1260,6 +1295,7 @@ class ImportEngine:
             source_tool="import",
             event_actor="human",
             imported=True,
+            footprint_origin=import_origin("system", "system"),
         )
 
     async def _process_single_chunk(self, chunk: dict, preserve_raw: bool) -> bool:
@@ -1306,13 +1342,14 @@ class ImportEngine:
             try:
                 should_preserve = preserve_raw or item.get("preserve_raw", False)
 
-                # 历史导入保留来源：不能因为语义检索相似就修改旧记忆。
-                # 仅按正文精确去重，确保崩溃续跑仍然幂等。
-                created = await self._create_import_item_if_new(item)
-                if not created:
-                    self.state.data["memories_skipped"] += 1
-                    continue
-                self.state.data["memories_created"] += 1
+                merged = await self._merge_or_create_item(
+                    item,
+                    exact_only=should_preserve,
+                )
+                if merged:
+                    self.state.data["memories_merged"] += 1
+                else:
+                    self.state.data["memories_created"] += 1
                 if should_preserve:
                     self.state.data["memories_raw"] += 1
 
@@ -1375,6 +1412,35 @@ class ImportEngine:
             return []
 
         return self._parse_extraction(raw)
+
+    async def _merge_or_create_item(
+        self,
+        item: dict,
+        *,
+        exact_only: bool = False,
+    ) -> bool:
+        """Store one import item through the owner-safe final-review pipeline."""
+        tags = _identity.ensure_write_owner(
+            item.get("tags", []),
+            caller=self._job_owner,
+        )
+        _bucket_id, is_merged, _embed_warning = (
+            await _owner_safe_merge_or_create(
+                content=item["content"],
+                tags=tags,
+                importance=item.get("importance", _DEFAULT_IMPORTANCE),
+                domain=item.get("domain", ["未分类"]),
+                valence=item.get("valence", _DEFAULT_VALENCE),
+                arousal=item.get("arousal", _DEFAULT_AROUSAL),
+                name=item.get("name") or "",
+                raw_merge=exact_only,
+                source_tool="import",
+                exact_only=exact_only,
+                footprint_origin=self._job_origin,
+                owner=self._job_owner,
+            )
+        )
+        return is_merged
 
     @staticmethod
     def _parse_extraction(

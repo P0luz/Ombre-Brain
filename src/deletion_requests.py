@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from bucket_manager import _filesystem_turn
+from tools import _identity
 from tools.plan.core import is_letter_bucket, letter_lock_state
 from utils import atomic_write_text
 
@@ -333,18 +334,26 @@ class DeletionRequestStore:
                     "error": "deletion request does not match bucket_id",
                     "code": "bucket_mismatch",
                 }
-            if not self._is_active_target(await self.bucket_mgr.get(str(record["bucket_id"]))):
+            target = await self.bucket_mgr.get(str(record["bucket_id"]))
+            if not self._is_active_target(target):
                 record["status"] = "superseded"
                 record["decided_at"] = datetime.now().astimezone().isoformat()
                 record["superseded_reason"] = "target is no longer active"
                 self._save(state)
                 return {"ok": False, "error": "deletion request target is no longer active"}
+            try:
+                owner = _identity.mutation_owner(target.get("metadata") or {})
+            except ValueError as exc:
+                return {"ok": False, "error": str(exc), "code": "owner_denied"}
             if decision == "approve":
-                result = await self.human_delete.execute(
-                    str(record["bucket_id"]),
-                    action=str(record.get("action") or "delete"),
-                    is_letter=record.get("is_letter") is True,
-                )
+                with _identity.manager_mutation_guard(
+                    self.bucket_mgr, {str(record["bucket_id"]): owner}
+                ):
+                    result = await self.human_delete.execute(
+                        str(record["bucket_id"]),
+                        action=str(record.get("action") or "delete"),
+                        is_letter=record.get("is_letter") is True,
+                    )
                 if not result.get("ok"):
                     return {"ok": False, "error": "bucket deletion failed; request remains pending"}
                 record["status"] = "approved"
@@ -360,7 +369,7 @@ class DeletionRequestStore:
         items = []
         for record in self.pending_with_buckets():
             bucket = await self.bucket_mgr.get(str(record["bucket_id"]))
-            if bucket:
+            if bucket and _identity.admitted_mutation(bucket):
                 items.append((record, bucket))
         if not items:
             return ""

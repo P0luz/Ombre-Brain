@@ -58,7 +58,7 @@ async def test_concurrent_hold_pinned_does_not_exceed_cap(bucket_mgr, monkeypatc
 
     # 已有 2/3 pinned，剩 1 个名额；5 个并发请求同时抢这 1 个名额。
     for i in range(2):
-        await bucket_mgr.create(content=f"已钉 {i}", pinned=True)
+        await bucket_mgr.create_internal(content=f"已钉 {i}", pinned=True)
 
     results = await asyncio.gather(*[
         store_pinned(
@@ -97,9 +97,13 @@ async def test_concurrent_trace_protect_does_not_exceed_independent_cap(bucket_m
     install_runtime(bucket_mgr, limits={"max_protected": 3})
 
     for i in range(2):
-        await bucket_mgr.create(content=f"已保护 {i}", protected=True)
+        await bucket_mgr.create_internal(
+            content=f"已保护 {i}", protected=True, tags=["owner:cheng"]
+        )
     candidates = [
-        await bucket_mgr.create(content=f"候选保护 {i}", importance=5)
+        await bucket_mgr.create_internal(
+            content=f"候选保护 {i}", importance=5, tags=["owner:cheng"]
+        )
         for i in range(5)
     ]
 
@@ -175,14 +179,14 @@ async def test_concurrent_set_anchor_does_not_exceed_cap(bucket_mgr, monkeypatch
     monkeypatch.setattr(bucket_mgr, "ANCHOR_LIMIT", 3)
 
     for i in range(2):
-        await bucket_mgr.create(content=f"已 anchor {i}", tags=[f"anchor{i}"])
+        await bucket_mgr.create_internal(content=f"已 anchor {i}", tags=[f"anchor{i}"])
     anchored_ids = []
     all_b = await bucket_mgr.list_all(include_archive=False)
     for b in all_b[:2]:
         await bucket_mgr.set_anchor(b["id"], True)
         anchored_ids.append(b["id"])
 
-    candidates = [await bucket_mgr.create(content=f"候选 anchor {i}") for i in range(5)]
+    candidates = [await bucket_mgr.create_internal(content=f"候选 anchor {i}") for i in range(5)]
 
     results = await asyncio.gather(*[
         bucket_mgr.set_anchor(bid, True) for bid in candidates

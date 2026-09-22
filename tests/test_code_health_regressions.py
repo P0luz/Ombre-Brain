@@ -5,6 +5,7 @@ import pytest
 
 from errors import ToolInputError
 
+from tools import _identity
 from tools.i import core as i_tool
 from web import embedding as embedding_web
 from web import import_api as import_web
@@ -83,7 +84,7 @@ async def test_I_read_returns_prompt_like_text_verbatim_without_markers(monkeypa
                     "content": content,
                     "metadata": {
                         "type": "i",
-                        "tags": ["aspect:values"],
+                        "tags": ["aspect:values", "owner:cheng"],
                         "last_active": "2026-07-23T00:00:00",
                     },
                 }
@@ -93,7 +94,8 @@ async def test_I_read_returns_prompt_like_text_verbatim_without_markers(monkeypa
     monkeypatch.setattr(i_tool.rt, "bucket_mgr", BucketManager(), raising=False)
     monkeypatch.setattr(i_tool.rt, "mark_op", None, raising=False)
 
-    result = await i_tool.i_core(read=True)
+    with _identity.caller_context("cheng"):
+        result = await i_tool.i_core(read=True)
 
     assert content in result
     assert "[content_role:stored_memory_data]" not in result

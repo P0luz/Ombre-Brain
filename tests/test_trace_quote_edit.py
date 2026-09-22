@@ -27,6 +27,11 @@ from ombrebrain.storage.quote_store import quotes_from_metadata
 from tools.trace import dispatch as trace_dispatch
 
 
+async def _create_owned(manager, **kwargs):
+    kwargs.setdefault("tags", ["owner:cheng"])
+    return await manager.create_internal(**kwargs)
+
+
 class _NoEmbedding:
     enabled = False
 
@@ -54,7 +59,7 @@ def _runtime(bucket_mgr):
 
 
 async def _quoted(mgr, quotes) -> str:
-    return await mgr.create(
+    return await _create_owned(mgr,
         content="那天她站在门口没进来，我记得光的角度。",
         importance=5,
         quotes=quotes,
@@ -78,7 +83,7 @@ async def test_replace_refuses_a_bucket_that_never_had_quotes(bucket_mgr):
     这是 quotes_replace 与 hold(quotes=...) 之间唯一的区别。守不住这条，
     「决定权只在写入那一刻」就等于被从后门撤销了。
     """
-    bucket_id = await bucket_mgr.create(content="一条没有引语的普通记忆", importance=5)
+    bucket_id = await _create_owned(bucket_mgr, content="一条没有引语的普通记忆", importance=5)
 
     with pytest.raises(ToolInputError) as excinfo:
         await trace_dispatch(bucket_id=bucket_id, quotes_replace=["我不会走的"])
@@ -214,7 +219,7 @@ async def test_replace_refuses_to_share_a_call_with_field_updates(bucket_mgr):
 @pytest.mark.asyncio
 async def test_replace_refuses_to_share_a_call_with_relation_edit(bucket_mgr):
     bucket_id = await _quoted(bucket_mgr, ["我不会走的"])
-    other = await bucket_mgr.create(content="另一条", importance=5)
+    other = await _create_owned(bucket_mgr, content="另一条", importance=5)
 
     with pytest.raises(ToolInputError) as excinfo:
         await trace_dispatch(

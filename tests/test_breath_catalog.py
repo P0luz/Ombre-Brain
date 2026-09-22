@@ -51,13 +51,13 @@ def install_runtime(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_catalog_one_line_per_bucket_no_content(bucket_mgr):
-    await bucket_mgr.create(
+    await bucket_mgr.create_internal(
         content="这段正文绝不能出现在目录里",
         name="项目约定",
         domain=["工作"],
         importance=9,
     )
-    await bucket_mgr.create(
+    await bucket_mgr.create_internal(
         content="另一段私密正文",
         name="旅行计划",
         domain=["生活"],
@@ -79,8 +79,8 @@ async def test_catalog_one_line_per_bucket_no_content(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_catalog_sorted_by_importance_desc(bucket_mgr):
-    await bucket_mgr.create(content="低", name="低重", importance=3, domain=["a"])
-    await bucket_mgr.create(content="高", name="高重", importance=9, domain=["a"])
+    await bucket_mgr.create_internal(content="低", name="低重", importance=3, domain=["a"])
+    await bucket_mgr.create_internal(content="高", name="高重", importance=9, domain=["a"])
     install_runtime(bucket_mgr)
 
     out = await surface_catalog()
@@ -89,8 +89,8 @@ async def test_catalog_sorted_by_importance_desc(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_catalog_domain_filter(bucket_mgr):
-    await bucket_mgr.create(content="x", name="工作项", domain=["工作"], importance=5)
-    await bucket_mgr.create(content="y", name="生活项", domain=["生活"], importance=5)
+    await bucket_mgr.create_internal(content="x", name="工作项", domain=["工作"], importance=5)
+    await bucket_mgr.create_internal(content="y", name="生活项", domain=["生活"], importance=5)
     install_runtime(bucket_mgr)
 
     out = await surface_catalog(domain_filter=["工作"])
@@ -100,7 +100,7 @@ async def test_catalog_domain_filter(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_catalog_marks_pinned(bucket_mgr):
-    await bucket_mgr.create(content="核心", name="核心准则", pinned=True)
+    await bucket_mgr.create_internal(content="核心", name="核心准则", pinned=True)
     install_runtime(bucket_mgr)
 
     out = await surface_catalog()
@@ -111,7 +111,7 @@ async def test_catalog_marks_pinned(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_catalog_marks_anchor_and_release_removes_marker(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="catalog must not expose this anchor body",
         name="坐标系",
         domain=["关系"],
@@ -186,7 +186,7 @@ async def test_catalog_parses_anchor_marker_as_explicit_boolean():
 @pytest.mark.asyncio
 async def test_dispatch_catalog_short_circuits_other_params(bucket_mgr):
     """catalog=True 时 query/importance_min 一概不生效，也绝不触发 LLM/向量。"""
-    await bucket_mgr.create(content="正文", name="目录项", domain=["a"], importance=5)
+    await bucket_mgr.create_internal(content="正文", name="目录项", domain=["a"], importance=5)
     install_runtime(bucket_mgr)
 
     out = await dispatch(query="随便搜点什么", importance_min=9, catalog=True)
@@ -198,8 +198,8 @@ async def test_dispatch_catalog_short_circuits_other_params(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_dispatch_catalog_respects_domain_filter(bucket_mgr):
-    await bucket_mgr.create(content="x", name="工作项", domain=["工作"], importance=5)
-    await bucket_mgr.create(content="y", name="生活项", domain=["生活"], importance=5)
+    await bucket_mgr.create_internal(content="x", name="工作项", domain=["工作"], importance=5)
+    await bucket_mgr.create_internal(content="y", name="生活项", domain=["生活"], importance=5)
     install_runtime(bucket_mgr)
 
     out = await dispatch(domain="工作", catalog=True)
@@ -209,9 +209,9 @@ async def test_dispatch_catalog_respects_domain_filter(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_dispatch_catalog_respects_tags_and_max_results(bucket_mgr):
-    await bucket_mgr.create(content="x", name="命中高", tags=["拥抱"], importance=9)
-    await bucket_mgr.create(content="y", name="命中低", tags=["拥抱"], importance=5)
-    await bucket_mgr.create(content="z", name="不命中", tags=["其他"], importance=10)
+    await bucket_mgr.create_internal(content="x", name="命中高", tags=["拥抱"], importance=9)
+    await bucket_mgr.create_internal(content="y", name="命中低", tags=["拥抱"], importance=5)
+    await bucket_mgr.create_internal(content="z", name="不命中", tags=["其他"], importance=10)
     install_runtime(bucket_mgr)
 
     out = await dispatch(tags="拥抱", catalog=True, max_results=1)
@@ -224,7 +224,7 @@ async def test_dispatch_catalog_respects_tags_and_max_results(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_dispatch_catalog_missing_tag_returns_empty(bucket_mgr):
-    await bucket_mgr.create(content="x", name="目录项", tags=["已存在"])
+    await bucket_mgr.create_internal(content="x", name="目录项", tags=["已存在"])
     install_runtime(bucket_mgr)
 
     out = await dispatch(tags="definitely_missing", catalog=True, max_results=5)

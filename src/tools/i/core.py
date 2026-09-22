@@ -33,15 +33,19 @@ I 是 OB 的自我感知层，但它不是日记，是沉淀物。
 ========================================
 """
 
+import json
+
 from errors import ToolInputError
 from datetime import datetime
 from utils import parse_iso_datetime
 from typing import Optional
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from .._common import check_content_size, check_metadata_size
 from ..plan.core import is_letter_bucket
 from errors import safe_error_detail
+from .profile_contract import ProfileContractError, SCHEMA, owners_of
+from .profile_service import create_profile, list_profiles, transition_profile
 
 _VALID_ASPECTS = {"nature", "values", "patterns", "limits", "becoming", "uncertainty", "stance"}
 
@@ -61,11 +65,21 @@ async def i_core(
     limit: Optional[int] = 20,
     promote: Optional[str] = "",
     supersedes: Optional[str] = "",
+    action: Optional[str] = "auto",
+    confidence: Optional[float] = -1.0,
+    evidence_id: Optional[str] = "",
+    source_bucket: Optional[str] = "",
+    source_refs: Optional[str] = "",
+    confirm_stable: Optional[bool] = False,
+    bucket_id: Optional[str] = "",
+    reason: Optional[str] = "",
+    include_inactive: Optional[bool] = False,
 ) -> str:
     content = "" if content is None else str(content)
     aspect = "" if aspect is None else str(aspect)
     promote = "" if promote is None else str(promote).strip()
     supersedes = "" if supersedes is None else str(supersedes).strip()
+    action = "auto" if action is None else str(action).strip().lower()
     if read is None:
         read = False
     try:
@@ -75,15 +89,92 @@ async def i_core(
     aspect = aspect.strip().lower()
 
     metadata_err = check_metadata_size(
-        aspect=aspect, promote=promote, supersedes=supersedes
+        aspect=aspect,
+        promote=promote,
+        supersedes=supersedes,
+        action=action,
+        evidence_id=evidence_id,
+        source_bucket=source_bucket,
+        source_refs=source_refs,
+        bucket_id=bucket_id,
+        reason=reason,
     )
     if metadata_err:
         raise ToolInputError(metadata_err)
+    if aspect and aspect not in _VALID_ASPECTS:
+        choices = ", ".join(sorted(_VALID_ASPECTS))
+        raise ToolInputError(f"aspect 无效：{aspect}。可选值: {choices}")
 
     if rt.mark_op:
         rt.mark_op("I")
 
+    caller = _identity.normalize_caller(_identity.get_caller())
+    if not caller:
+        return "已拒绝：I / 证据型画像需要可识别的 OAuth caller。"
+
     await rt.decay_engine.ensure_started()
+
+    try:
+        if action == "create_profile":
+            result = await create_profile(
+                rt.bucket_mgr,
+                caller=caller,
+                content=content,
+                aspect=aspect,
+                confidence=confidence,
+                evidence_id=evidence_id,
+                source_bucket=source_bucket,
+                source_refs=source_refs,
+                confirm_stable=bool(confirm_stable),
+            )
+            return json.dumps(result, ensure_ascii=False, sort_keys=True)
+        if action == "list_profiles":
+            profiles = await list_profiles(
+                rt.bucket_mgr,
+                caller=caller,
+                limit=int(limit),
+                include_inactive=bool(include_inactive),
+            )
+            return json.dumps(
+                {
+                    "schema": SCHEMA,
+                    "caller": caller,
+                    "profiles": profiles,
+                    "policy": {
+                        "owner_scope": "exact caller only",
+                        "legacy_i_migrated": False,
+                        "automatic_profile_writes": False,
+                    },
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        transitions = {
+            "revoke_profile": "revoked",
+            "invalidate_profile": "invalidated",
+            "supersede_profile": "superseded",
+        }
+        if action in transitions:
+            result = await transition_profile(
+                rt.bucket_mgr,
+                caller=caller,
+                bucket_id=bucket_id,
+                target_status=transitions[action],
+                reason=reason,
+            )
+            return json.dumps(result, ensure_ascii=False, sort_keys=True)
+    except ProfileContractError as exc:
+        return f"已拒绝：{exc}"
+
+    if action not in {"auto", "read", "read_i", "list_i", "write", "write_i", "promote"}:
+        return (
+            "已拒绝：I action 仅支持 auto/read/write/promote/create_profile/"
+            "list_profiles/revoke_profile/invalidate_profile/supersede_profile。"
+        )
+    if action in {"read", "read_i", "list_i"}:
+        read = True
+    if action == "promote" and not promote:
+        promote = str(bucket_id or "").strip()
 
     if promote:
         # 两处 size 检查都在写入之前，超限时一个桶都没建。
@@ -93,9 +184,6 @@ async def i_core(
         return await _promote_candidate(promote, content.strip(), supersedes)
     if read or not content.strip():
         return await _read_i(limit)
-    if aspect and aspect not in _VALID_ASPECTS:
-        choices = ", ".join(sorted(_VALID_ASPECTS))
-        raise ToolInputError(f"aspect 无效：{aspect}。可选值: {choices}")
     size_err = check_content_size(content)
     if size_err:
         raise ToolInputError(size_err)
@@ -211,9 +299,10 @@ async def _resolve_supersedes(target_id: str, aspect: str) -> dict:
 
 
 async def _write_candidate(content: str, aspect: str, supersedes: str = "") -> str:
-    tags = [I_CANDIDATE_TAG]
+    tags = [I_CANDIDATE_TAG, "scope:self", "voice:self"]
     if aspect:
         tags.append(f"aspect:{aspect}")
+    tags = _identity.ensure_write_owner(tags)
 
     try:
         bucket_id = await rt.bucket_mgr.create(
@@ -230,7 +319,7 @@ async def _write_candidate(content: str, aspect: str, supersedes: str = "") -> s
             why_remembered="",
             weight=0.8,
             source_tool="I",
-            event_actor="llm",
+            footprint_origin=_identity.origin_for_mcp("i"),
         )
     except Exception as e:
         raise ToolInputError(f"写入失败: {safe_error_detail(e)}")
@@ -273,8 +362,9 @@ async def _write_candidate(content: str, aspect: str, supersedes: str = "") -> s
                 f"\n⚠️ 但 {supersedes} 挂起失败，它现在仍会被当成当前的自我认知。"
             )
 
+    caller = _identity.normalize_caller(_identity.get_caller())
     return (
-        f"🌱 我觉得 {aspect_label}→{bucket_id}\n"
+        f"🌱 我觉得 {aspect_label}→{bucket_id} owner:{caller}\n"
         f"这还只是一个念头，不是自我认知。它现在是一条普通记忆，会浮现也会衰减。\n"
         f"接下来 {I_PROMOTE_THRESHOLD} 次 dream 会把它和相关记忆摆在一起给你看；"
         f"如果它还站得住，用 I(promote=\"{bucket_id}\") 让它进 I。"
@@ -294,10 +384,56 @@ async def _mark_disputed(target_id: str, candidate_id: str) -> bool:
         existing = [str(v or "").strip() for v in raw if str(v or "").strip()]
         if candidate_id not in existing:
             existing.append(candidate_id)
-        return bool(await rt.bucket_mgr.update(target_id, i_disputed_by=existing))
+        owner = _identity.mutation_owner(target.get("metadata") or {})
+        with _identity.manager_mutation_guard(rt.bucket_mgr, {target_id: owner}):
+            return bool(await rt.bucket_mgr.update(target_id, i_disputed_by=existing))
     except Exception as e:
         rt.logger.warning(f"I dispute marking failed for {target_id}: {e}")
         return False
+
+
+async def _write_i(content: str, aspect: str, caller: str) -> str:
+    """Compatibility path for the evidence-profile/E1 contract tests.
+
+    Public ``I`` writes still enter the sediment candidate flow; this helper
+    preserves the established direct-write primitive used by trusted profile
+    code and verifies that its first publish carries an E1 origin receipt.
+    """
+    caller = _identity.normalize_caller(caller)
+    tags = ["__i__", "scope:self", "voice:self"]
+    if aspect:
+        tags.append(f"aspect:{aspect}")
+    tags = _identity.ensure_write_owner(tags, caller)
+
+    try:
+        bucket_id = await rt.bucket_mgr.create(
+            content=content,
+            tags=tags,
+            importance=6,
+            domain=["self"],
+            valence=0.5,
+            arousal=0.3,
+            name=None,
+            bucket_type="i",
+            why_remembered="",
+            weight=0.8,
+            source_tool="I",
+            footprint_origin=_identity.origin_for_mcp("i", caller),
+        )
+    except Exception as exc:
+        return f"写入失败: {safe_error_detail(exc)}"
+
+    try:
+        updated = await rt.bucket_mgr.update(bucket_id, dont_surface=True)
+    except Exception as exc:
+        await rt.bucket_mgr.delete(bucket_id)
+        return f"写入失败: {type(exc).__name__}"
+    if not updated:
+        await rt.bucket_mgr.delete(bucket_id)
+        return "写入失败: metadata commit failed; partial bucket rolled back"
+
+    aspect_label = f"[{aspect}] " if aspect else ""
+    return f"🪞I {aspect_label}→{bucket_id} owner:{caller}"
 
 
 async def _promote_candidate(
@@ -313,6 +449,10 @@ async def _promote_candidate(
         )
 
     meta = bucket.get("metadata") or {}
+    try:
+        candidate_owner = _identity.mutation_owner(meta)
+    except ValueError as exc:
+        raise ToolInputError(str(exc)) from exc
     stage = str(meta.get("i_stage") or "")
     if stage == "promoted":
         target = meta.get("i_promoted_to") or "?"
@@ -339,6 +479,9 @@ async def _promote_candidate(
     tags = ["__i__"]
     if aspect:
         tags.append(f"aspect:{aspect}")
+    if candidate_owner:
+        tags.append(f"owner:{candidate_owner}")
+    tags = _identity.ensure_write_owner(tags)
 
     # 取代目标：显式传参优先，否则用候选写下时声明的那条。
     #
@@ -370,7 +513,7 @@ async def _promote_candidate(
             why_remembered="",
             weight=0.8,
             source_tool="I",
-            event_actor="llm",
+            footprint_origin=_identity.origin_for_mcp("i"),
         )
     except Exception as e:
         raise ToolInputError(f"沉淀失败: {safe_error_detail(e)}")
@@ -383,7 +526,10 @@ async def _promote_candidate(
     if chain_target:
         promoted_marks["i_supersedes"] = chain_target
     try:
-        await rt.bucket_mgr.update(new_id, **promoted_marks)
+        with _identity.manager_mutation_guard(
+            rt.bucket_mgr, {new_id: candidate_owner}
+        ):
+            await rt.bucket_mgr.update(new_id, **promoted_marks)
     except Exception as e:
         rt.logger.warning(f"I promoted bucket metadata write failed for {new_id}: {e}")
 
@@ -392,7 +538,14 @@ async def _promote_candidate(
     # 下面就会被标成 promoted，于是自动失效。
     if chain_target:
         try:
-            await rt.bucket_mgr.update(chain_target, i_superseded_by=new_id)
+            target = await rt.bucket_mgr.get(chain_target)
+            target_owner = _identity.mutation_owner(
+                (target or {}).get("metadata") or {}
+            )
+            with _identity.manager_mutation_guard(
+                rt.bucket_mgr, {chain_target: target_owner}
+            ):
+                await rt.bucket_mgr.update(chain_target, i_superseded_by=new_id)
             chain_note = f"\n{chain_target} 从此不再是当前的自我认知，但原样留着。"
         except Exception as e:
             rt.logger.warning(f"I supersede link failed for {chain_target}: {e}")
@@ -400,12 +553,15 @@ async def _promote_candidate(
 
     # 候选桶留着，只改状态——升级不是搬走，是这条张力闭合了。
     try:
-        await rt.bucket_mgr.update(
-            bucket_id,
-            i_stage="promoted",
-            i_promoted_to=new_id,
-            resolved=True,
-        )
+        with _identity.manager_mutation_guard(
+            rt.bucket_mgr, {bucket_id: candidate_owner}
+        ):
+            await rt.bucket_mgr.update(
+                bucket_id,
+                i_stage="promoted",
+                i_promoted_to=new_id,
+                resolved=True,
+            )
     except Exception as e:
         rt.logger.warning(f"I candidate close-out failed for {bucket_id}: {e}")
 
@@ -434,15 +590,23 @@ async def record_dream_pass(bucket_ids: list) -> int:
         except Exception as e:
             rt.logger.warning(f"I dream pass lookup failed for {bucket_id}: {e}")
             continue
-        if not bucket or not is_pending_candidate(bucket):
+        if (
+            not bucket
+            or not _identity.admitted_mutation(bucket)
+            or not is_pending_candidate(bucket)
+        ):
             continue
         dates = dream_dates(bucket.get("metadata") or {})
         if today in dates:
             continue
         try:
-            updated = await rt.bucket_mgr.update(
-                bucket_id, i_dream_dates=[*dates, today]
-            )
+            owner = _identity.mutation_owner(bucket.get("metadata") or {})
+            with _identity.manager_mutation_guard(
+                rt.bucket_mgr, {bucket_id: owner}
+            ):
+                updated = await rt.bucket_mgr.update(
+                    bucket_id, i_dream_dates=[*dates, today]
+                )
             if not updated:
                 rt.logger.warning(
                     "I dream pass write returned false for %s", bucket_id
@@ -477,7 +641,11 @@ async def record_dream_offer(bucket_ids: list) -> int:
         except Exception as e:
             rt.logger.warning(f"I dream offer lookup failed for {bucket_id}: {e}")
             continue
-        if not bucket or not is_pending_candidate(bucket):
+        if (
+            not bucket
+            or not _identity.admitted_mutation(bucket)
+            or not is_pending_candidate(bucket)
+        ):
             continue
         meta = bucket.get("metadata") or {}
         if str(meta.get("i_dream_offered_last") or "")[:10] == today:
@@ -487,11 +655,15 @@ async def record_dream_offer(bucket_ids: list) -> int:
         except (TypeError, ValueError):
             offered = 0
         try:
-            updated = await rt.bucket_mgr.update(
-                bucket_id,
-                i_dream_offered=offered + 1,
-                i_dream_offered_last=today,
-            )
+            owner = _identity.mutation_owner(meta)
+            with _identity.manager_mutation_guard(
+                rt.bucket_mgr, {bucket_id: owner}
+            ):
+                updated = await rt.bucket_mgr.update(
+                    bucket_id,
+                    i_dream_offered=offered + 1,
+                    i_dream_offered_last=today,
+                )
             if not updated:
                 rt.logger.warning(
                     "I dream offer write returned false for %s", bucket_id
@@ -539,6 +711,12 @@ def _stall_note(meta: dict, passes: int) -> str:
 async def _read_i(limit: int) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
+        caller = _identity.normalize_caller(_identity.get_caller())
+        all_buckets = [
+            bucket
+            for bucket in all_buckets
+            if owners_of((bucket or {}).get("metadata") or {}) == (caller,)
+        ]
     except Exception as e:
         raise ToolInputError(f"读取失败: {safe_error_detail(e)}")
 

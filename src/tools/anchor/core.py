@@ -29,11 +29,26 @@ pulse 顺带放在这里：它是系统状态 + 桶清单的总览，调用频�
 from errors import ToolInputError
 from typing import Optional
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from .._common import check_metadata_size
 from ..plan.core import is_letter_bucket, letter_lock_state
 from utils import parse_bool
 from errors import safe_error_detail
+
+
+async def _bucket_for_authorization(bucket_id: str) -> dict | None:
+    """Read one bucket while preserving older BucketManager test doubles."""
+    getter = getattr(rt.bucket_mgr, "get", None)
+    if callable(getter):
+        return await getter(bucket_id)
+    lister = getattr(rt.bucket_mgr, "list_all", None)
+    if callable(lister):
+        buckets = await lister(include_archive=False)
+        return next(
+            (bucket for bucket in buckets if bucket.get("id") == bucket_id),
+            None,
+        )
+    return None
 
 
 async def anchor_set(bucket_id: str) -> str:
@@ -45,7 +60,15 @@ async def anchor_set(bucket_id: str) -> str:
         raise ToolInputError(metadata_err)
     if rt.mark_op:
         rt.mark_op("anchor")
-    result = await rt.bucket_mgr.set_anchor(bucket_id, True)
+    bucket = await _bucket_for_authorization(bucket_id)
+    owner = ""
+    if bucket:
+        try:
+            owner = _identity.mutation_owner(bucket.get("metadata") or {})
+        except ValueError as exc:
+            raise ToolInputError(str(exc)) from exc
+    with _identity.manager_mutation_guard(rt.bucket_mgr, {bucket_id: owner}):
+        result = await rt.bucket_mgr.set_anchor(bucket_id, True)
     if not result["ok"]:
         # ok=False 与下面的 noop=True 是两个不同分支，不能混为一谈：
         # 这里是桶不存在或配额满，anchor 一个都没加上；noop 才是幂等。
@@ -65,7 +88,15 @@ async def anchor_release(bucket_id: str) -> str:
         raise ToolInputError(metadata_err)
     if rt.mark_op:
         rt.mark_op("release")
-    result = await rt.bucket_mgr.set_anchor(bucket_id, False)
+    bucket = await _bucket_for_authorization(bucket_id)
+    owner = ""
+    if bucket:
+        try:
+            owner = _identity.mutation_owner(bucket.get("metadata") or {})
+        except ValueError as exc:
+            raise ToolInputError(str(exc)) from exc
+    with _identity.manager_mutation_guard(rt.bucket_mgr, {bucket_id: owner}):
+        result = await rt.bucket_mgr.set_anchor(bucket_id, False)
     if not result["ok"]:
         raise ToolInputError(f"我没能把它移开：{result.get('error', '未知错误')}。")
     if result.get("noop"):
@@ -77,8 +108,48 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
     if include_archive is None:
         include_archive = False
     await rt.decay_engine.ensure_started()
+    scoped = bool(_identity.get_caller()) or _identity.get_transport() != "local"
+    scoped_buckets = None
     try:
-        stats = await rt.bucket_mgr.get_stats()
+        if scoped:
+            all_buckets = await rt.bucket_mgr.list_all(
+                include_archive=include_archive
+            )
+            scoped_buckets = [
+                bucket for bucket in all_buckets
+                if _identity.admitted_mutation(bucket)
+            ]
+            stats = {
+                "permanent_count": sum(
+                    1 for b in scoped_buckets
+                    if (b.get("metadata") or {}).get("type") == "permanent"
+                ),
+                "dynamic_count": sum(
+                    1 for b in scoped_buckets
+                    if (b.get("metadata") or {}).get("type") == "dynamic"
+                ),
+                "archive_count": sum(
+                    1 for b in scoped_buckets
+                    if (b.get("metadata") or {}).get("type") == "archived"
+                ),
+                "feel_count": sum(
+                    1 for b in scoped_buckets
+                    if (b.get("metadata") or {}).get("type") == "feel"
+                ),
+                "plan_count": sum(
+                    1 for b in scoped_buckets
+                    if (b.get("metadata") or {}).get("type") == "plan"
+                ),
+                "letter_count": sum(
+                    1 for b in scoped_buckets if is_letter_bucket(b)
+                ),
+                "total_size_kb": sum(
+                    len(str(b.get("content") or "").encode("utf-8"))
+                    for b in scoped_buckets
+                ) / 1024,
+            }
+        else:
+            stats = await rt.bucket_mgr.get_stats()
     except Exception as e:
         raise ToolInputError(f"获取系统状态失败: {safe_error_detail(e)}")
 
@@ -115,7 +186,7 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
                 )
                 + "\n"
             )
-        if ee and getattr(ee, "enabled", False):
+        if not scoped and ee and getattr(ee, "enabled", False):
             disk_buckets = await rt.bucket_mgr.list_all(include_archive=True)
             disk_ids = {
                 b["id"] for b in disk_buckets
@@ -136,7 +207,11 @@ async def pulse(include_archive: Optional[bool] = False) -> str:
         rt.logger.warning(f"pulse index/storage drift check failed: {e}")
 
     try:
-        buckets = await rt.bucket_mgr.list_all(include_archive=include_archive)
+        buckets = (
+            scoped_buckets
+            if scoped_buckets is not None
+            else await rt.bucket_mgr.list_all(include_archive=include_archive)
+        )
     except Exception as e:
         return status + f"\n列出记忆桶失败: {e}"
 

@@ -1,7 +1,8 @@
-"""GitHub 导入前备份闸门回归测试（记忆安全红蓝测试）。
+"""GitHub restore 备份闸门与 M-03 事务结果回归测试。
 
-导入会覆盖本地同名记忆、不可逆。若导入前的本地 zip 备份没成功，默认必须拦下，
-除非用户显式 force=true。防止「备份悄悄失败 + 导入覆盖 = 记忆无法找回」。
+恢复必须绑定共享导入事务和明确的管理员 owner。若导入前的本地 zip 备份没成功，
+默认必须拦下；事务失败不能返回成功；Markdown 已提交但派生同步失败时必须显式
+保留已提交边界与失败状态，不能把局部完成伪装成完整成功。
 """
 import pytest
 
@@ -32,12 +33,21 @@ class FakeRequest:
 
 
 class FakeSync:
-    def __init__(self):
+    def __init__(self, result=None):
         self.called = False
+        self.result = result or {
+            "ok": True,
+            "markdown_committed": True,
+            "derived_state": "complete",
+            "imported": 3,
+            "skipped": 0,
+        }
+        self.call = None
 
-    async def import_from_github(self, buckets_dir):
+    async def import_from_github(self, buckets_dir, **kwargs):
         self.called = True
-        return {"ok": True, "imported": 3, "skipped": 0}
+        self.call = {"buckets_dir": buckets_dir, **kwargs}
+        return dict(self.result)
 
 
 @pytest.fixture
@@ -48,7 +58,7 @@ def import_route(monkeypatch, tmp_path):
     monkeypatch.setitem(sh.config, "buckets_dir", str(tmp_path))
     fake = FakeSync()
     monkeypatch.setattr(sh, "github_sync_instance", fake)
-    monkeypatch.setattr(sh, "bucket_mgr", None)
+    monkeypatch.setattr(sh, "bucket_mgr", object())
     handler = mcp.routes[("/api/github/import", ("POST",))]
     return handler, fake
 
@@ -73,10 +83,20 @@ async def test_import_blocked_when_backup_fails(monkeypatch, import_route):
 async def test_import_proceeds_when_backup_ok(monkeypatch, import_route):
     handler, fake = import_route
     monkeypatch.setattr(github_web, "_pre_import_backup", lambda d: "/backups/x.zip")
-    status, data = await _run(handler)
+    status, data = await _run(
+        handler,
+        {
+            "decisions": {"candidate-a": "overwrite"},
+            "assigned_owners": {"candidate-a": "cheng"},
+        },
+    )
     assert status == 200
     assert data.get("ok") is True
     assert fake.called is True
+    assert fake.call["bucket_manager"] is sh.bucket_mgr
+    assert fake.call["job_owner"] == github_web.ADMIN_RESTORE_SCOPE
+    assert fake.call["decisions"] == {"candidate-a": "overwrite"}
+    assert fake.call["assigned_owners"] == {"candidate-a": "cheng"}
 
 
 @pytest.mark.asyncio
@@ -86,3 +106,63 @@ async def test_force_overrides_failed_backup(monkeypatch, import_route):
     status, data = await _run(handler, {"force": True})
     assert status == 200
     assert fake.called is True
+
+
+@pytest.mark.asyncio
+async def test_import_rejects_when_bucket_manager_is_unavailable(
+    monkeypatch, import_route
+):
+    handler, fake = import_route
+    monkeypatch.setattr(sh, "bucket_mgr", None)
+    backup_called = False
+
+    def backup(_):
+        nonlocal backup_called
+        backup_called = True
+        return "/backups/should-not-exist.zip"
+
+    monkeypatch.setattr(github_web, "_pre_import_backup", backup)
+    status, data = await _run(handler)
+    assert status == 503
+    assert data == {"ok": False, "error": "bucket manager 未初始化"}
+    assert backup_called is False
+    assert fake.called is False
+
+
+@pytest.mark.asyncio
+async def test_transaction_failure_never_returns_success(monkeypatch, import_route):
+    handler, fake = import_route
+    fake.result = {
+        "ok": False,
+        "markdown_committed": False,
+        "transaction_id": "tx-failed",
+        "error": "transaction failed",
+    }
+    monkeypatch.setattr(github_web, "_pre_import_backup", lambda d: "/backups/x.zip")
+    status, data = await _run(handler)
+    assert status == 422
+    assert data["ok"] is False
+    assert data["markdown_committed"] is False
+    assert data["transaction_id"] == "tx-failed"
+
+
+@pytest.mark.asyncio
+async def test_derived_failure_reports_markdown_commit_boundary(
+    monkeypatch, import_route
+):
+    handler, fake = import_route
+    fake.result = {
+        "ok": False,
+        "markdown_committed": True,
+        "transaction_id": "tx-derived-failed",
+        "derived_state": "error",
+        "errors": ["embedding provider unavailable"],
+    }
+    monkeypatch.setattr(github_web, "_pre_import_backup", lambda d: "/backups/x.zip")
+    status, data = await _run(handler)
+    assert status == 200
+    assert data["ok"] is False
+    assert data["markdown_committed"] is True
+    assert data["derived_state"] == "error"
+    assert data["transaction_id"] == "tx-derived-failed"
+    assert data["errors"] == ["embedding provider unavailable"]

@@ -36,12 +36,14 @@ import time
 from datetime import datetime, timedelta
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
+from .. import _identity
 from .. import _runtime as rt
 from ..plan.core import is_letter_bucket
 from utils import parse_bool, parse_iso_datetime
 from ._date_range import bucket_in_created_range
 from ._shared import bucket_has_tags, footprint_reader, render_within_budget
 from ._verbatim import render_stored_bucket
+from .footprint_projection import append_projection_if_fits
 
 # U-07 fix: throttle the sampling-fallback INFO log to once per 5 minutes.
 # 库小且 sampling=ON 时此分支每次 breath 都触发，原本会刷屏；改为 ≥300s
@@ -182,6 +184,7 @@ async def surface_plans(max_tokens: int) -> str:
     """
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
+        all_buckets = _identity.filter_default(all_buckets)
         plans = [
             b for b in all_buckets
             if b.get("metadata", {}).get("type") == "plan"
@@ -218,6 +221,7 @@ async def surface_default(
 ) -> str:
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
+        all_buckets = _identity.filter_default(all_buckets)
     except Exception as e:
         rt.logger.error(f"Failed to list buckets for surfacing / 浮现列桶失败: {e}")
         return "记忆系统暂时无法访问。"
@@ -263,9 +267,14 @@ async def surface_default(
         try:
             rendered, entry_tokens = render_stored_bucket(
                 b,
-                f"📌 [核心准则] [bucket_id:{b['id']}]",
-                _footprint(b),
+                f"📌 [核心准则] [bucket_id:{b['id']}]"
+                f"{_identity.attribution(b.get('metadata') or {})}",
+                "",
             )
+            rendered, origin_cost = append_projection_if_fits(
+                rendered, b, max(0, token_budget - entry_tokens)
+            )
+            entry_tokens += origin_cost
             pinned_required_tokens += entry_tokens
             if entry_tokens > token_budget:
                 pinned_omitted += 1
@@ -409,13 +418,19 @@ async def surface_default(
             rendered, entry_tokens = render_stored_bucket(
                 b,
                 f"[权重:{score:.2f}] [bucket_id:{b['id']}]",
-                _footprint(b),
+                "",
             )
             if entry_tokens > token_budget:
                 dynamic_omitted += 1
                 continue
+            # The stored bucket is the primary contract.  Origin projection is
+            # optional enrichment: append it only from the budget left *after*
+            # the complete bucket fits, never let it evict that bucket.
+            rendered, origin_cost = append_projection_if_fits(
+                rendered, b, max(0, token_budget - entry_tokens)
+            )
             dynamic_results.append(rendered)
-            token_budget -= entry_tokens
+            token_budget -= entry_tokens + origin_cost
         except Exception as e:
             rt.logger.warning(f"Failed to render surfaced bucket / 浮现渲染失败: {e}")
             continue
@@ -492,9 +507,14 @@ async def surface_default(
                 try:
                     rendered, entry_tokens = render_stored_bucket(
                         b,
-                        f"💤 [久未浮现] [bucket_id:{b['id']}]",
-                        _footprint(b),
+                        f"💤 [久未浮现] [bucket_id:{b['id']}]"
+                        f"{_identity.attribution(b.get('metadata') or {})}",
+                        "",
                     )
+                    rendered, origin_cost = append_projection_if_fits(
+                        rendered, b, max(0, token_budget - entry_tokens)
+                    )
+                    entry_tokens += origin_cost
                     if entry_tokens > token_budget:
                         continue
                     passive_results.append(rendered)
@@ -529,9 +549,14 @@ async def surface_default(
                     try:
                         rendered, entry_tokens = render_stored_bucket(
                             b,
-                            f"✨ [偶遇] [bucket_id:{b['id']}]",
-                            _footprint(b),
+                            f"✨ [偶遇] [bucket_id:{b['id']}]"
+                            f"{_identity.attribution(b.get('metadata') or {})}",
+                            "",
                         )
+                        rendered, origin_cost = append_projection_if_fits(
+                            rendered, b, max(0, token_budget - entry_tokens)
+                        )
+                        entry_tokens += origin_cost
                         if entry_tokens > token_budget:
                             continue
                         dream_results.append(rendered)

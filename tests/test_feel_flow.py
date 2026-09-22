@@ -82,7 +82,7 @@ class TestFeelLifecycle:
         """hold(feel=True) creates a feel-type bucket in dynamic/feel/."""
         bm, dh, de, bd = isolated_tools
 
-        bid = await bm.create(
+        bid = await bm.create_internal(
             content="帮TestUser修好bug的时候，我感到一种真实的成就感",
             tags=[],
             importance=5,
@@ -106,7 +106,7 @@ class TestFeelLifecycle:
         """Feel bucket stored under feel/沉淀物/."""
         bm, dh, de, bd = isolated_tools
 
-        bid = await bm.create(
+        bid = await bm.create_internal(
             content="这是一条 feel 测试",
             tags=[], importance=5, domain=[],
             valence=0.5, arousal=0.3,
@@ -127,7 +127,7 @@ class TestFeelLifecycle:
         ids = []
         # Create 3 feels with manually patched timestamps via file rewrite
         for i in range(3):
-            bid = await bm.create(
+            bid = await bm.create_internal(
                 content=f"Feel #{i+1}",
                 tags=[], importance=5, domain=[],
                 valence=0.5, arousal=0.3,
@@ -168,7 +168,7 @@ class TestFeelLifecycle:
         bm, dh, de, bd = isolated_tools
 
         # Create a normal bucket first
-        source_id = await bm.create(
+        source_id = await bm.create_internal(
             content="和朋友吵了一架",
             tags=["社交"], importance=7, domain=["社交"],
             valence=0.3, arousal=0.7,
@@ -181,7 +181,7 @@ class TestFeelLifecycle:
         assert not source["metadata"].get("digested", False)
 
         # Create feel referencing it
-        await bm.create(
+        await bm.create_internal(
             content="那次争吵让我意识到沟通的重要性",
             tags=[], importance=5, domain=[],
             valence=0.5, arousal=0.4,
@@ -200,7 +200,7 @@ class TestFeelLifecycle:
         """Feel buckets always score 50.0."""
         bm, dh, de, bd = isolated_tools
 
-        bid = await bm.create(
+        bid = await bm.create_internal(
             content="这是一条永不衰减的 feel",
             tags=[], importance=5, domain=[],
             valence=0.5, arousal=0.3,
@@ -218,7 +218,7 @@ class TestFeelLifecycle:
         bm, dh, de, bd = isolated_tools
 
         # Create a feel
-        await bm.create(
+        await bm.create_internal(
             content="我对编程的热爱",
             tags=[], importance=5, domain=[],
             valence=0.8, arousal=0.5,
@@ -237,7 +237,7 @@ class TestFeelLifecycle:
         """trace() can update feel bucket metadata."""
         bm, dh, de, bd = isolated_tools
 
-        bid = await bm.create(
+        bid = await bm.create_internal(
             content="原始 feel 内容",
             tags=[], importance=5, domain=[],
             valence=0.5, arousal=0.3,
@@ -258,7 +258,7 @@ class TestFeelLifecycle:
 
         # Create 3+ similar feels (about trust)
         for i in range(4):
-            await bm.create(
+            await bm.create_internal(
                 content=f"TestUser对我的信任让我感到温暖，每次对话都是一种确认 #{i}",
                 tags=[], importance=5, domain=[],
                 valence=0.8, arousal=0.4,

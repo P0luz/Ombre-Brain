@@ -51,7 +51,7 @@ def install_runtime(bucket_mgr, dehydrator):
 
 @pytest.mark.asyncio
 async def test_default_breath_falls_back_to_raw_pinned_content_when_dehydrate_returns_empty(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Pinned bucket body must remain readable.",
         pinned=True,
         domain=["rules"],
@@ -66,7 +66,7 @@ async def test_default_breath_falls_back_to_raw_pinned_content_when_dehydrate_re
 
 @pytest.mark.asyncio
 async def test_dream_does_not_surface_pinned_bucket_content(bucket_mgr):
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="Pinned dream context must remain visible.",
         pinned=True,
         domain=["rules"],
@@ -87,7 +87,7 @@ async def test_protected_memory_is_silent_by_default_but_explicitly_readable(
     bucket_type,
 ):
     content = f"Protected {bucket_type} memory is explicit-read only."
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content=content,
         protected=True,
         bucket_type=bucket_type,

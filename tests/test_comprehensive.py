@@ -270,13 +270,13 @@ def bucket_mgr(bm_config):
 class TestBucketManagerCreate:
     @pytest.mark.asyncio
     async def test_create_returns_string_id(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="测试内容")
+        bid = await bucket_mgr.create_internal(content="测试内容")
         assert isinstance(bid, str)
         assert len(bid) > 0
 
     @pytest.mark.asyncio
     async def test_created_bucket_is_retrievable(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="这是一段测试记忆", domain=["学习"])
+        bid = await bucket_mgr.create_internal(content="这是一段测试记忆", domain=["学习"])
         result = await bucket_mgr.get(bid)
         assert result is not None
         assert result["id"] == bid
@@ -284,7 +284,7 @@ class TestBucketManagerCreate:
 
     @pytest.mark.asyncio
     async def test_metadata_stored_correctly(self, bucket_mgr):
-        bid = await bucket_mgr.create(
+        bid = await bucket_mgr.create_internal(
             content="记忆内容",
             tags=["python", "测试"],
             importance=8,
@@ -301,21 +301,21 @@ class TestBucketManagerCreate:
 
     @pytest.mark.asyncio
     async def test_feel_bucket_goes_to_feel_dir(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="深刻的感悟", bucket_type="feel")
+        bid = await bucket_mgr.create_internal(content="深刻的感悟", bucket_type="feel")
         result = await bucket_mgr.get(bid)
         assert result is not None
         assert result["metadata"]["type"] == "feel"
 
     @pytest.mark.asyncio
     async def test_pinned_bucket_locks_importance_to_10(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="重要内容", importance=3, pinned=True)
+        bid = await bucket_mgr.create_internal(content="重要内容", importance=3, pinned=True)
         result = await bucket_mgr.get(bid)
         assert result["metadata"]["importance"] == 10
 
     @pytest.mark.asyncio
     async def test_unpin_demotes_permanent_to_dynamic(self, bucket_mgr, decay_eng):
         # 钉选 → update(pinned=True) 自动把桶搬进 permanent/，权重恒 999
-        bid = await bucket_mgr.create(content="一条核心准则")
+        bid = await bucket_mgr.create_internal(content="一条核心准则")
         await bucket_mgr.update(bid, pinned=True)
         pinned = await bucket_mgr.get(bid)
         assert pinned["metadata"]["type"] == "permanent"
@@ -340,7 +340,7 @@ class TestBucketManagerCreate:
         """type=permanent is a first-class bucket type, even without pinned=True."""
         import frontmatter as fm
 
-        bid = await bucket_mgr.create(content="一条曾被钉选的准则")
+        bid = await bucket_mgr.create_internal(content="一条曾被钉选的准则")
         await bucket_mgr.update(bid, pinned=True)
         # Simulate stored permanent content that has no pinned flag.
         fpath = bucket_mgr._find_bucket_file(bid)
@@ -363,31 +363,31 @@ class TestBucketManagerCreate:
 
     @pytest.mark.asyncio
     async def test_importance_clamped_below_1(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="x", importance=-5)
+        bid = await bucket_mgr.create_internal(content="x", importance=-5)
         result = await bucket_mgr.get(bid)
         assert result["metadata"]["importance"] >= 1
 
     @pytest.mark.asyncio
     async def test_importance_clamped_above_10(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="x", importance=999)
+        bid = await bucket_mgr.create_internal(content="x", importance=999)
         result = await bucket_mgr.get(bid)
         assert result["metadata"]["importance"] <= 10
 
     @pytest.mark.asyncio
     async def test_valence_clamped_below_0(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="x", valence=-1.0)
+        bid = await bucket_mgr.create_internal(content="x", valence=-1.0)
         result = await bucket_mgr.get(bid)
         assert result["metadata"]["valence"] >= 0.0
 
     @pytest.mark.asyncio
     async def test_valence_clamped_above_1(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="x", valence=2.0)
+        bid = await bucket_mgr.create_internal(content="x", valence=2.0)
         result = await bucket_mgr.get(bid)
         assert result["metadata"]["valence"] <= 1.0
 
     @pytest.mark.asyncio
     async def test_default_domain_when_none_given(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="x")
+        bid = await bucket_mgr.create_internal(content="x")
         result = await bucket_mgr.get(bid)
         # Non-feel bucket should have a domain
         assert len(result["metadata"]["domain"]) > 0
@@ -395,26 +395,26 @@ class TestBucketManagerCreate:
     @pytest.mark.asyncio
     async def test_bucket_id_override(self, bucket_mgr):
         custom_id = "my_custom_id_test"
-        bid = await bucket_mgr.create(content="override test", bucket_id_override=custom_id)
+        bid = await bucket_mgr.create_internal(content="override test", bucket_id_override=custom_id)
         # ID should start with the sanitized override or be a fallback
         assert bid is not None
 
     @pytest.mark.asyncio
     async def test_why_remembered_stored(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="x", why_remembered="重要的人生转折")
+        bid = await bucket_mgr.create_internal(content="x", why_remembered="重要的人生转折")
         result = await bucket_mgr.get(bid)
         assert result["metadata"].get("why_remembered") == "重要的人生转折"
 
     @pytest.mark.asyncio
     async def test_source_tool_stored(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="x", source_tool="hold")
+        bid = await bucket_mgr.create_internal(content="x", source_tool="hold")
         result = await bucket_mgr.get(bid)
         assert result["metadata"].get("source_tool") == "hold"
 
     @pytest.mark.asyncio
     async def test_why_remembered_truncated_to_500(self, bucket_mgr):
         long_text = "x" * 600
-        bid = await bucket_mgr.create(content="x", why_remembered=long_text)
+        bid = await bucket_mgr.create_internal(content="x", why_remembered=long_text)
         result = await bucket_mgr.get(bid)
         stored = result["metadata"].get("why_remembered", "")
         assert len(stored) <= 500
@@ -428,7 +428,7 @@ class TestBucketManagerGet:
 
     @pytest.mark.asyncio
     async def test_get_returns_expected_keys(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="test content")
+        bid = await bucket_mgr.create_internal(content="test content")
         result = await bucket_mgr.get(bid)
         assert "id" in result
         assert "metadata" in result
@@ -439,7 +439,7 @@ class TestBucketManagerGet:
 class TestBucketManagerUpdate:
     @pytest.mark.asyncio
     async def test_update_importance(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="x", importance=3)
+        bid = await bucket_mgr.create_internal(content="x", importance=3)
         success = await bucket_mgr.update(bid, importance=7)
         assert success is True
         result = await bucket_mgr.get(bid)
@@ -447,7 +447,7 @@ class TestBucketManagerUpdate:
 
     @pytest.mark.asyncio
     async def test_update_resolved(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="x")
+        bid = await bucket_mgr.create_internal(content="x")
         await bucket_mgr.update(bid, resolved=True)
         result = await bucket_mgr.get(bid)
         assert result["metadata"]["resolved"] is True
@@ -460,7 +460,7 @@ class TestBucketManagerUpdate:
     @pytest.mark.asyncio
     async def test_metadata_update_does_not_refresh_last_active(self, bucket_mgr):
         """纯元数据编辑（trace 等）不算「激活」：不刷 last_active、不动 activation_count。"""
-        bid = await bucket_mgr.create(content="x")
+        bid = await bucket_mgr.create_internal(content="x")
         before = (await bucket_mgr.get(bid))["metadata"]
         before_active = before["last_active"]
         before_count = float(before.get("activation_count") or 0)
@@ -473,7 +473,7 @@ class TestBucketManagerUpdate:
     async def test_bump_active_update_refreshes_activation(self, bucket_mgr):
         """真实激活写入（如合并近邻桶）：bump_active=True 刷 last_active 且 activation_count +1。"""
         import time
-        bid = await bucket_mgr.create(content="x")
+        bid = await bucket_mgr.create_internal(content="x")
         before = (await bucket_mgr.get(bid))["metadata"]
         before_count = float(before.get("activation_count") or 0)
         time.sleep(1)  # 保证秒级时间戳能前移
@@ -484,7 +484,7 @@ class TestBucketManagerUpdate:
 
     @pytest.mark.asyncio
     async def test_update_valence_clamped(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="x")
+        bid = await bucket_mgr.create_internal(content="x")
         await bucket_mgr.update(bid, valence=5.0)
         result = await bucket_mgr.get(bid)
         assert result["metadata"]["valence"] <= 1.0
@@ -493,7 +493,7 @@ class TestBucketManagerUpdate:
 class TestBucketManagerDelete:
     @pytest.mark.asyncio
     async def test_delete_moves_to_archive(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="删除测试", domain=["测试"])
+        bid = await bucket_mgr.create_internal(content="删除测试", domain=["测试"])
         success = await bucket_mgr.delete(bid)
         assert success is True
         # Should not be findable in active dirs
@@ -510,7 +510,7 @@ class TestBucketManagerDelete:
 
     @pytest.mark.asyncio
     async def test_delete_is_soft_not_physical(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="soft delete test")
+        bid = await bucket_mgr.create_internal(content="soft delete test")
         await bucket_mgr.delete(bid)
         # Check archive dir has the file
         archive_dir = bucket_mgr.archive_dir
@@ -532,13 +532,13 @@ class TestBucketManagerSearch:
 
     @pytest.mark.asyncio
     async def test_keyword_match_returns_results(self, bucket_mgr):
-        await bucket_mgr.create(content="Python编程语言学习笔记", domain=["技术"], tags=["python"])
+        await bucket_mgr.create_internal(content="Python编程语言学习笔记", domain=["技术"], tags=["python"])
         results = await bucket_mgr.search("Python")
         assert len(results) > 0
 
     @pytest.mark.asyncio
     async def test_results_have_score_field(self, bucket_mgr):
-        await bucket_mgr.create(content="编程学习", tags=["编程"])
+        await bucket_mgr.create_internal(content="编程学习", tags=["编程"])
         results = await bucket_mgr.search("编程")
         for r in results:
             assert "score" in r
@@ -546,8 +546,8 @@ class TestBucketManagerSearch:
 
     @pytest.mark.asyncio
     async def test_results_sorted_by_score_desc(self, bucket_mgr):
-        await bucket_mgr.create(content="Python是编程语言", tags=["python"], importance=8)
-        await bucket_mgr.create(content="今天天气不错", tags=["天气"], importance=3)
+        await bucket_mgr.create_internal(content="Python是编程语言", tags=["python"], importance=8)
+        await bucket_mgr.create_internal(content="今天天气不错", tags=["天气"], importance=3)
         results = await bucket_mgr.search("Python")
         if len(results) > 1:
             scores = [r["score"] for r in results]
@@ -555,8 +555,8 @@ class TestBucketManagerSearch:
 
     @pytest.mark.asyncio
     async def test_domain_filter_works(self, bucket_mgr):
-        await bucket_mgr.create(content="科学知识", domain=["科学"], tags=["科学"])
-        await bucket_mgr.create(content="美食食谱", domain=["美食"], tags=["美食"])
+        await bucket_mgr.create_internal(content="科学知识", domain=["科学"], tags=["科学"])
+        await bucket_mgr.create_internal(content="美食食谱", domain=["美食"], tags=["美食"])
         results = await bucket_mgr.search("知识", domain_filter=["科学"])
         for r in results:
             domains = r["metadata"].get("domain", [])
@@ -564,10 +564,10 @@ class TestBucketManagerSearch:
 
     @pytest.mark.asyncio
     async def test_resolved_bucket_penalized(self, bucket_mgr):
-        bid_active = await bucket_mgr.create(
+        bid_active = await bucket_mgr.create_internal(
             content="Python编程学习", tags=["python"], importance=7
         )
-        bid_resolved = await bucket_mgr.create(
+        bid_resolved = await bucket_mgr.create_internal(
             content="Python编程学习已完成", tags=["python"], importance=7
         )
         await bucket_mgr.update(bid_resolved, resolved=True)
@@ -582,11 +582,11 @@ class TestBucketManagerSearch:
     @pytest.mark.asyncio
     async def test_emotion_resonance_higher_when_matched(self, bucket_mgr):
         # Happy bucket (valence=0.9, arousal=0.7)
-        bid_happy = await bucket_mgr.create(
+        bid_happy = await bucket_mgr.create_internal(
             content="快乐", valence=0.9, arousal=0.7, tags=["情感"]
         )
         # Sad bucket (valence=0.1, arousal=0.2)
-        bid_sad = await bucket_mgr.create(
+        bid_sad = await bucket_mgr.create_internal(
             content="悲伤", valence=0.1, arousal=0.2, tags=["情感"]
         )
         # Query with happy coordinates
@@ -601,14 +601,14 @@ class TestBucketManagerSearch:
 class TestBucketManagerListAll:
     @pytest.mark.asyncio
     async def test_list_all_returns_created_buckets(self, bucket_mgr):
-        await bucket_mgr.create(content="list test 1", domain=["测试"])
-        await bucket_mgr.create(content="list test 2", domain=["测试"])
+        await bucket_mgr.create_internal(content="list test 1", domain=["测试"])
+        await bucket_mgr.create_internal(content="list test 2", domain=["测试"])
         results = await bucket_mgr.list_all(include_archive=False)
         assert len(results) >= 2
 
     @pytest.mark.asyncio
     async def test_list_all_excludes_archive_by_default(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="will be deleted")
+        bid = await bucket_mgr.create_internal(content="will be deleted")
         await bucket_mgr.delete(bid)
         results = await bucket_mgr.list_all(include_archive=False)
         result_ids = [r["id"] for r in results]
@@ -618,7 +618,7 @@ class TestBucketManagerListAll:
 class TestBucketManagerTouch:
     @pytest.mark.asyncio
     async def test_touch_increments_activation_count(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="touch test")
+        bid = await bucket_mgr.create_internal(content="touch test")
         before = (await bucket_mgr.get(bid))["metadata"].get("activation_count", 0)
         await bucket_mgr.touch(bid)
         after = (await bucket_mgr.get(bid))["metadata"].get("activation_count", 0)
@@ -638,7 +638,7 @@ class TestBucketManagerAnchor:
 
     @pytest.mark.asyncio
     async def test_set_anchor_increments_count(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="anchor me")
+        bid = await bucket_mgr.create_internal(content="anchor me")
         await bucket_mgr.set_anchor(bid, True)
         count = await bucket_mgr.count_anchors()
         assert count == 1
@@ -648,7 +648,7 @@ class TestBucketManagerAnchor:
         """Cannot exceed 24 anchors."""
         ids = []
         for i in range(25):
-            bid = await bucket_mgr.create(content=f"anchor test {i}")
+            bid = await bucket_mgr.create_internal(content=f"anchor test {i}")
             ids.append(bid)
         # Set first 24 as anchors
         for bid in ids[:24]:
@@ -838,7 +838,7 @@ class TestDecayEngineRunCycle:
     async def test_run_cycle_returns_stats_dict(self, decay_engine, bucket_mgr):
         # Give decay_engine a bucket_mgr that has some buckets
         decay_engine.bucket_mgr = bucket_mgr
-        await bucket_mgr.create(content="cycle test", domain=["测试"])
+        await bucket_mgr.create_internal(content="cycle test", domain=["测试"])
         result = await decay_engine.run_decay_cycle()
         assert "checked" in result
         assert "archived" in result
@@ -851,7 +851,7 @@ class TestDecayEngineRunCycle:
         decay_engine.bucket_mgr = bucket_mgr
         decay_engine.threshold = 9999.0  # Set threshold very high to force archiving
 
-        bid = await bucket_mgr.create(
+        bid = await bucket_mgr.create_internal(
             content="low score bucket", importance=1, domain=["测试"]
         )
         # Patch last_active to 100 days ago
@@ -872,10 +872,10 @@ class TestDecayEngineRunCycle:
         import frontmatter as fm
 
         decay_engine.bucket_mgr = bucket_mgr
-        anchor_id = await bucket_mgr.create(
+        anchor_id = await bucket_mgr.create_internal(
             content="需要长期保留的关系坐标", importance=5, domain=["测试"]
         )
-        dynamic_id = await bucket_mgr.create(
+        dynamic_id = await bucket_mgr.create_internal(
             content="同龄的普通动态记忆", importance=5, domain=["测试"]
         )
         anchor_result = await bucket_mgr.set_anchor(anchor_id, True)
@@ -923,7 +923,7 @@ class TestDecayEngineRunCycle:
         decay_engine.bucket_mgr = bucket_mgr
         decay_engine.threshold = 9999.0  # Force archive anything low
 
-        bid = await bucket_mgr.create(content="pinned bucket", pinned=True)
+        bid = await bucket_mgr.create_internal(content="pinned bucket", pinned=True)
         await decay_engine.run_decay_cycle()
         # Pinned bucket should never be archived
         still_alive = await bucket_mgr.get(bid)
@@ -934,7 +934,7 @@ class TestDecayEngineRunCycle:
         decay_engine.bucket_mgr = bucket_mgr
         decay_engine.threshold = 9999.0  # Force archive anything
 
-        bid = await bucket_mgr.create(content="feel bucket", bucket_type="feel")
+        bid = await bucket_mgr.create_internal(content="feel bucket", bucket_type="feel")
         await decay_engine.run_decay_cycle()
         # Feel buckets should never be archived
         fpath = bucket_mgr._find_bucket_file(bid)
@@ -1111,14 +1111,14 @@ class TestCalcEmotionScore:
 class TestCalcTopicScore:
     @pytest.mark.asyncio
     async def test_exact_name_match_scores_high(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="some content", name="Python学习笔记", tags=["python"])
+        bid = await bucket_mgr.create_internal(content="some content", name="Python学习笔记", tags=["python"])
         result = await bucket_mgr.get(bid)
         score = bucket_mgr._calc_topic_score("Python学习笔记", result)
         assert score > 0.5
 
     @pytest.mark.asyncio
     async def test_no_match_scores_low(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="完全无关的内容", tags=["random"])
+        bid = await bucket_mgr.create_internal(content="完全无关的内容", tags=["random"])
         result = await bucket_mgr.get(bid)
         score = bucket_mgr._calc_topic_score("ZZZZNOTFOUND", result)
         assert score < 0.5
@@ -1185,7 +1185,7 @@ class TestBucketManagerStats:
     @pytest.mark.asyncio
     async def test_stats_increments_on_create(self, bucket_mgr):
         before = await bucket_mgr.get_stats()
-        await bucket_mgr.create(content="stats test bucket")
+        await bucket_mgr.create_internal(content="stats test bucket")
         after = await bucket_mgr.get_stats()
         # Total count should increase
         before_total = before.get("total", 0)
@@ -1200,7 +1200,7 @@ class TestBucketManagerStats:
 class TestBucketManagerArchive:
     @pytest.mark.asyncio
     async def test_archive_moves_bucket(self, bucket_mgr):
-        bid = await bucket_mgr.create(content="archive me", domain=["测试"])
+        bid = await bucket_mgr.create_internal(content="archive me", domain=["测试"])
         success = await bucket_mgr.archive(bid)
         assert success is True
         # Should not appear in active list

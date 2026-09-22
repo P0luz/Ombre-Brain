@@ -29,7 +29,7 @@ def _backdate(bucket_mgr, bucket_id: str, days_ago: int) -> None:
 
 @pytest.mark.asyncio
 async def test_decay_cycle_never_auto_resolves_plan(bucket_mgr, decay_eng):
-    bid = await bucket_mgr.create(
+    bid = await bucket_mgr.create_internal(
         content="记得帮她把这件事办完", bucket_type="plan", importance=3,
     )
     _backdate(bucket_mgr, bid, days_ago=60)
@@ -45,7 +45,7 @@ async def test_decay_cycle_never_auto_resolves_plan(bucket_mgr, decay_eng):
 
 @pytest.mark.asyncio
 async def test_decay_cycle_never_auto_resolves_letter(bucket_mgr, decay_eng):
-    bid = await bucket_mgr.create(
+    bid = await bucket_mgr.create_internal(
         content="给未来自己的一封信", bucket_type="letter", importance=3,
     )
     _backdate(bucket_mgr, bid, days_ago=60)
@@ -62,7 +62,7 @@ async def test_decay_cycle_never_auto_resolves_letter(bucket_mgr, decay_eng):
 @pytest.mark.asyncio
 async def test_decay_cycle_still_auto_resolves_ordinary_dynamic_bucket(bucket_mgr, decay_eng):
     """对照组：证明上面两条不是「自动结案分支根本没触发」这种伪通过。"""
-    bid = await bucket_mgr.create(content="一件早就不重要的小事", importance=3)
+    bid = await bucket_mgr.create_internal(content="一件早就不重要的小事", importance=3)
     _backdate(bucket_mgr, bid, days_ago=60)
 
     stats = await decay_eng.run_decay_cycle()

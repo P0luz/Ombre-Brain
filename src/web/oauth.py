@@ -41,6 +41,7 @@ from ombrebrain.security.public_origin import (
 )
 from . import _shared as sh
 from .auth import _run_public_password_verification
+from tools import _identity
 
 try:
     from utils import parse_bool  # type: ignore
@@ -53,6 +54,7 @@ _oauth_clients: dict[str, dict] = {}
 _oauth_codes: dict[str, dict] = {}    # code -> {client_id, redirect_uri, code_challenge, expires}
 _mcp_tokens: dict[str, float] = {}    # token -> expiry timestamp
 _mcp_token_resources: dict[str, str] = {}  # token -> canonical MCP resource
+_mcp_token_callers: dict[str, str] = {}  # token -> authenticated local identity
 _mcp_refresh_tokens: dict[str, dict] = {}  # refresh_token -> {expires, client_id, resource}
 
 _OAUTH_CODE_TTL = 300               # 5 min
@@ -73,6 +75,10 @@ _MAX_REDIRECT_URIS = 10
 _MAX_REDIRECT_URI_CHARS = 2048
 _MAX_REDIRECT_URIS_TOTAL_CHARS = 4096
 _MAX_CLIENT_NAME_CHARS = 200
+_MAX_CLIENT_ID_CHARS = 256
+_MAX_OAUTH_STATE_CHARS = 4096
+_MAX_OAUTH_RESOURCE_CHARS = 2048
+_MAX_OAUTH_SCOPE_CHARS = 64
 _PKCE_PATTERN = _re.compile(r"^[A-Za-z0-9._~-]{43,128}$")
 _FORBIDDEN_REDIRECT_SCHEMES = {
     "about", "blob", "data", "file", "ftp", "javascript", "vbscript"
@@ -377,6 +383,8 @@ def _mcp_resource(
     canonical = f"{base}/mcp"
     if not requested:
         return True, canonical
+    if not isinstance(requested, str) or len(requested) > _MAX_OAUTH_RESOURCE_CHARS:
+        return False, canonical
     normalized = _normalize_resource(requested)
     if normalized in (_normalize_resource(base), _normalize_resource(canonical)):
         return True, canonical
@@ -505,29 +513,45 @@ def _load_mcp_tokens() -> None:
             access_raw = raw
             refresh_raw = {}
 
+        needs_migration = not (
+            isinstance(raw, dict)
+            and "access_tokens" in raw
+            and "refresh_tokens" in raw
+        )
         loaded_access: dict[str, float] = {}
         loaded_resources: dict[str, str] = {}
+        loaded_callers: dict[str, str] = {}
         for tok, data in access_raw.items():
             if isinstance(data, (int, float)):
                 exp = data
                 resource = ""
+                caller = ""
+                needs_migration = True
             elif isinstance(data, dict):
                 exp = data.get("expires")
                 resource = str(data.get("resource", ""))
+                caller = _identity.normalize_caller(data.get("caller"))
+                if "resource" not in data or "caller" not in data:
+                    needs_migration = True
             else:
                 continue
             if isinstance(exp, (int, float)) and exp > now:
                 loaded_access[tok] = exp
                 if resource:
                     loaded_resources[tok] = resource
+                if caller:
+                    loaded_callers[tok] = caller
         loaded_refresh: dict[str, dict] = {}
         for tok, data in refresh_raw.items():
             if isinstance(data, (int, float)):
                 exp = data
                 client_id = ""
+                needs_migration = True
             elif isinstance(data, dict):
                 exp = data.get("expires")
                 client_id = str(data.get("client_id", ""))
+                if "resource" not in data or "caller" not in data:
+                    needs_migration = True
             else:
                 continue
             if isinstance(exp, (int, float)) and exp > now:
@@ -535,11 +559,14 @@ def _load_mcp_tokens() -> None:
                     "expires": exp,
                     "client_id": client_id,
                     "resource": str(data.get("resource", "")) if isinstance(data, dict) else "",
+                    "caller": _identity.normalize_caller(data.get("caller")) if isinstance(data, dict) else "",
                 }
         with _oauth_grant_state_lock:
             _replace_grant_state_locked(
-                loaded_access, loaded_resources, loaded_refresh
+                loaded_access, loaded_resources, loaded_callers, loaded_refresh
             )
+        if needs_migration:
+            _save_mcp_tokens()
     except Exception as e:
         logger.warning(f"[oauth] failed to load mcp tokens: {e}")
 
@@ -551,6 +578,7 @@ def _save_mcp_tokens() -> None:
             _persist_mcp_token_state(
                 _mcp_tokens,
                 _mcp_token_resources,
+                _mcp_token_callers,
                 _mcp_refresh_tokens,
             )
 
@@ -558,6 +586,7 @@ def _save_mcp_tokens() -> None:
 def _persist_mcp_token_state(
     access_tokens: dict[str, float],
     token_resources: dict[str, str],
+    token_callers: dict[str, str],
     refresh_tokens: dict[str, dict],
 ) -> None:
     """Durably write one candidate grant state before it becomes visible."""
@@ -569,6 +598,7 @@ def _persist_mcp_token_state(
             tok: {
                 "expires": exp,
                 "resource": token_resources.get(tok, ""),
+                "caller": _identity.normalize_caller(token_callers.get(tok, "")),
             }
             for tok, exp in access_tokens.items()
             if exp > now
@@ -593,12 +623,15 @@ def _persist_mcp_token_state(
 def _replace_grant_state_locked(
     access_tokens: dict[str, float],
     token_resources: dict[str, str],
+    token_callers: dict[str, str],
     refresh_tokens: dict[str, dict],
 ) -> None:
     _mcp_tokens.clear()
     _mcp_tokens.update(access_tokens)
     _mcp_token_resources.clear()
     _mcp_token_resources.update(token_resources)
+    _mcp_token_callers.clear()
+    _mcp_token_callers.update(token_callers)
     _mcp_refresh_tokens.clear()
     _mcp_refresh_tokens.update(refresh_tokens)
 
@@ -630,6 +663,7 @@ def _commit_authorization_code_exchange(
             refresh_token = secrets.token_urlsafe(32)
             access_candidate = dict(_mcp_tokens)
             resource_candidate = dict(_mcp_token_resources)
+            caller_candidate = dict(_mcp_token_callers)
             refresh_candidate = {
                 token: dict(data)
                 for token, data in _mcp_refresh_tokens.items()
@@ -638,16 +672,26 @@ def _commit_authorization_code_exchange(
             access_candidate[access_token] = _time_mod.time() + _MCP_TOKEN_TTL
             if token_resource:
                 resource_candidate[access_token] = token_resource
+            caller = _identity.normalize_caller(current.get("caller"))
+            if caller:
+                caller_candidate[access_token] = caller
             refresh_candidate[refresh_token] = {
                 "expires": _time_mod.time() + _MCP_REFRESH_TOKEN_TTL,
                 "client_id": str(current.get("client_id", "")),
                 "resource": token_resource,
+                "caller": caller,
             }
             _persist_mcp_token_state(
-                access_candidate, resource_candidate, refresh_candidate
+                access_candidate,
+                resource_candidate,
+                caller_candidate,
+                refresh_candidate,
             )
             _replace_grant_state_locked(
-                access_candidate, resource_candidate, refresh_candidate
+                access_candidate,
+                resource_candidate,
+                caller_candidate,
+                refresh_candidate,
             )
             _oauth_codes.pop(code, None)
             return access_token, refresh_token
@@ -673,6 +717,7 @@ def _commit_refresh_token_rotation(
             replacement_refresh = secrets.token_urlsafe(32)
             access_candidate = dict(_mcp_tokens)
             resource_candidate = dict(_mcp_token_resources)
+            caller_candidate = dict(_mcp_token_callers)
             refresh_candidate = {
                 token: dict(data)
                 for token, data in _mcp_refresh_tokens.items()
@@ -682,16 +727,26 @@ def _commit_refresh_token_rotation(
             access_candidate[access_token] = _time_mod.time() + _MCP_TOKEN_TTL
             if token_resource:
                 resource_candidate[access_token] = token_resource
+            caller = _identity.normalize_caller(current.get("caller"))
+            if caller:
+                caller_candidate[access_token] = caller
             refresh_candidate[replacement_refresh] = {
                 "expires": _time_mod.time() + _MCP_REFRESH_TOKEN_TTL,
                 "client_id": str(current.get("client_id", "")),
                 "resource": token_resource,
+                "caller": caller,
             }
             _persist_mcp_token_state(
-                access_candidate, resource_candidate, refresh_candidate
+                access_candidate,
+                resource_candidate,
+                caller_candidate,
+                refresh_candidate,
             )
             _replace_grant_state_locked(
-                access_candidate, resource_candidate, refresh_candidate
+                access_candidate,
+                resource_candidate,
+                caller_candidate,
+                refresh_candidate,
             )
             return access_token, replacement_refresh
 
@@ -737,8 +792,8 @@ def revoke_all_mcp_grants() -> None:
         sh._advance_credential_generation_locked()
         with _oauth_grant_state_lock:
             _oauth_codes.clear()
-            _persist_mcp_token_state({}, {}, {})
-            _replace_grant_state_locked({}, {}, {})
+            _persist_mcp_token_state({}, {}, {}, {})
+            _replace_grant_state_locked({}, {}, {}, {})
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:
@@ -758,6 +813,7 @@ def _is_valid_mcp_token(token: str, resource: str = "") -> bool:
             if _time_mod.time() > expiry:
                 del _mcp_tokens[token]
                 _mcp_token_resources.pop(token, None)
+                _mcp_token_callers.pop(token, None)
                 return False
             bound_resource = _mcp_token_resources.get(token, "")
             if resource and bound_resource:
@@ -765,6 +821,53 @@ def _is_valid_mcp_token(token: str, resource: str = "") -> bool:
                     bound_resource
                 )
             return True
+
+
+def _caller_for_mcp_token(token: str, resource: str = "") -> str:
+    """Return the caller bound to a valid OAuth token, if one exists."""
+    if not _is_valid_mcp_token(token, resource=resource):
+        return ""
+    with _oauth_grant_state_lock:
+        return _identity.normalize_caller(_mcp_token_callers.get(token))
+
+
+def _mcp_token_identity(token: str, resource: str = "") -> tuple[bool, str]:
+    """Return ``(valid, caller)`` while preserving identityless legacy grants."""
+    if not _is_valid_mcp_token(token, resource=resource):
+        return False, ""
+    with _oauth_grant_state_lock:
+        caller = _identity.normalize_caller(_mcp_token_callers.get(token))
+    return True, caller
+
+
+def _resolve_mcp_caller(scope: dict) -> tuple[str, str, str]:
+    """Resolve caller as ``(canonical caller, source, raw value)``.
+
+    A valid OAuth bearer grant is authoritative even when it predates caller
+    binding.  That prevents a header or query parameter from upgrading an
+    identityless legacy grant.
+    """
+    headers = {key.lower(): value for key, value in scope.get("headers", [])}
+    auth = headers.get(b"authorization", b"").decode("latin-1", "replace")
+    if auth.startswith("Bearer "):
+        valid, caller = _mcp_token_identity(auth[7:])
+        if valid:
+            return caller, "token" if caller else "legacy_token", caller
+
+    raw_header = headers.get(b"x-ob-caller", b"").decode("utf-8", "replace")
+    if raw_header:
+        return _identity.normalize_caller(raw_header), "header", raw_header
+
+    try:
+        query = _urlparse.parse_qs(
+            scope.get("query_string", b"").decode("latin-1")
+        )
+        raw_query = (query.get("caller") or [""])[0]
+    except Exception:
+        raw_query = ""
+    if raw_query:
+        return _identity.normalize_caller(raw_query), "query", raw_query
+    return "", "none", ""
 
 
 def _is_valid_static_mcp_token(token: str, resource: str = "") -> bool:
@@ -796,7 +899,15 @@ def _oauth_log_field(value: object, max_chars: int) -> str:
     return "".join(char for char in str(value) if char.isprintable())[:max_chars]
 
 
-def _issue_mcp_access_token(resource: str = "") -> str:
+def _issue_mcp_access_token(resource: str = "", caller: str = "") -> str:
+    # Pre-identity releases accepted caller as the sole positional argument.
+    # Preserve that internal/test API without confusing canonical HTTP(S)
+    # resource identifiers with local caller names.
+    if not caller:
+        positional_caller = _identity.normalize_caller(resource)
+        if positional_caller:
+            caller = positional_caller
+            resource = ""
     _cleanup_oauth_state()
     with sh._credential_state_guard():
         with _oauth_grant_state_lock:
@@ -804,10 +915,15 @@ def _issue_mcp_access_token(resource: str = "") -> str:
             _mcp_tokens[token] = _time_mod.time() + _MCP_TOKEN_TTL
             if resource:
                 _mcp_token_resources[token] = resource
+            normalized_caller = _identity.normalize_caller(caller)
+            if normalized_caller:
+                _mcp_token_callers[token] = normalized_caller
             return token
 
 
-def _issue_mcp_refresh_token(client_id: str, resource: str = "") -> str:
+def _issue_mcp_refresh_token(
+    client_id: str, resource: str = "", caller: str = ""
+) -> str:
     _cleanup_oauth_state()
     with sh._credential_state_guard():
         with _oauth_grant_state_lock:
@@ -816,6 +932,7 @@ def _issue_mcp_refresh_token(client_id: str, resource: str = "") -> str:
                 "expires": _time_mod.time() + _MCP_REFRESH_TOKEN_TTL,
                 "client_id": client_id,
                 "resource": resource,
+                "caller": _identity.normalize_caller(caller),
             }
             return refresh_token
 
@@ -842,8 +959,12 @@ def _validate_authorize_redirect(client_id: str, redirect_uri: str) -> tuple[boo
     _cleanup_oauth_state()
     if not client_id:
         return False, "missing client_id"
+    if not isinstance(client_id, str) or len(client_id) > _MAX_CLIENT_ID_CHARS:
+        return False, "invalid client_id"
     if not redirect_uri:
         return False, "missing redirect_uri"
+    if not _valid_redirect_uri(redirect_uri):
+        return False, "invalid redirect_uri"
     with _oauth_client_state_lock:
         client_info = _oauth_clients.get(client_id)
         if isinstance(client_info, dict):
@@ -855,9 +976,37 @@ def _validate_authorize_redirect(client_id: str, redirect_uri: str) -> tuple[boo
     return True, ""
 
 
-def _oauth_authorize_html(client_id: str, redirect_uri: str, state: str,
-                           code_challenge: str, resource: str = "",
-                           scope: str = _MCP_SCOPE, error: str = "") -> str:
+def _oauth_authorize_html(
+    client_id: str,
+    redirect_uri: str,
+    state: str,
+    code_challenge: str,
+    resource: str = "",
+    scope: str = _MCP_SCOPE,
+    caller: str = "",
+    error: str = "",
+) -> str:
+    # This renderer also serves validation errors.  Bound every reflected
+    # request field here so a future caller cannot turn an oversized public GET
+    # into a much larger HTML response even if route-level validation regresses.
+    client_id = client_id if isinstance(client_id, str) and len(client_id) <= _MAX_CLIENT_ID_CHARS else ""
+    redirect_uri = (
+        redirect_uri
+        if isinstance(redirect_uri, str) and len(redirect_uri) <= _MAX_REDIRECT_URI_CHARS
+        else ""
+    )
+    state = state if isinstance(state, str) and len(state) <= _MAX_OAUTH_STATE_CHARS else ""
+    code_challenge = (
+        code_challenge
+        if isinstance(code_challenge, str) and len(code_challenge) <= 128
+        else ""
+    )
+    resource = (
+        resource
+        if isinstance(resource, str) and len(resource) <= _MAX_OAUTH_RESOURCE_CHARS
+        else ""
+    )
+    scope = scope if isinstance(scope, str) and len(scope) <= _MAX_OAUTH_SCOPE_CHARS else ""
     e = _html_escape.escape
     try:
         from utils import get_ai_name  # type: ignore
@@ -869,10 +1018,38 @@ def _oauth_authorize_html(client_id: str, redirect_uri: str, state: str,
         client_info = dict(stored_client) if isinstance(stored_client, dict) else {}
     client_name = e(str(client_info.get("client_name") or "MCP Client"))
     callback = e(redirect_uri[:240])
+    normalized_caller = _identity.normalize_caller(caller)
+    caller_options = [
+        ("", "不绑定本地身份（Handoff 将拒绝）"),
+        ("cheng", "澄（cheng）"),
+        ("huaiyin", "怀音（huaiyin）"),
+        ("huaiyin_cc", "怀音 CC（huaiyin_cc）"),
+    ]
+    options_html = "".join(
+        f'<option value="{e(value)}"'
+        f'{" selected" if value == normalized_caller else ""}>{e(label)}</option>'
+        for value, label in caller_options
+    )
     trace_id = secrets.token_hex(6)
-    err_html = f'<p style="color:#ff6b6b;font-size:13px;margin-top:12px;">{e(error)}</p>' if error else ""
+    err_html = (
+        f'<p class="error" id="form-error" role="alert">{e(error)}</p>'
+        if error
+        else ""
+    )
+    caller_error = error == "请选择列表中的身份，或选择“不绑定本地身份”"
+    password_error = error in {"密码格式无效", "密码错误，请重试"}
+    field_error = caller_error or password_error
+    form_description = (
+        ' aria-describedby="form-error"' if error and not field_error else ""
+    )
+    caller_describedby = "caller-help form-error" if caller_error else "caller-help"
+    caller_invalid = ' aria-invalid="true"' if caller_error else ""
+    caller_autofocus = " autofocus" if caller_error else ""
+    password_describedby = ' aria-describedby="form-error"' if password_error else ""
+    password_invalid = ' aria-invalid="true"' if password_error else ""
+    password_autofocus = " autofocus" if password_error else ""
     return f"""<!DOCTYPE html>
-<html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Ombre Brain · 授权 MCP</title>
 <style>
 *{{box-sizing:border-box}}
@@ -880,22 +1057,26 @@ body{{font-family:-apple-system,system-ui,sans-serif;background:#0f0f0f;color:#e
   display:flex;align-items:center;justify-content:center;min-height:100vh;margin:0}}
 .card{{background:#1a1a1a;border:1px solid #333;border-radius:16px;padding:40px 36px;
   max-width:380px;width:90%;text-align:center}}
-h2{{color:#c9a96e;font-family:Georgia,serif;font-size:24px;margin:0 0 6px}}
+h1{{color:#c9a96e;font-family:Georgia,serif;font-size:24px;margin:0 0 6px}}
 .sub{{color:#888;font-size:13px;margin:0 0 24px}}
-input[type=password]{{display:block;width:100%;padding:11px 14px;background:#111;
-  border:1px solid #444;border-radius:8px;color:#e0e0e0;font-size:14px;margin-bottom:14px}}
+label{{display:block;text-align:left;font-size:13px;margin:12px 0 6px}}
+select,input[type=password]{{display:block;width:100%;padding:11px 14px;background:#111;
+  border:1px solid #6b6b6b;border-radius:8px;color:#e0e0e0;font-size:14px;margin-bottom:14px}}
+select:focus-visible,input:focus-visible,button:focus-visible{{outline:3px solid #f2ce8c;outline-offset:2px}}
 button{{width:100%;padding:12px;background:#c9a96e;color:#0f0f0f;border:none;
   border-radius:8px;font-size:14px;font-weight:600;cursor:pointer}}
 button:hover{{background:#d4b87a}}
-button:disabled{{opacity:.65;cursor:wait}}
+button[aria-disabled=true]{{opacity:.65;cursor:wait}}
 .submit-status{{display:none;color:#c9a96e;font-size:12px;margin-top:12px;line-height:1.5}}
-.note{{color:#666;font-size:11px;margin-top:16px;line-height:1.6}}
+.note{{color:#aaa;font-size:11px;margin-top:16px;line-height:1.6}}
+.field-help{{color:#aaa;font-size:12px;text-align:left;margin:-8px 0 14px;line-height:1.5}}
+.error{{color:#ff8a8a;font-size:13px;margin-top:12px}}
 </style></head>
 <body><div class="card">
-<h2>◐ Ombre Brain</h2>
+<h1>◐ Ombre Brain</h1>
 <p class="sub">授权 {ai_name} 连接 MCP</p>
 <p class="note">请求方：{client_name}<br>回调：{callback}</p>
-<form method="POST" id="oauth-form">
+<form method="POST" id="oauth-form"{form_description}>
 <input type="hidden" name="client_id" value="{e(client_id)}">
 <input type="hidden" name="redirect_uri" value="{e(redirect_uri)}">
 <input type="hidden" name="state" value="{e(state)}">
@@ -903,7 +1084,11 @@ button:disabled{{opacity:.65;cursor:wait}}
 <input type="hidden" name="resource" value="{e(resource)}">
 <input type="hidden" name="scope" value="{e(scope)}">
 <input type="hidden" name="trace_id" value="{trace_id}">
-<input type="password" name="password" placeholder="输入 Dashboard 密码" autofocus>
+<label for="caller">本地身份</label>
+<select id="caller" name="caller" aria-describedby="{caller_describedby}"{caller_invalid}{caller_autofocus}>{options_html}</select>
+<p class="field-help" id="caller-help">身份只绑定到本次签发的 OAuth Token，用于隔离 Handoff 记忆。</p>
+<label for="password">Dashboard 密码</label>
+<input type="password" id="password" name="password" autocomplete="current-password"{password_describedby}{password_invalid}{password_autofocus}>
 <button type="submit" id="oauth-submit">授权并连接</button>
 </form>
 <p class="submit-status" id="submit-status" role="status" aria-live="polite"></p>
@@ -915,17 +1100,22 @@ button:disabled{{opacity:.65;cursor:wait}}
   const form = document.getElementById('oauth-form');
   const button = document.getElementById('oauth-submit');
   const status = document.getElementById('submit-status');
-  form.addEventListener('submit', () => {{
-    button.disabled = true;
+  let submitting = false;
+  form.addEventListener('submit', (event) => {{
+    if (submitting) {{
+      event.preventDefault();
+      return;
+    }}
+    submitting = true;
+    button.setAttribute('aria-disabled', 'true');
     button.textContent = '正在验证…';
     status.style.display = 'block';
     status.textContent = '正在验证密码并生成授权码，请勿关闭此页。';
     window.setTimeout(() => {{
-      if (!document.hidden) {{
-        button.disabled = false;
-        button.textContent = '重试授权';
-        status.textContent = '等待超过 30 秒。请记下诊断编号 {trace_id}，再重试或查看服务端日志。';
-      }}
+      submitting = false;
+      button.removeAttribute('aria-disabled');
+      button.textContent = '重试授权';
+      status.textContent = '等待超过 30 秒。请记下诊断编号 {trace_id}，再重试或查看服务端日志。';
     }}, 30000);
   }});
 }})();
@@ -1102,6 +1292,8 @@ def register(mcp) -> None:
                 ok, err = False, "unsupported response_type"
             if ok and not _valid_scope(p.get("scope", _MCP_SCOPE)):
                 ok, err = False, "unsupported scope"
+            if ok and len(p.get("state", "")) > _MAX_OAUTH_STATE_CHARS:
+                ok, err = False, "state is too long"
             if ok and not _valid_pkce_value(p.get("code_challenge")):
                 ok, err = False, "invalid PKCE code_challenge"
             if ok and p.get("code_challenge_method", "S256") != "S256":
@@ -1111,7 +1303,9 @@ def register(mcp) -> None:
             return HTMLResponse(_oauth_authorize_html(
                 p.get("client_id", ""), p.get("redirect_uri", ""),
                 p.get("state", ""), p.get("code_challenge", ""),
-                resource=resource, scope=p.get("scope", _MCP_SCOPE), error=err,
+                resource=resource,
+                scope=p.get("scope", _MCP_SCOPE),
+                error=err,
             ), status_code=200 if ok else (503 if sh._is_setup_needed() else 400))
         # POST
         try:
@@ -1125,6 +1319,8 @@ def register(mcp) -> None:
         code_challenge = str(form.get("code_challenge", ""))
         requested_resource = str(form.get("resource", ""))
         scope = str(form.get("scope", _MCP_SCOPE)) or _MCP_SCOPE
+        raw_caller = str(form.get("caller", "")).strip()
+        caller = _identity.normalize_caller(raw_caller)
         trace_id = _oauth_log_field(form.get("trace_id", ""), 32) or secrets.token_hex(6)
         logged_client_id = _oauth_log_field(client_id, 24)
         sh.logger.info(
@@ -1141,17 +1337,21 @@ def register(mcp) -> None:
             ok, err = False, "resource 与当前 MCP 地址不匹配"
         if ok and not _valid_scope(scope):
             ok, err = False, "unsupported scope"
+        if ok and len(state) > _MAX_OAUTH_STATE_CHARS:
+            ok, err = False, "state is too long"
         if ok and not _valid_pkce_value(code_challenge):
             ok, err = False, "invalid PKCE code_challenge"
+        if ok and raw_caller and not caller:
+            ok, err = False, "请选择列表中的身份，或选择“不绑定本地身份”"
         if not ok:
             return HTMLResponse(_oauth_authorize_html(
                 client_id, redirect_uri, state, code_challenge,
-                resource=resource, scope=scope, error=err
+                resource=resource, scope=scope, caller=caller, error=err
             ), status_code=400)
         if sh._is_setup_needed():
             return HTMLResponse(_oauth_authorize_html(
                 client_id, redirect_uri, state, code_challenge,
-                resource=resource, scope=scope,
+                resource=resource, scope=scope, caller=caller,
                 error="尚未设置 Dashboard 密码，请先打开 Dashboard 完成初始化",
             ), status_code=503)
         retry = sh._login_retry_after(request)
@@ -1159,7 +1359,7 @@ def register(mcp) -> None:
             return HTMLResponse(
                 _oauth_authorize_html(
                     client_id, redirect_uri, state, code_challenge,
-                    resource=resource, scope=scope,
+                    resource=resource, scope=scope, caller=caller,
                     error=f"尝试过于频繁，请 {retry} 秒后再试",
                 ),
                 status_code=429,
@@ -1170,7 +1370,8 @@ def register(mcp) -> None:
             return HTMLResponse(
                 _oauth_authorize_html(
                     client_id, redirect_uri, state, code_challenge,
-                    resource=resource, scope=scope, error="密码格式无效",
+                    resource=resource, scope=scope, caller=caller,
+                    error="密码格式无效",
                 ),
                 status_code=400,
             )
@@ -1179,7 +1380,7 @@ def register(mcp) -> None:
             return HTMLResponse(
                 _oauth_authorize_html(
                     client_id, redirect_uri, state, code_challenge,
-                    resource=resource, scope=scope,
+                    resource=resource, scope=scope, caller=caller,
                     error=f"登录服务繁忙，请 {global_retry} 秒后重试",
                 ),
                 status_code=429,
@@ -1192,7 +1393,7 @@ def register(mcp) -> None:
             return HTMLResponse(
                 _oauth_authorize_html(
                     client_id, redirect_uri, state, code_challenge,
-                    resource=resource, scope=scope,
+                    resource=resource, scope=scope, caller=caller,
                     error=f"尝试过于频繁，请 {queued_retry} 秒后再试",
                 ),
                 status_code=429,
@@ -1207,7 +1408,8 @@ def register(mcp) -> None:
             )
             return HTMLResponse(_oauth_authorize_html(
                 client_id, redirect_uri, state, code_challenge,
-                resource=resource, scope=scope, error="密码错误，请重试"
+                resource=resource, scope=scope, caller=caller,
+                error="密码错误，请重试"
             ), status_code=401)
 
         sh._record_login_success(request)
@@ -1218,13 +1420,14 @@ def register(mcp) -> None:
             "code_challenge": code_challenge,
             "resource": resource,
             "scope": scope,
+            "caller": caller,
             "expires": _time_mod.time() + _OAUTH_CODE_TTL,
         }
         if not _store_authorization_code(code, code_data, verified):
             return HTMLResponse(
                 _oauth_authorize_html(
                     client_id, redirect_uri, state, code_challenge,
-                    resource=resource, scope=scope,
+                    resource=resource, scope=scope, caller=caller,
                     error="授权状态已变化，请重新发起连接",
                 ),
                 status_code=409,
@@ -1242,6 +1445,7 @@ def register(mcp) -> None:
                     code_challenge,
                     resource=resource,
                     scope=scope,
+                    caller=caller,
                     error="授权状态无法持久化，请稍后重试",
                 ),
                 status_code=503,
@@ -1261,6 +1465,7 @@ def register(mcp) -> None:
                     code_challenge,
                     resource=resource,
                     scope=scope,
+                    caller=caller,
                     error="客户端注册已失效，请重新连接",
                 ),
                 status_code=409,

@@ -4,6 +4,7 @@
 
 bandit
 cyclonedx-bom==7.3.0
+httpx2>=2.12.0
 pip-audit
 pytest
 pytest-asyncio

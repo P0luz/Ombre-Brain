@@ -260,7 +260,7 @@ def test_v1_environment_names_remain_compatible(request, monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_embedding_provider_tuple_rebuilds_and_persists_once(
+async def test_embedding_provider_identity_change_requires_migration(
     monkeypatch, tmp_path
 ):
     runtime_config = {
@@ -308,24 +308,19 @@ async def test_embedding_provider_tuple_rebuilds_and_persists_once(
     )
     payload = json.loads(response.body)
 
-    assert payload["ok"] is True
-    assert payload["partial"] is False
-    assert payload["updated"] == list(updates)
-    assert len(rebuild_snapshots) == 1
-    assert rebuild_snapshots[0] == {
+    assert response.status_code == 400
+    assert payload["ok"] is False
+    assert "/api/embedding/migrate" in payload["error"]
+    assert payload["updated"] == []
+    assert rebuild_snapshots == []
+    assert persisted_configs == []
+    assert runtime_config["embedding"] == {
         "enabled": True,
-        "api_key": "new-key",
-        "api_format": "openai_compat",
-        "base_url": "https://api.siliconflow.cn/v1",
-        "model": "BAAI/bge-m3",
+        "api_key": "old-key",
+        "api_format": "ollama",
+        "base_url": "",
+        "model": "bge-m3",
     }
-    assert len(persisted_configs) == 1
-    assert persisted_configs[0]["embedding"]["api_key"] == "new-key"
-    assert persisted_configs[0]["embedding"]["base_url"] == updates[
-        "OMBRE_EMBED_BASE_URL"
-    ]
-    assert persisted_configs[0]["embedding"]["model"] == "BAAI/bge-m3"
-    assert persisted_configs[0]["embedding"]["api_format"] == "openai_compat"
 
 
 # ============================================================

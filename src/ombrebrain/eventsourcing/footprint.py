@@ -10,6 +10,28 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Iterable
 
+# Production E1/E2 used this module name for immutable create-time origin
+# receipts before upstream v3.6 introduced the event-history FootprintSnapshot.
+# Keep both contracts available; they are complementary and have disjoint names.
+from .origin_receipt import (  # noqa: F401
+    ALL_ACTOR_KINDS,
+    ALL_SURFACES,
+    ALL_VIA,
+    FIELD_NAMES,
+    KNOWN_CALLERS,
+    MCP_VIA,
+    ORIGIN_VIA_LABELS,
+    SCHEMA_VERSION,
+    FootprintOriginError,
+    cli_origin,
+    dashboard_letter_origin,
+    import_origin,
+    mcp_origin,
+    render_origin_line,
+    system_origin,
+    validate_origin,
+)
+
 
 _ARCHIVED_KINDS = {"archived", "deleted", "tombstone"}
 

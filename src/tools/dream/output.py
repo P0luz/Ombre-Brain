@@ -242,6 +242,7 @@ async def format_dream_output(
     connection_hint: str,
     crystal_hint: str,
     self_review: object | None = None,
+    core_context: list | None = None,
 ) -> str:
     runtime_config = rt.config if isinstance(rt.config, dict) else {}
     surfacing_cfg = runtime_config.get("surfacing", {}) or {}
@@ -382,6 +383,30 @@ async def format_dream_output(
         append_fragment(
             f"\n\n（另有 {recent_omitted} 条近期记忆因 dream 总预算未展开。）"
         )
+
+    # Production continuity: pinned/permanent memories remain visible as the
+    # dream's boundary and background, never as ordinary items to resolve.
+    core_context = core_context or []
+    if core_context:
+        core_prefix = (
+            "\n\n=== 核心准则参考 ===\n"
+            "这些是 pinned/permanent 桶，只作为梦里的边界与背景，不当作普通待消化事项。\n\n"
+        )
+        core_lines = []
+        for bucket in core_context:
+            meta = bucket.get("metadata") or {}
+            domains = ",".join(meta.get("domain") or [])
+            core_lines.append(
+                _bucket_data_block(
+                    bucket,
+                    display_prefix=(
+                        f"📌 [{bucket['id']}] {meta.get('name', bucket['id'])} "
+                        f"主题:{domains or '未分类'} 重要:{meta.get('importance', '?')}\n"
+                    ),
+                    footprint=_footprint(bucket),
+                )
+            )
+        append_fragment(core_prefix + "\n---\n".join(core_lines))
 
     # --- ② active plan 段 ---
     try:

@@ -132,7 +132,8 @@ def test_duplicate_candidate_path_aborts():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr(_TOP + "src/server.py", b"first")
-        zf.writestr(_TOP + "src/server.py", b"second")
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            zf.writestr(_TOP + "src/server.py", b"second")
     buf.seek(0)
 
     with zipfile.ZipFile(buf) as zf:
@@ -164,11 +165,68 @@ def test_manifest_rejects_non_object_items():
     assert plan["files"] == {}
 
 
+@pytest.mark.parametrize(
+    "entry, expected",
+    [
+        ({"path": "src/server.py", "size": 2}, "sha256"),
+        ({"path": "src/server.py", "sha256": "a" * 64}, "大小"),
+        ({"path": "src/server.py", "sha256": "not-a-digest", "size": 2}, "sha256"),
+        ({"path": "src/server.py", "sha256": "a" * 64, "size": -1}, "大小"),
+        ({"path": "src/server.py", "sha256": "a" * 64, "size": True}, "大小"),
+    ],
+)
+def test_manifest_requires_strict_size_and_sha256(entry, expected):
+    zf = _zip({
+        _TOP + "src/server.py": b"ok",
+        _TOP + "update_manifest.json": json.dumps({"files": [entry]}).encode(),
+    })
+
+    plan = meta._plan_update_files(zf, _TOP)
+
+    assert expected in plan["abort"]
+    assert plan["files"] == {}
+    assert plan["verified"] is False
+
+
+def test_manifest_rejects_case_insensitive_duplicate_entries():
+    body = b"ok"
+    digest = hashlib.sha256(body).hexdigest()
+    zf = _zip({
+        _TOP + "src/server.py": body,
+        _TOP + "update_manifest.json": json.dumps({
+            "files": [
+                {"path": "src/server.py", "sha256": digest, "size": len(body)},
+                {"path": "SRC/SERVER.PY", "sha256": digest, "size": len(body)},
+            ],
+        }).encode(),
+    })
+
+    plan = meta._plan_update_files(zf, _TOP)
+
+    assert "重复路径" in plan["abort"]
+    assert plan["files"] == {}
+
+
+def test_update_archive_rejects_case_insensitive_duplicate_members():
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, "w") as zf:
+        zf.writestr(_TOP + "src/server.py", b"first")
+        zf.writestr(_TOP + "src/Server.py", b"second")
+    buffer.seek(0)
+
+    with zipfile.ZipFile(buffer) as zf:
+        plan = meta._plan_update_files(zf, _TOP)
+
+    assert "重复路径" in plan["abort"]
+    assert plan["files"] == {}
+
+
 def test_bounded_zip_member_rejects_duplicate_root_file():
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as zf:
         zf.writestr(_TOP + "VERSION", b"1")
-        zf.writestr(_TOP + "VERSION", b"2")
+        with pytest.warns(UserWarning, match="Duplicate name"):
+            zf.writestr(_TOP + "VERSION", b"2")
     buf.seek(0)
 
     with zipfile.ZipFile(buf) as zf, pytest.raises(ValueError, match="重复路径"):
@@ -221,3 +279,68 @@ def test_atomic_update_write_replaces_complete_file(tmp_path):
 
     assert target.read_bytes() == b"new-complete"
     assert not list(target.parent.glob(".ob-update-*"))
+
+
+def test_apply_update_creates_regular_nested_target(tmp_path):
+    repo = tmp_path / "repo"
+    src = repo / "src"
+    frontend = repo / "frontend"
+    src.mkdir(parents=True)
+    plan = {"files": {"src/pkg/module.py": b"safe"}}
+
+    updated = meta._apply_update_files(
+        plan, str(repo), str(src), str(frontend), None
+    )
+
+    assert updated == 1
+    assert (src / "pkg" / "module.py").read_bytes() == b"safe"
+
+
+def test_apply_update_rejects_symlink_target_without_touching_referent(tmp_path):
+    repo = tmp_path / "repo"
+    src = repo / "src"
+    frontend = repo / "frontend"
+    src.mkdir(parents=True)
+    outside = tmp_path / "outside.py"
+    outside.write_bytes(b"outside-original")
+    target = src / "module.py"
+    try:
+        target.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前宿主不允许创建文件符号链接")
+
+    with pytest.raises(ValueError, match="更新目标不安全"):
+        meta._apply_update_files(
+            {"files": {"src/module.py": b"malicious"}},
+            str(repo),
+            str(src),
+            str(frontend),
+            None,
+        )
+
+    assert outside.read_bytes() == b"outside-original"
+
+
+def test_apply_update_rejects_symlink_parent_without_writing_outside(tmp_path):
+    repo = tmp_path / "repo"
+    src = repo / "src"
+    frontend = repo / "frontend"
+    src.mkdir(parents=True)
+    outside = tmp_path / "outside-dir"
+    outside.mkdir()
+    linked = src / "pkg"
+    try:
+        linked.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("当前宿主不允许创建目录符号链接")
+
+    with pytest.raises(ValueError, match="更新目标不安全"):
+        meta._apply_update_files(
+            {"files": {"src/pkg/module.py": b"malicious"}},
+            str(repo),
+            str(src),
+            str(frontend),
+            None,
+        )
+
+    assert not (outside / "module.py").exists()

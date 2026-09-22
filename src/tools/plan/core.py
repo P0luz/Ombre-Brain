@@ -29,13 +29,14 @@ import math
 from datetime import datetime, timezone
 from typing import Optional
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from .._common import (
     check_content_size,
     check_metadata_size,
     check_query_size,
 )
 from utils import strip_wikilinks, get_ai_name, get_owner_name, get_tzinfo, get_timezone_name
+from letter_display import format_letter_written_age
 from errors import ToolInputError, safe_error_detail
 # 锁语义 3.6.5 下沉到 ombrebrain/storage/letter_lock.py：you / them 的证据闸
 # 也要判「这封信对 AI 开没开」，而 ombrebrain 不能反向 import tools。
@@ -43,11 +44,11 @@ from errors import ToolInputError, safe_error_detail
 from ombrebrain.storage.letter_lock import (  # noqa: F401
     LETTER_LOCK_TYPES,
     is_letter_bucket,
-    letter_lock_state,
     normalize_lock_type,
 )
 
 
+LETTER_LOCK_PRINCIPALS = {"cheng", "huaiyin", "huaiyin_cc", "human"}
 PERMANENT_UNLOCK_DATE = "9999-12-31"
 _GENERIC_RELATION_NAMES = {
     "ai", "a.i.", "assistant", "claude", "bot", "model",
@@ -127,8 +128,110 @@ def letter_lock_revision(bucket: dict) -> tuple[str, str, str]:
     return (
         str(meta.get("lock_type") or "").strip().casefold(),
         str(meta.get("unlock_date") or "").strip(),
-        str(meta.get("locked_by") or "").strip().casefold(),
+        str(meta.get("locked_by_principal") or "").strip().casefold(),
     )
+
+
+def letter_lock_state(bucket: dict, caller_side: str | None, *, now: datetime | None = None) -> dict:
+    meta = bucket.get("metadata") or {}
+    legacy_side = str(meta.get("locked_by") or "").strip().lower()
+    legacy_side = {
+        "user": "human",
+        "human-side": "human",
+        "assistant": "ai",
+        "claude": "ai",
+        "ai-side": "ai",
+    }.get(legacy_side, legacy_side)
+    if "locked_by_principal" not in meta and legacy_side in {"human", "ai"}:
+        try:
+            legacy_type = normalize_lock_type(meta.get("lock_type", "none"))
+        except ValueError:
+            legacy_type = "unknown"
+        unlock_date = meta.get("unlock_date") or None
+        invalid_legacy = legacy_type == "unknown"
+        expired = False
+        if legacy_type == "timed":
+            try:
+                parsed = datetime.fromisoformat(str(unlock_date).replace("Z", "+00:00"))
+                if parsed.tzinfo is None or parsed.utcoffset() is None:
+                    parsed = parsed.replace(tzinfo=get_tzinfo())
+                expired = (now or datetime.now(timezone.utc)) >= parsed.astimezone(timezone.utc)
+            except (TypeError, ValueError, OverflowError):
+                invalid_legacy = True
+        effective = "unknown" if invalid_legacy else ("none" if expired else legacy_type)
+        owner = bool(caller_side and caller_side.strip().lower() == legacy_side)
+        return {
+            "lock_type": effective,
+            "stored_lock_type": legacy_type,
+            "unlock_date": None if expired else unlock_date,
+            "locked_by": legacy_side,
+            "owner": owner,
+            "locked": True if invalid_legacy else effective != "none" and not owner,
+            "expired": expired,
+            "invalid": invalid_legacy,
+        }
+    invalid = False
+    raw_lock_type = meta.get("lock_type")
+    has_lock_type = "lock_type" in meta
+    has_unlock_date = "unlock_date" in meta
+    has_locked_by = "locked_by_principal" in meta
+    typed_lock_tuple = (
+        (not has_lock_type or isinstance(raw_lock_type, str))
+        and (not has_unlock_date or isinstance(meta.get("unlock_date"), str))
+        and (not has_locked_by or isinstance(meta.get("locked_by_principal"), str))
+    )
+    partial_lock_tuple = (
+        (has_lock_type or has_unlock_date or has_locked_by) and not has_lock_type
+    )
+    try:
+        lock_type = normalize_lock_type(meta.get("lock_type", "none"))
+    except ValueError:
+        lock_type = "unknown"
+        invalid = True
+    unlock_date = meta.get("unlock_date") or None
+    locked_by = str(meta.get("locked_by_principal") or "").strip().lower() or None
+    if partial_lock_tuple or not typed_lock_tuple or (
+        has_lock_type and not raw_lock_type.strip()
+    ):
+        invalid = True
+    expired = False
+    if locked_by and locked_by not in LETTER_LOCK_PRINCIPALS:
+        invalid = True
+    if lock_type == "none" and has_lock_type and not locked_by:
+        invalid = True
+    if lock_type in {"timed", "permanent"} and not locked_by:
+        invalid = True
+    if lock_type == "none" and unlock_date:
+        invalid = True
+    elif lock_type == "permanent" and unlock_date != PERMANENT_UNLOCK_DATE:
+        invalid = True
+    elif lock_type == "timed" and not unlock_date:
+        invalid = True
+    elif lock_type == "timed":
+        try:
+            parsed = datetime.fromisoformat(str(unlock_date).replace("Z", "+00:00"))
+            if parsed.tzinfo is None or parsed.utcoffset() is None:
+                parsed = parsed.replace(tzinfo=get_tzinfo())
+            expired = (now or datetime.now(timezone.utc)) >= parsed.astimezone(
+                timezone.utc
+            )
+        except (TypeError, ValueError, OverflowError):
+            invalid = True
+    effective_type = "unknown" if invalid else ("none" if expired else lock_type)
+    owner = bool(
+        locked_by and caller_side and caller_side.strip().lower() == locked_by
+    )
+    locked = True if invalid else effective_type != "none" and not owner
+    return {
+        "lock_type": effective_type,
+        "stored_lock_type": lock_type,
+        "unlock_date": None if expired else unlock_date,
+        "locked_by": locked_by,
+        "owner": owner,
+        "locked": locked,
+        "expired": expired,
+        "invalid": invalid,
+    }
 
 
 async def normalize_expired_lock(
@@ -142,12 +245,16 @@ async def normalize_expired_lock(
         return bucket, state
     manager = bucket_mgr or rt.bucket_mgr
     try:
-        committed = await manager.update(
-            bucket["id"],
-            lock_type="none",
-            unlock_date=None,
-            expected_lock_state=letter_lock_revision(bucket),
-        )
+        owner = _identity.mutation_owner(bucket.get("metadata") or {})
+        with _identity.manager_mutation_guard(
+            manager, {bucket["id"]: owner}
+        ):
+            committed = await manager.update(
+                bucket["id"],
+                lock_type="none",
+                unlock_date=None,
+                expected_lock_state=letter_lock_revision(bucket),
+            )
         get_bucket = getattr(manager, "get", None)
         latest = await get_bucket(bucket["id"]) if callable(get_bucket) else None
     except Exception:
@@ -185,6 +292,17 @@ def safe_letter_metadata(bucket: dict, caller_side: str | None) -> dict:
         payload["title"] = meta.get("title", "") or meta.get("name", "")
         payload["content"] = strip_wikilinks(bucket.get("content", ""))
     return payload
+
+
+def safe_letter_payload(bucket: dict, state: dict) -> dict:
+    """Production dashboard's non-owner view of a locked Letter."""
+    return {
+        "letter_id": bucket.get("id", ""),
+        "created_at": (bucket.get("metadata") or {}).get("created", ""),
+        "lock_type": state.get("lock_type"),
+        "unlock_date": state.get("unlock_date"),
+        "locked": True,
+    }
 
 
 async def plan_create(
@@ -227,12 +345,32 @@ async def plan_create(
     if status not in ("active", "resolved", "abandoned"):
         status = "active"
 
+    caller = _identity.normalize_caller(_identity.get_caller())
+    origin = _identity.origin_for_mcp("plan", caller)
     norm = content.strip()
+    plan_tags = _identity.ensure_write_owner(["__plan__"], caller)
+    related_bucket = related_bucket.strip()
+    if related_bucket:
+        target = await rt.bucket_mgr.get(related_bucket)
+        if not target:
+            raise ToolInputError("related_bucket 不存在；本次未登记 plan。")
+        try:
+            _identity.mutation_owner(target.get("metadata") or {})
+        except ValueError as exc:
+            raise ToolInputError(str(exc)) from exc
+        if not _identity.owners_compatible(
+            target.get("metadata") or {}, plan_tags
+        ):
+            raise ToolInputError(
+                "related_bucket 与新 plan 的 owner 不一致；本次未登记 plan。"
+            )
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
         for b in all_buckets:
             m = b.get("metadata", {})
             if (
+                _identity.owners_compatible(m, plan_tags)
+                and
                 m.get("type") == "plan"
                 and m.get("status", "active") == "active"
                 and (b.get("content") or "").strip() == norm
@@ -243,7 +381,7 @@ async def plan_create(
 
     bucket_id = await rt.bucket_mgr.create(
         content=content.strip(),
-        tags=["__plan__"],
+        tags=plan_tags,
         importance=7,
         domain=["plan"],
         valence=0.5,
@@ -254,12 +392,13 @@ async def plan_create(
         weight=weight,
         source_tool="plan",
         event_actor="llm",
+        footprint_origin=origin,
     )
     from .._common import append_plan_change_log
     initial_log = append_plan_change_log([], "created", to=status, by="plan")
     update_kwargs = {"status": status, "change_log": initial_log}
-    if related_bucket.strip():
-        update_kwargs["related_bucket"] = related_bucket.strip()
+    if related_bucket:
+        update_kwargs["related_bucket"] = related_bucket
     try:
         await rt.bucket_mgr.update(bucket_id, **update_kwargs)
     except Exception as e:
@@ -352,9 +491,13 @@ async def letter_write(
     if writer_name:
         extra_meta["writer_name"] = writer_name
 
+    caller = _identity.normalize_caller(_identity.get_caller())
+    if not caller:
+        raise ValueError("recognized MCP caller is required for footprint origin")
+    letter_tags = _identity.ensure_write_owner(["__letter__"], caller)
     bucket_id = await rt.bucket_mgr.create(
         content=content.strip(),
-        tags=["__letter__"],
+        tags=letter_tags,
         importance=10,
         domain=["letter"],
         valence=0.5,
@@ -367,6 +510,8 @@ async def letter_write(
         unlock_date=normalized_unlock,
         locked_by="ai",
         writer_name=writer_name or "",
+        locked_by_principal=caller,
+        footprint_origin=_identity.origin_for_mcp("letter", caller),
     )
     try:
         await rt.bucket_mgr.update(bucket_id, **extra_meta)
@@ -400,12 +545,23 @@ async def letter_lock_update(
     bucket = await rt.bucket_mgr.get(letter_id.strip())
     if not bucket or not is_letter_bucket(bucket):
         raise ToolInputError("未找到该 Letter")
-    state = letter_lock_state(bucket, caller_side)
+    try:
+        owner = _identity.mutation_owner(bucket.get("metadata") or {})
+    except ValueError as exc:
+        raise ToolInputError(str(exc)) from exc
+    meta = bucket.get("metadata") or {}
+    # Principal-bound locks use the authenticated MCP identity.  The logical
+    # side remains the compatibility identity for legacy pre-principal locks.
+    lock_identity = (
+        _identity.normalize_caller(_identity.get_caller())
+        if "locked_by_principal" in meta
+        else caller_side
+    )
+    state = letter_lock_state(bucket, lock_identity)
     if not state["locked_by"]:
         raise ToolInputError("历史无锁 Letter 没有锁所有者，不能通过锁管理入口补设锁。请新写一封带锁 Letter。")
     if not state["owner"]:
         raise ToolInputError("只有创建这把锁的一方可以修改 Letter 锁状态。")
-    meta = bucket.get("metadata") or {}
     claimed_side = author_side(meta.get("author"))
     legacy_ai_conversion = (
         meta.get("lock_owner_source") == "legacy_ai_conversion"
@@ -426,11 +582,14 @@ async def letter_lock_update(
         "unlock_date": normalized_unlock,
     }
     expected_lock_state = letter_lock_revision(bucket)
-    ok = await rt.bucket_mgr.update(
-        bucket["id"],
-        expected_lock_state=expected_lock_state,
-        **updates,
-    )
+    with _identity.manager_mutation_guard(
+        rt.bucket_mgr, {bucket["id"]: owner}
+    ):
+        ok = await rt.bucket_mgr.update(
+            bucket["id"],
+            expected_lock_state=expected_lock_state,
+            **updates,
+        )
     if not ok:
         latest = await rt.bucket_mgr.get(bucket["id"])
         if latest and letter_lock_revision(latest) != expected_lock_state:
@@ -477,13 +636,19 @@ async def letter_read(
         limit = 10
     try:
         all_b = await rt.bucket_mgr.list_all(include_archive=False)
+        all_b = [bucket for bucket in all_b if _identity.admitted_mutation(bucket)]
     except Exception as e:
         raise ToolInputError(f"读取信件失败: {safe_error_detail(e)}")
     normalized_letters = []
     states = {}
+    caller = _identity.normalize_caller(_identity.get_caller())
     for bucket in (b for b in all_b if is_letter_bucket(b)):
-        state = letter_lock_state(bucket, "ai")
-        bucket, state = await normalize_expired_lock(bucket, state, "ai")
+        meta = bucket.get("metadata") or {}
+        lock_identity = caller if "locked_by_principal" in meta else "ai"
+        state = letter_lock_state(bucket, lock_identity)
+        bucket, state = await normalize_expired_lock(
+            bucket, state, lock_identity
+        )
         if not bucket:
             continue
         normalized_letters.append(bucket)
@@ -588,7 +753,7 @@ async def letter_read(
             parts.append(json.dumps(safe, ensure_ascii=False, separators=(",", ":")))
             continue
         a = m.get("author", "?")
-        d = (m.get("letter_date") or m.get("created", ""))[:10]
+        d = format_letter_written_age(m)
         title = m.get("title") or m.get("name", "")
         payload = (
             f"[{b['id']}] {a} · {d}{(' · ' + title) if title else ''}\n"

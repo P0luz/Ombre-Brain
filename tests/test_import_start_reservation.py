@@ -8,7 +8,15 @@ import pytest
 
 import import_memory as import_memory_module
 from import_memory import ImportEngine
+from ombrebrain.eventsourcing.footprint import import_origin
 from web import import_api
+
+
+def _trusted_import_kwargs() -> dict:
+    return {
+        "owner": "cheng",
+        "footprint_origin": import_origin("mcp_tool", "cheng"),
+    }
 
 
 class FakeMCP:
@@ -51,7 +59,7 @@ class BodyRequest:
 
     def __init__(self, body: str, filename: str = "upload.md"):
         self._body = body.encode("utf-8")
-        self.query_params = {"filename": filename}
+        self.query_params = {"filename": filename, "owner": "cheng"}
 
     async def body(self):
         return self._body
@@ -79,11 +87,15 @@ async def test_import_engine_concurrent_starts_have_one_owner(tmp_path):
     )
     raw = "Human: first request\nAssistant: acknowledged"
 
-    first_task = asyncio.create_task(engine.start(raw, filename="first.md"))
+    first_task = asyncio.create_task(
+        engine.start(raw, filename="first.md", **_trusted_import_kwargs())
+    )
     await asyncio.wait_for(dehydrator.entered.wait(), timeout=2)
     first_job_id = engine.active_job_id
 
-    rejected = await engine.start(raw, filename="second.md")
+    rejected = await engine.start(
+        raw, filename="second.md", **_trusted_import_kwargs()
+    )
 
     assert rejected == {
         "error": "Import already running",
@@ -179,7 +191,11 @@ async def test_start_exception_releases_reservation_for_next_job(tmp_path, monke
 
     monkeypatch.setattr(import_memory_module, "detect_and_parse", fail_parse)
     with pytest.raises(RuntimeError, match="synthetic parse failure"):
-        await engine.start("Human: broken", filename="broken.md")
+        await engine.start(
+            "Human: broken",
+            filename="broken.md",
+            **_trusted_import_kwargs(),
+        )
 
     assert engine.is_running is False
     assert engine.active_job_id == ""
@@ -190,6 +206,7 @@ async def test_start_exception_releases_reservation_for_next_job(tmp_path, monke
     completed = await engine.start(
         "Human: recovered\nAssistant: ready",
         filename="recovered.md",
+        **_trusted_import_kwargs(),
     )
     assert completed["status"] == "completed"
     assert engine.is_running is False
@@ -224,7 +241,9 @@ async def test_pause_then_resume_uses_a_new_reservation(tmp_path, monkeypatch):
     )
     raw = "Human: pause me\nAssistant: okay"
 
-    first_task = asyncio.create_task(engine.start(raw, filename="pause.md"))
+    first_task = asyncio.create_task(
+        engine.start(raw, filename="pause.md", **_trusted_import_kwargs())
+    )
     await asyncio.wait_for(dehydrator.entered.wait(), timeout=2)
     first_job_id = engine.active_job_id
     engine.pause()
@@ -237,7 +256,12 @@ async def test_pause_then_resume_uses_a_new_reservation(tmp_path, monkeypatch):
     assert engine.is_running is False
     assert engine._chunks == chunks
 
-    resumed = await engine.start(raw, filename="pause.md", resume=True)
+    resumed = await engine.start(
+        raw,
+        filename="pause.md",
+        resume=True,
+        **_trusted_import_kwargs(),
+    )
     assert resumed["status"] == "completed"
     assert resumed["processed"] == 2
     assert resumed["job_id"] != first_job_id
@@ -255,8 +279,8 @@ async def test_upload_schedule_failure_releases_reservation(tmp_path, monkeypatc
     monkeypatch.setattr(import_api.sh, "_require_auth", lambda _request: None)
     monkeypatch.setattr(import_api.sh, "import_engine", engine, raising=False)
     monkeypatch.setattr(
-        import_api.asyncio,
-        "create_task",
+        import_api,
+        "spawn_background",
         lambda _coro: (_ for _ in ()).throw(RuntimeError("scheduler unavailable")),
     )
     mcp = FakeMCP()
@@ -313,7 +337,11 @@ async def test_cancelled_parser_is_reaped_and_persisted_as_error(tmp_path, monke
 
     monkeypatch.setattr(import_memory_module, "_prepare_import", blocking_prepare)
     task = asyncio.create_task(
-        engine.start("Human: wait", filename="wait.md")
+        engine.start(
+            "Human: wait",
+            filename="wait.md",
+            **_trusted_import_kwargs(),
+        )
     )
     while not entered.is_set():
         await asyncio.sleep(0)

@@ -25,7 +25,7 @@ async def test_semantically_relevant_bucket_is_found_without_any_keyword(
     真实例子：「上线成功那一刻的踏实感，记一笔。」——十几个字、没有"工作"
     二字，但任何人都同意它属于「我的工作」。关键词检索永远够不到它。
     """
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="上线成功那一刻的踏实感，记一笔。",
         importance=5,
     )
@@ -51,7 +51,7 @@ async def test_below_threshold_semantic_alone_does_not_enter(bucket_mgr, monkeyp
     门要真的是门。0.45 那档实测每查询涌进 170 条、双通道印证率只剩 60%，
     那是拿噪音换召回。
     """
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content="完全无关的一条记忆，只有微弱的语义相似。",
         importance=5,
     )

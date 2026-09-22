@@ -29,6 +29,7 @@ bucket_manager.py — 记忆桶的增删改查与多维索引
 import os
 import re
 import asyncio
+import contextvars
 import errno
 import hashlib
 import json
@@ -38,11 +39,15 @@ import threading
 import time
 import tempfile
 import uuid
-from contextlib import asynccontextmanager
+from contextlib import asynccontextmanager, contextmanager
 from datetime import datetime
 
 from ombrebrain.domain.plan_history import append_plan_change_log
-from ombrebrain.eventsourcing.footprint import FootprintSnapshot
+from ombrebrain.eventsourcing.footprint import (
+    FootprintSnapshot,
+    system_origin,
+    validate_origin,
+)
 
 # 统一错误体系：越界 clamp 时上报 OB-W001/OB-W002（rule.md §11）
 try:
@@ -335,6 +340,19 @@ from ombrebrain.projection.projection_mirror import TraceCatalogProjection
 from ombrebrain.projection.projection_sqlite import TraceSQLiteProjection
 from ombrebrain.projection.projection_vector import TraceVectorProjectionManifest
 from ombrebrain.policy.formal_invariants import FormalInvariantChecker
+from snapshot_barrier import markdown_writer_turn
+from runtime_owner import spawn_background
+from embedding_outbox import (
+    OP_UPSERT,
+    STATE_CONFLICT,
+    STATE_READY,
+    content_sha256,
+    load_slot,
+    mark_applied,
+    prepare_upsert,
+    recover_intent,
+    transition_intent,
+)
 
 
 def _letter_lock_revision(metadata: Any) -> tuple[str, str, str]:
@@ -343,7 +361,7 @@ def _letter_lock_revision(metadata: Any) -> tuple[str, str, str]:
     return (
         str(metadata.get("lock_type") or "").strip().casefold(),
         str(metadata.get("unlock_date") or "").strip(),
-        str(metadata.get("locked_by") or "").strip().casefold(),
+        str(metadata.get("locked_by_principal") or "").strip().casefold(),
     )
 
 
@@ -468,8 +486,15 @@ _METADATA_TEXT_LIMITS = {
 
 # --- _time_ripple：时间涾漪 ---
 _RIPPLE_HOURS = 48.0       # ±该小时内的桶被轻微唤醒
+_LIFECYCLE_ABSENT = "__absent__"
 _RIPPLE_MAX_BUCKETS = 5    # 一次 touch 最多唤醒几个邻居（有界 I/O）
 _RIPPLE_BOOST = 0.3        # 唤醒时 activation_count 增量
+_RIPPLE_ADMISSION: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "ombre_ripple_admission", default=None
+)
+_MUTATION_ADMISSION: contextvars.ContextVar[Any] = contextvars.ContextVar(
+    "ombre_mutation_admission", default=None
+)
 _MAX_METADATA_DEPTH = 16
 _MAX_METADATA_NODES = 10_000
 
@@ -587,6 +612,17 @@ class BucketManager:
         # --- Optional embedding engine for pre-filtering / 可选 embedding 引擎，用于预筛候选集 ---
         self.embedding_engine = embedding_engine
         self.embedding_outbox = None
+        m05_cfg = config.get("m05_embedding_outbox", {}) or {}
+        self.embedding_outbox_root = (
+            os.path.abspath(
+                os.fspath(
+                    m05_cfg.get("root")
+                    or os.path.join(self.base_dir, ".embedding-outbox")
+                )
+            )
+            if bool(m05_cfg.get("enabled", False))
+            else ""
+        )
         ledger_path = config.get("ledger_path") or os.path.join(
             self.base_dir, "_ledger", "events.jsonl"
         )
@@ -1012,6 +1048,60 @@ class BucketManager:
                 bucket_id,
             )
 
+    async def sync_embedding_after_commit(self, bucket_id: str) -> bool:
+        """Converge derived indexing to the latest durable Markdown.
+
+        M-04 callers invoke this only after releasing their content, quota,
+        bucket, and global Markdown-writer turns.  Re-reading here prevents a
+        prepared merge from indexing stale text when another writer commits
+        between selection and the post-commit provider phase.
+        """
+        bucket = await self.get(bucket_id)
+        if not bucket:
+            return False
+        content = str(bucket.get("content") or "")
+        if not content.strip():
+            return True
+        if self.embedding_outbox_root:
+            intent = await asyncio.to_thread(
+                load_slot, self.embedding_outbox_root, bucket_id
+            )
+            if intent is not None and intent.state == STATE_READY:
+                if (
+                    intent.operation != OP_UPSERT
+                    or intent.target_sha256 != content_sha256(content)
+                ):
+                    await asyncio.to_thread(
+                        transition_intent,
+                        self.embedding_outbox_root,
+                        intent,
+                        STATE_CONFLICT,
+                    )
+                    return False
+            await self._sync_embedding(bucket_id, content)
+            if intent is not None and intent.state == STATE_READY:
+                current = await self.get(bucket_id)
+                current_content = (
+                    None if current is None else str(current.get("content") or "")
+                )
+                if (
+                    current_content is None
+                    or content_sha256(current_content) != intent.target_sha256
+                ):
+                    await asyncio.to_thread(
+                        transition_intent,
+                        self.embedding_outbox_root,
+                        intent,
+                        STATE_CONFLICT,
+                    )
+                    return False
+                await asyncio.to_thread(
+                    mark_applied, self.embedding_outbox_root, intent
+                )
+            return True
+        await self._index_after_write(bucket_id, content)
+        return True
+
     async def _index_after_update(
         self,
         bucket_id: str,
@@ -1364,7 +1454,37 @@ class BucketManager:
     # Write content and metadata into a .md file
     # 将内容和元数据写入一个 .md 文件
     # ---------------------------------------------------------
-    async def create(
+    async def create(self, *args, **kwargs) -> str:
+        gate_held = bool(kwargs.pop("_m04_gate_held", False))
+        defer_requested = bool(kwargs.get("defer_derived_index", False))
+        if "defer_embedding" in kwargs:
+            defer_requested = bool(kwargs.pop("defer_embedding"))
+        meaning_changed = bool(kwargs.get("meaning"))
+        # Markdown publication is the only work inside the global writer gate.
+        # Provider/index work runs after release so an exclusive snapshot can
+        # never deadlock with an embedding callback.
+        kwargs["defer_derived_index"] = True
+        if gate_held:
+            bucket_id = await self._create_ungated(*args, **kwargs)
+        else:
+            async with markdown_writer_turn(self.base_dir):
+                bucket_id = await self._create_ungated(*args, **kwargs)
+        if not defer_requested:
+            if self.embedding_outbox_root:
+                synced = await self.sync_embedding_after_commit(bucket_id)
+                if not synced:
+                    raise RuntimeError(
+                        "authoritative Markdown changed before create embedding sync"
+                    )
+            else:
+                await self._index_after_update(
+                    bucket_id,
+                    content_changed=True,
+                    meaning_changed=meaning_changed,
+                )
+        return bucket_id
+
+    async def _create_ungated(
         self,
         content: str,
         tags: Optional[list[str]] = None,
@@ -1395,7 +1515,9 @@ class BucketManager:
         lock_type: str = "",
         unlock_date: str | None = None,
         locked_by: str = "",
+        locked_by_principal: str = "",
         writer_name: str = "",
+        footprint_origin: Optional[dict[str, Any]] = None,
     ) -> str:
         """
         Create a new memory bucket, return bucket ID.
@@ -1416,6 +1538,11 @@ class BucketManager:
         - imported=True: 对话导入桶的持久化来源标记；创建时间与最后活跃时间
           均使用本次导入时刻。
         """
+        # Public writes must carry an authenticated, validated receipt.  Trusted
+        # maintenance code uses ``create_internal`` so a missing caller cannot
+        # be silently relabelled as the system actor.
+        canonical_origin = validate_origin(footprint_origin)
+
         # 保留 ``allow_embedding_fallback`` 以兼容旧调用；所有记忆类型均先写入，
         # embedding 只是可重建的派生索引。
         pinned = parse_bool(pinned, default=False)
@@ -1488,6 +1615,7 @@ class BucketManager:
             "created": created_at,
             "last_active": created_at,
             "activation_count": 0,
+            "footprint_origin": canonical_origin,
         }
         if title:
             metadata["title"] = title
@@ -1499,6 +1627,10 @@ class BucketManager:
             if unlock_date:
                 metadata["unlock_date"] = str(unlock_date)[:64]
             metadata["locked_by"] = str(locked_by)[:16]
+            if locked_by_principal:
+                metadata["locked_by_principal"] = str(
+                    locked_by_principal
+                ).strip().casefold()[:64]
             if writer_name:
                 metadata["writer_name"] = self._sanitize_text(
                     str(writer_name)
@@ -1651,6 +1783,15 @@ class BucketManager:
                     linked_content,
                     **metadata,
                 )
+                intent = None
+                if self.embedding_outbox_root:
+                    intent = await asyncio.to_thread(
+                        prepare_upsert,
+                        self.embedding_outbox_root,
+                        bucket_id,
+                        None,
+                        linked_content,
+                    )
                 try:
                     # Publish the file and its ID lookup entry under the same
                     # path-index guard.  The collision check above can leave a
@@ -1664,12 +1805,26 @@ class BucketManager:
                         )
                         self._bucket_path_index[bucket_id] = candidate_path
                 except FileExistsError:
+                    if intent is not None:
+                        await asyncio.to_thread(
+                            recover_intent,
+                            self.embedding_outbox_root,
+                            intent,
+                            None,
+                        )
                     # An unmanaged writer may not honor the bucket turn.  The
                     # no-overwrite publish still protects its file; choose a
                     # fresh ID instead of replacing it.
                     collision_count += 1
                     continue
                 except OSError as e:
+                    if intent is not None:
+                        await asyncio.to_thread(
+                            recover_intent,
+                            self.embedding_outbox_root,
+                            intent,
+                            None,
+                        )
                     logger.error(
                         "Failed to write bucket file / 写入桶文件失败: "
                         "%s: %s",
@@ -1677,6 +1832,17 @@ class BucketManager:
                         e,
                     )
                     raise
+                if intent is not None:
+                    ready = await asyncio.to_thread(
+                        recover_intent,
+                        self.embedding_outbox_root,
+                        intent,
+                        linked_content,
+                    )
+                    if ready.state != STATE_READY:
+                        raise RuntimeError(
+                            "create embedding intent did not become READY"
+                        )
                 break
 
         # 不在 bucket lease 内等待全局 outbox 文件事务。async context 退出后到
@@ -1730,6 +1896,16 @@ class BucketManager:
             {"event_actor": str(event_actor or "system").strip().lower()},
         )
         return bucket_id
+
+    async def create_internal(self, *args, **kwargs) -> str:
+        """Trusted in-process creation with an explicit system receipt."""
+        if "footprint_origin" in kwargs:
+            raise ValueError("create_internal constructs its own system origin")
+        return await self.create(
+            *args,
+            **kwargs,
+            footprint_origin=system_origin(),
+        )
 
     # ---------------------------------------------------------
     # Read bucket content
@@ -2027,6 +2203,30 @@ class BucketManager:
 
         return {"buckets_changed": changed, "replacements": total}
 
+    @contextmanager
+    def mutation_admission(self, predicate: Any):
+        """Apply one request-local owner predicate inside locked mutations."""
+        token = _MUTATION_ADMISSION.set(predicate)
+        try:
+            yield
+        finally:
+            _MUTATION_ADMISSION.reset(token)
+
+    @staticmethod
+    def _mutation_allowed(bucket_id: str, post: Any) -> bool:
+        predicate = _MUTATION_ADMISSION.get()
+        if not callable(predicate):
+            return True
+        bucket = {
+            "id": str(bucket_id or post.get("id") or ""),
+            "content": post.content or "",
+            "metadata": dict(post.metadata),
+        }
+        try:
+            return bool(predicate(bucket))
+        except Exception:
+            return False
+
     async def update_content_fragment(
         self,
         bucket_id: str,
@@ -2163,7 +2363,13 @@ class BucketManager:
     # 更新桶
     # Supports: content, tags, importance, valence, arousal, name, resolved
     # ---------------------------------------------------------
-    async def update(
+    async def update(self, *args, **kwargs) -> bool:
+        if "footprint_origin" in kwargs:
+            raise ValueError("footprint_origin is immutable")
+        async with markdown_writer_turn(self.base_dir):
+            return await self._update_ungated(*args, **kwargs)
+
+    async def _update_ungated(
         self,
         bucket_id: str,
         *,
@@ -2204,6 +2410,44 @@ class BucketManager:
             )
         return committed
 
+    async def mutate_source_links(self, bucket_id: str, mutation: Any) -> Any:
+        """Atomically change evidence bindings only, including archived buckets.
+
+        The callback receives the loaded frontmatter post and returns
+        ``(changed, result)``.  This deliberately bypasses normal update()
+        lifecycle/recency behaviour while retaining the per-bucket write turn.
+        """
+        async with self._bucket_turn(bucket_id):
+            file_path = self._find_bucket_file(bucket_id)
+            if not file_path:
+                return None
+            try:
+                post = frontmatter.load(file_path)
+            except Exception:
+                return None
+            if not self._mutation_allowed(bucket_id, post):
+                return None
+            changed, result = mutation(post)
+            if changed:
+                _atomic_write_text(file_path, frontmatter.dumps(post))
+            return result
+
+    async def mutate_relation_links(self, bucket_id: str, mutation: Any) -> Any:
+        """Atomically change one Relation ledger only; never touch derived state."""
+        async with self._bucket_turn(bucket_id):
+            file_path = self._find_bucket_file(bucket_id)
+            if not file_path:
+                return None
+            try:
+                post = frontmatter.load(file_path)
+            except Exception:
+                return None
+            if not self._mutation_allowed(bucket_id, post):
+                return None
+            changed, result = mutation(post)
+            if changed:
+                _atomic_write_text(file_path, frontmatter.dumps(post))
+            return result
     async def mutate_relation_pair(
         self,
         left_bucket_id: str,
@@ -2235,6 +2479,10 @@ class BucketManager:
                     right_post = frontmatter.load(right_path)
                 except Exception:
                     return None
+                if not self._mutation_allowed(
+                    left_bucket_id, left_post
+                ) or not self._mutation_allowed(right_bucket_id, right_post):
+                    return None
 
                 left_before = frontmatter.dumps(left_post)
                 right_before = frontmatter.dumps(right_post)
@@ -2263,13 +2511,15 @@ class BucketManager:
         self,
         bucket_id: str,
         *,
-        _derived_state_out: dict[str, Any],
+        _derived_state_out: Optional[dict[str, Any]] = None,
         allow_embedding_fallback: bool = False,
         bump_active: bool = False,
         event_actor: str = "system",
         expected_lock_state: Optional[tuple[str, str, str]] = None,
         **kwargs,
     ) -> bool:
+        if _derived_state_out is None:
+            _derived_state_out = {}
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
             return False
@@ -2304,16 +2554,6 @@ class BucketManager:
                 max_items=_MAX_DOMAINS,
                 max_chars=_MAX_DOMAIN_CHARS,
             ) or [_DEFAULT_DOMAIN_NAME]
-        if "media" in kwargs:
-            # Miss: media 是整体覆盖写入（trace 的 media_replace）。传空列表即清空该字段。
-            kwargs["media"] = self._normalize_media(
-                await self.media_store.persist(bucket_id, kwargs["media"])
-            )
-        if "media_append" in kwargs:
-            # Miss: media_append 是追加写入（trace 的 media_append / hold 每次调用）。
-            kwargs["media_append"] = self._normalize_media(
-                await self.media_store.persist(bucket_id, kwargs["media_append"])
-            )
         if "meaning" in kwargs:
             # Miss: meaning 整体覆盖写入（trace 的 meaning_replace，用于纠错/清理）。
             kwargs["meaning"] = self._normalize_meaning_list(kwargs["meaning"])
@@ -2341,6 +2581,9 @@ class BucketManager:
             post = frontmatter.load(file_path)
         except Exception as e:
             logger.warning(f"Failed to load bucket for update / 加载桶失败: {file_path}: {e}")
+            return False
+        if not self._mutation_allowed(bucket_id, post):
+            logger.warning("update() rejected mutation admission: %s", bucket_id)
             return False
 
         if (
@@ -2395,6 +2638,16 @@ class BucketManager:
                 bucket_id,
             )
             return False
+        if will_be_anchor and not was_anchor:
+            current_anchor_count = await self.count_anchors()
+            if current_anchor_count >= self.ANCHOR_LIMIT:
+                logger.warning(
+                    "update() rejected anchor=True: limit=%s current=%s bucket=%s",
+                    self.ANCHOR_LIMIT,
+                    current_anchor_count,
+                    bucket_id,
+                )
+                return False
 
         requested_type: str | None = None
         explicit_type_requested = "type" in kwargs
@@ -2449,6 +2702,19 @@ class BucketManager:
         # 解除最后一层保护，则允许恢复调用方显式选择的动态 importance。
         if will_be_pinned or will_be_protected:
             kwargs.pop("importance", None)
+
+        # Durable media sidecars must not be created until the bucket has been
+        # reloaded and admitted under its lock.  Otherwise a rejected owner or
+        # stale Letter lock could leave files behind even though Markdown did
+        # not change.
+        if "media" in kwargs:
+            kwargs["media"] = self._normalize_media(
+                await self.media_store.persist(bucket_id, kwargs["media"])
+            )
+        if "media_append" in kwargs:
+            kwargs["media_append"] = self._normalize_media(
+                await self.media_store.persist(bucket_id, kwargs["media_append"])
+            )
 
         # --- Update only fields that were passed in / 只改传入的字段 ---
         if "content" in kwargs:
@@ -2565,6 +2831,9 @@ class BucketManager:
                   # _pre_anchor_source_tool 是 anchor 时保存的原始 source_tool，
                   # release 时自动恢复；None 表示删除该字段。
                   "source_tool", "grow_batch_id", "last_merged_by", "_pre_anchor_source_tool",
+                  # Fire-and-forget duplicate detection writes one symmetric
+                  # candidate pointer and score to each bucket.
+                  "dup_candidate", "dup_score",
                   # I 沉淀机制字段（tools/i/core.py 维护，bucket_manager 不生成也不解读）：
                   # i_stage        "candidate" | "promoted"，标一条普通记忆是 I 候选
                   # i_dream_dates  被 dream 见证过的日期列表（按天去重），升级门槛的唯一依据
@@ -2580,23 +2849,7 @@ class BucketManager:
                     post[k] = kwargs[k]
                 elif k == "anchor":
                     # iter 2.0: anchor 是布尔；False 时直接删除字段保持 frontmatter 干净。
-                    # 修复：透传路径之前会绕过 ANCHOR_LIMIT，导致批量脚本/前端直接 update(anchor=True)
-                    # 可以让 anchor 总数突破 24 上限。这里补一道校验：
-                    # 仅当从 False→True 切换时才计数；当前已是 anchor 的桶重复设置不计数。
                     if kwargs[k]:
-                        already_anchor = parse_bool(
-                            post.get("anchor", False), default=False
-                        )
-                        if not already_anchor:
-                            # FIX (RED-02): count_anchors 是 async，必须 await，否则
-                            # `coroutine >= int` 会 TypeError，整个上限校验失效。
-                            current = await self.count_anchors()
-                            if current >= self.ANCHOR_LIMIT:
-                                logger.warning(
-                                    f"update() 拒绝 anchor=True：已达上限 "
-                                    f"{self.ANCHOR_LIMIT}（当前 {current}）。bucket={bucket_id}"
-                                )
-                                return False
                         post["anchor"] = True
                     else:
                         post.metadata.pop("anchor", None)
@@ -2716,6 +2969,8 @@ class BucketManager:
             post = frontmatter.load(file_path)
         except Exception as exc:
             return {"ok": False, "error": f"read_failed: {exc}"}
+        if not self._mutation_allowed(bucket_id, post):
+            return {"ok": False, "error": "mutation_not_authorized"}
         provenance = post.get("provenance")
         if not (isinstance(provenance, dict)
                 and provenance.get("kind") == "test"
@@ -2756,13 +3011,32 @@ class BucketManager:
     # 删除桶
     # ---------------------------------------------------------
     async def delete(self, bucket_id: str) -> bool:
+        lifecycle_path = self._find_bucket_file(bucket_id)
+        lifecycle_revision = (
+            self._lifecycle_revision(lifecycle_path)
+            if lifecycle_path else _LIFECYCLE_ABSENT
+        )
+        async with markdown_writer_turn(self.base_dir):
+            return await self._delete_ungated(
+                bucket_id,
+                expected_lifecycle_revision=lifecycle_revision,
+            )
+
+    async def _delete_ungated(
+        self,
+        bucket_id: str,
+        expected_lifecycle_revision: str | None = None,
+    ) -> bool:
         """
         Soft-delete a memory bucket: move to archive/ and stamp `deleted_at`.
         F-10: 记忆不消失，只是淡去。不做物理删除，将文件移入 archive/
         并在 frontmatter 中写入 deleted_at 时间戳；embedding 仍清理以节省空间。
         """
         async with self._bucket_turn(bucket_id):
-            deleted = await self._delete_locked(bucket_id)
+            deleted = await self._delete_locked(
+                bucket_id,
+                expected_lifecycle_revision=expected_lifecycle_revision,
+            )
         if deleted:
             await self._discard_derived_index_if_terminal(bucket_id)
         return deleted
@@ -2787,6 +3061,8 @@ class BucketManager:
                 post = frontmatter.load(file_path)
             except Exception as exc:
                 return {"ok": False, "error": f"read_failed: {exc}"}
+            if not self._mutation_allowed(bucket_id, post):
+                return {"ok": False, "error": "mutation_not_authorized"}
 
             normalized_path = os.path.normcase(os.path.abspath(file_path))
             normalized_archive = os.path.normcase(os.path.abspath(self.archive_dir))
@@ -2909,8 +3185,6 @@ class BucketManager:
         )
         return result
 
-    _path_is_within = staticmethod(_bp.path_is_within)
-
     def _physical_bucket_sources(self, bucket_id: str) -> tuple[list[tuple[str, Any]], bool]:
         """绕过路径缓存，枚举同一 ID 的全部 Markdown 物理真源。
 
@@ -2936,169 +3210,72 @@ class BucketManager:
                 sources.append((file_path, post))
         return sources, unreadable_candidate
 
-    _has_strong_letter_marker = staticmethod(_bp.has_strong_letter_marker)
-
-    _has_ambiguous_letter_marker = staticmethod(_bp.has_ambiguous_letter_marker)
+    @staticmethod
+    def _file_identity(st: os.stat_result) -> tuple[int, int, int, int]:
+        return (int(st.st_dev), int(st.st_ino), int(st.st_size), int(st.st_mtime_ns))
 
     @staticmethod
-    def _archived_letter_rejection(post: Any) -> str:
-        """返回专用迁移的拒绝原因；空串代表可继续校验物理位置。"""
-        if any(post.get(field) for field in _ARCHIVED_LETTER_TERMINAL_VALUE_FIELDS):
-            return "terminal_state"
-        if any(
-            parse_bool(post.get(field), default=False)
-            for field in _ARCHIVED_LETTER_TERMINAL_BOOL_FIELDS
-        ):
-            return "terminal_state"
-        if str(post.get("status") or "").strip().casefold() in {
-            "deleted",
-            "tombstone",
-            "erased",
-        }:
-            return "terminal_state"
-        if any(
-            parse_bool(post.get(field), default=False)
-            for field in ("pinned", "protected", "anchor")
-        ):
-            return "protected_state"
-        if not BucketManager._has_strong_letter_marker(post):
-            if BucketManager._has_ambiguous_letter_marker(post):
-                return "ambiguous_letter_marker"
-            return "not_letter"
-        return ""
+    def _lifecycle_revision(path: str) -> str:
+        raw = Path(path).read_bytes()
+        identity = BucketManager._file_identity(os.stat(path, follow_symlinks=False))
+        material = json.dumps(identity, separators=(",", ":")).encode("ascii") + b"\0" + raw
+        return hashlib.sha256(material).hexdigest()
 
-    async def recover_archived_letter(self, bucket_id: str) -> dict:
-        """把误归档的历史 Letter 原子迁回 Letter 存储树。
+    async def recover_archived_letter(
+        self, bucket_id: str, expected_revision: str | None = None
+    ) -> dict:
+        from historical_letter_restore import recover_archived_letter
 
-        这是一次性兼容迁移原语，不是普通归档恢复：它只接受 archive 中
-        ``type=archived`` 且带 ``source_tool=letter`` 或 ``__letter__`` 的唯一
-        物理真源。删除终态与 pinned/protected/anchor 状态一律拒绝；正文、
-        时间、作者和时间锁字段原样保留，且不会刷新 ``last_active``。
-        """
-        normalized_id = str(bucket_id or "").strip()
-        if not normalized_id:
-            return {"ok": False, "id": "", "reason": "invalid_id"}
-
-        derived_state: dict[str, Any] | None = None
-        async with self._bucket_turn(normalized_id):
-            sources, unreadable_candidate = self._physical_bucket_sources(normalized_id)
-            if unreadable_candidate:
-                return {
-                    "ok": False,
-                    "id": normalized_id,
-                    "reason": "unreadable_source",
-                }
-            if not sources:
-                return {"ok": False, "id": normalized_id, "reason": "not_found"}
-            if len(sources) != 1:
-                return {
-                    "ok": False,
-                    "id": normalized_id,
-                    "reason": "duplicate_source",
-                }
-
-            file_path, post = sources[0]
-            rejection = self._archived_letter_rejection(post)
-            if rejection:
-                return {"ok": False, "id": normalized_id, "reason": rejection}
-
-            stored_type = str(post.get("type") or "").strip().casefold()
-            stored_in_archive = self._path_is_within(file_path, self.archive_dir)
-            if not stored_in_archive:
-                canonical_history = os.path.join(self.letter_dir, "history")
-                if (
-                    stored_type == "letter"
-                    and os.path.normcase(os.path.realpath(os.path.dirname(file_path)))
-                    == os.path.normcase(os.path.realpath(canonical_history))
-                ):
-                    return {
-                        "ok": True,
-                        "id": normalized_id,
-                        "reason": "already_restored",
-                    }
-                return {
-                    "ok": False,
-                    "id": normalized_id,
-                    "reason": "not_archived",
-                }
-            if stored_type != "archived":
-                return {
-                    "ok": False,
-                    "id": normalized_id,
-                    "reason": "invalid_archived_type",
-                }
-
-            # 仅改回 Letter 类型；其余 frontmatter 与正文必须保持原值。
-            post["type"] = "letter"
-            try:
-                target_path = self._bucket_target_path(
-                    file_path,
-                    "letter",
-                    post.get("domain") or ["letter"],
-                )
-                committed_path = self._commit_bucket_update(
-                    file_path,
-                    target_path,
-                    frontmatter.dumps(post),
-                )
-            except (OSError, ValueError) as exc:
-                logger.error(
-                    "Failed to recover archived Letter / 历史 Letter 恢复失败: %s: %s",
-                    normalized_id,
-                    exc,
-                )
-                return {
-                    "ok": False,
-                    "id": normalized_id,
-                    "reason": "commit_failed",
-                }
-
-            self._invalidate_bm25()
-            self._record_v3_bucket_event(
-                "restore",
-                normalized_id,
-                "letter",
-                post.content or "",
-                dict(post.metadata),
-            )
-            self._record_ledger_event(
-                "TraceRestored",
-                normalized_id,
-                "letter",
-                post.content or "",
-                dict(post.metadata),
-                {"event_actor": "maintenance", "compatibility": "archived_letter"},
-            )
-            logger.info(
-                "Recovered archived Letter / 已恢复历史 Letter: %s -> %s",
-                normalized_id,
-                committed_path,
-            )
-            derived_state = {
-                "bucket_id": normalized_id,
-                "content": post.content or "",
-                "meaning": post.get("meaning") or [],
-                "queue_content": True,
-                "queue_meaning": bool(post.get("meaning")),
-            }
-
-        assert derived_state is not None
-        self._queue_captured_derived_state(derived_state)
-        await self._index_after_update(
-            normalized_id,
-            content_changed=True,
-            meaning_changed=bool(derived_state["meaning"]),
+        return await recover_archived_letter(
+            self, bucket_id, expected_revision=expected_revision
         )
-        return {"ok": True, "id": normalized_id, "reason": "restored"}
 
-    async def _delete_locked(self, bucket_id: str) -> bool:
+    @staticmethod
+    def _has_strong_letter_marker(metadata: Any) -> bool:
+        from historical_letter_restore import has_strong_letter_marker
+
+        return has_strong_letter_marker(metadata)
+
+    @staticmethod
+    def _has_ambiguous_letter_marker(metadata: Any) -> bool:
+        from historical_letter_restore import has_ambiguous_letter_marker
+
+        return has_ambiguous_letter_marker(metadata)
+
+    @staticmethod
+    def _path_is_within(file_path: str, directory: str) -> bool:
+        from historical_letter_restore import path_is_within
+
+        return path_is_within(file_path, directory)
+
+    @staticmethod
+    def _archived_letter_rejection(metadata: Any) -> str:
+        from historical_letter_restore import archived_letter_rejection
+
+        return archived_letter_rejection(metadata)
+
+    async def _delete_locked(
+        self,
+        bucket_id: str,
+        expected_lifecycle_revision: str | None = None,
+    ) -> bool:
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
             return False
 
         # --- 读取文件，写入 deleted_at，移入 archive/ ---
         try:
+            if expected_lifecycle_revision == _LIFECYCLE_ABSENT:
+                return False
+            if (
+                expected_lifecycle_revision is not None
+                and self._lifecycle_revision(file_path)
+                != expected_lifecycle_revision
+            ):
+                return False
             post = frontmatter.load(file_path)
+            if not self._mutation_allowed(bucket_id, post):
+                return False
             tombstone_at = now_iso()
             post["deleted_at"] = tombstone_at
             post["tombstone"] = True
@@ -3145,7 +3322,20 @@ class BucketManager:
     # Called on every recall hit; affects decay score.
     # 每次检索命中时调用，影响衰减得分。
     # ---------------------------------------------------------
+    @contextmanager
+    def ripple_admission(self, predicate: Any):
+        """Limit one explicit ripple without changing touch()'s public contract."""
+        token = _RIPPLE_ADMISSION.set(predicate)
+        try:
+            yield
+        finally:
+            _RIPPLE_ADMISSION.reset(token)
+
     async def touch(self, bucket_id: str, ripple: bool = True) -> None:
+        async with markdown_writer_turn(self.base_dir):
+            await self._touch_ungated(bucket_id, ripple=ripple)
+
+    async def _touch_ungated(self, bucket_id: str, ripple: bool = True) -> None:
         """
         Update a bucket's last activation time and count.
         Also triggers time ripple: nearby memories get a slight activation boost.
@@ -3169,6 +3359,8 @@ class BucketManager:
 
         try:
             post = frontmatter.load(file_path)
+            if not self._mutation_allowed(bucket_id, post):
+                return None
             post["last_active"] = now_iso()
             post["activation_count"] = int(post.get("activation_count") or 0) + 1  # type: ignore[call-overload]
 
@@ -3210,7 +3402,12 @@ class BucketManager:
                 logger.warning(f"touch_many: 触碰 {bid} 失败: {e}")
             first = False
 
-    async def _time_ripple(self, source_id: str, reference_time: datetime, hours: float = _RIPPLE_HOURS) -> None:
+    async def _time_ripple(
+        self,
+        source_id: str,
+        reference_time: datetime,
+        hours: float = _RIPPLE_HOURS,
+    ) -> None:
         """
         Slightly boost activation_count of buckets created/activated near the reference time.
         轻微提升时间相邻桶的激活次数（+0.3），不改 last_active 避免递归唤醒。
@@ -3221,11 +3418,14 @@ class BucketManager:
         except Exception:
             return
 
+        admit_bucket = _RIPPLE_ADMISSION.get()
         rippled = 0
         for bucket in all_buckets:
             if rippled >= _RIPPLE_MAX_BUCKETS:
                 break
             if bucket["id"] == source_id:
+                continue
+            if callable(admit_bucket) and not admit_bucket(bucket):
                 continue
             target_id = str(bucket.get("id") or "")
             if not target_id:
@@ -3256,6 +3456,14 @@ class BucketManager:
                     post = frontmatter.load(file_path)
                     if str(post.get("id") or target_id) != target_id:
                         continue
+                    if callable(admit_bucket):
+                        current_bucket = {
+                            "id": target_id,
+                            "content": post.content or "",
+                            "metadata": dict(post.metadata),
+                        }
+                        if not admit_bucket(current_bucket):
+                            continue
                     if (
                         parse_bool(post.get("pinned"), default=False)
                         or parse_bool(post.get("protected"), default=False)
@@ -3424,7 +3632,7 @@ class BucketManager:
         if self._bm25 is not None:
             if self._bm25_dirty and not self._bm25_rebuilding:
                 self._bm25_rebuilding = True
-                asyncio.create_task(self._rebuild_bm25_async(all_buckets))
+                spawn_background(self._rebuild_bm25_async(all_buckets))
             try:
                 bm25_scores = self._bm25.score(query)
             except Exception as e:
@@ -3581,6 +3789,10 @@ class BucketManager:
         return sum(1 for b in all_b if b.get("metadata", {}).get("anchor"))
 
     async def set_anchor(self, bucket_id: str, value: bool) -> dict:
+        async with markdown_writer_turn(self.base_dir):
+            return await self._set_anchor_ungated(bucket_id, value)
+
+    async def _set_anchor_ungated(self, bucket_id: str, value: bool) -> dict:
         """
         Toggle the anchor flag on a bucket. Hard-rejects if cap reached.
         切换桶的 anchor 标记。设为 True 且当前已满 24 时拒绝。
@@ -3678,7 +3890,12 @@ class BucketManager:
         results.sort(key=lambda x: x.get("created", ""), reverse=True)
         return results
 
-    async def list_all(self, include_archive: bool = False) -> list[dict]:
+    async def list_all(
+        self,
+        include_archive: bool = False,
+        *,
+        fresh: bool = False,
+    ) -> list[dict]:
         """
         Recursively walk directories (including domain subdirs), list all buckets.
         递归遍历目录（含域子目录），列出所有记忆桶。
@@ -3687,6 +3904,14 @@ class BucketManager:
             buckets = []
             dirs = list(self._active_dirs) + [self.archive_dir]
             for _root, _fname, file_path in self._iter_md_files(dirs):
+                bucket = self._load_bucket(file_path)
+                if bucket:
+                    buckets.append(bucket)
+            return buckets
+
+        if fresh:
+            buckets = []
+            for _root, _fname, file_path in self._iter_md_files(self._active_dirs):
                 bucket = self._load_bucket(file_path)
                 if bucket:
                     buckets.append(bucket)
@@ -3824,21 +4049,54 @@ class BucketManager:
     # 由衰减引擎调用，模拟"遗忘"
     # ---------------------------------------------------------
     async def archive(self, bucket_id: str) -> bool:
+        lifecycle_path = self._find_bucket_file(bucket_id)
+        lifecycle_revision = (
+            self._lifecycle_revision(lifecycle_path)
+            if lifecycle_path else _LIFECYCLE_ABSENT
+        )
+        async with markdown_writer_turn(self.base_dir):
+            return await self._archive_ungated(
+                bucket_id,
+                expected_lifecycle_revision=lifecycle_revision,
+            )
+
+    async def _archive_ungated(
+        self,
+        bucket_id: str,
+        expected_lifecycle_revision: str | None = None,
+    ) -> bool:
         """
         Move a bucket into the archive directory (preserving domain subdirs).
         将指定桶移入归档目录（保留域子目录结构）。
         """
         async with self._bucket_turn(bucket_id):
-            return await self._archive_locked(bucket_id)
+            return await self._archive_locked(
+                bucket_id,
+                expected_lifecycle_revision=expected_lifecycle_revision,
+            )
 
-    async def _archive_locked(self, bucket_id: str) -> bool:
+    async def _archive_locked(
+        self,
+        bucket_id: str,
+        expected_lifecycle_revision: str | None = None,
+    ) -> bool:
         file_path = self._find_bucket_file(bucket_id)
         if not file_path:
             return False
 
         try:
+            if expected_lifecycle_revision == _LIFECYCLE_ABSENT:
+                return False
+            if (
+                expected_lifecycle_revision is not None
+                and self._lifecycle_revision(file_path)
+                != expected_lifecycle_revision
+            ):
+                return False
             # Read once, get domain info and update type / 一次性读取
             post = frontmatter.load(file_path)
+            if not self._mutation_allowed(bucket_id, post):
+                return False
             domain: list[str] = post.get("domain") or [_DEFAULT_DOMAIN_NAME]  # type: ignore[assignment]
             primary_domain = self._primary_domain(domain)
             archive_subdir = os.path.join(self.archive_dir, primary_domain)

@@ -29,7 +29,7 @@ from ombrebrain.storage.quote_store import normalize_quotes
 from ombrebrain.storage.source_store import normalize_source_ranges
 from utils import normalize_memory_title, parse_bool
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from .._common import (
     check_content_size,
     check_metadata_size,
@@ -240,6 +240,10 @@ async def dispatch(
         extra_tags = [str(t).strip() for t in tags if t]
     else:
         extra_tags = [t.strip() for t in str(tags).split(",") if t.strip()]
+    try:
+        extra_tags = _identity.ensure_write_owner(extra_tags)
+    except ValueError as exc:
+        raise ToolInputError(str(exc)) from exc
 
     if feel and (not source_bucket or not source_bucket.strip()):
         raise ToolInputError(
@@ -267,7 +271,7 @@ async def dispatch(
     # 这里返回值只承载业务正文。
 
     try:
-        return await _store(
+        result = await _store(
             feel=feel,
             pinned=pinned,
             content=content,
@@ -285,6 +289,7 @@ async def dispatch(
             source_refs=source_refs,
             quotes_list=quotes_list,
         )
+        return f"{result}\n{_identity.write_owner_receipt(extra_tags)}"
     except MediaPersistenceError as exc:
         # 媒体存不下时，桶一个都没建。存储层给的消息（「请改传 data_base64」）
         # 正是调用方需要的那句话，不翻译就会被 _with_notice 当成未预期异常，

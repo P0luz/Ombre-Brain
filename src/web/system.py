@@ -572,6 +572,52 @@ async def build_system_diagnostics() -> dict[str, Any]:
     ))
 
     try:
+        from remainder_integration import runtime_status as remainder_status
+
+        remainder = await asyncio.to_thread(remainder_status, buckets_dir)
+        sidecars = remainder.get("sidecar_health", {})
+        remainder_ok = (
+            remainder.get("wiring") == "active"
+            and remainder.get("startup_state") == "complete"
+            and int(remainder.get("unresolved", 0) or 0) == 0
+            and bool(sidecars.get("ok", True))
+            and int(sidecars.get("prepared_count", 0) or 0) == 0
+            and int(sidecars.get("conflict_count", 0) or 0) == 0
+            and not sidecars.get("quarantined_buckets")
+        )
+        checks.append(_check(
+            "remainder_recovery",
+            "余量恢复",
+            "ok" if remainder_ok else "error",
+            (
+                "余量侧车已完成启动恢复，没有待处理或冲突项"
+                if remainder_ok
+                else "余量侧车存在未完成恢复、待处理、冲突或隔离项"
+            ),
+            details={
+                "wiring": remainder.get("wiring"),
+                "startup_state": remainder.get("startup_state"),
+                "unresolved": int(remainder.get("unresolved", 0) or 0),
+                "prepared_count": int(sidecars.get("prepared_count", 0) or 0),
+                "conflict_count": int(sidecars.get("conflict_count", 0) or 0),
+                "quarantined_count": len(sidecars.get("quarantined_buckets") or []),
+            },
+            action=(
+                "重启服务触发启动恢复；若仍异常，检查余量侧车诊断与启动日志"
+                if not remainder_ok else ""
+            ),
+        ))
+    except Exception as exc:
+        checks.append(_check(
+            "remainder_recovery",
+            "余量恢复",
+            "error",
+            "余量侧车诊断无法完成",
+            details={"error_type": type(exc).__name__},
+            action="检查余量侧车目录权限与启动日志",
+        ))
+
+    try:
         persisted_path, persisted_cfg = _read_persisted_runtime_config()
         effective_report = effective_configuration_report(
             cfg,

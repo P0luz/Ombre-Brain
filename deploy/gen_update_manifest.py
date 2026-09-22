@@ -41,6 +41,18 @@ def _iter_files(repo_root: str):
                     continue
                 full = os.path.join(root, fn)
                 rel = os.path.relpath(full, repo_root).replace(os.sep, "/")
+                ignored = subprocess.run(
+                    ["git", "-C", repo_root, "check-ignore", "-q", "--", rel],
+                    capture_output=True,
+                )
+                if ignored.returncode == 0:
+                    continue
+                if ignored.returncode != 1:
+                    detail = ignored.stderr.decode("utf-8", errors="replace").strip()
+                    raise ManifestSourceError(
+                        f"无法检查 {rel} 的 Git ignore 状态："
+                        f"{detail or 'git check-ignore 失败'}"
+                    )
                 yield rel, full
 
 

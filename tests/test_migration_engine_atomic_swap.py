@@ -1,13 +1,8 @@
-"""migration_engine 原子替换回归测试 —— 验证找茬会话发现的 bug 已经修好。
+"""Migration compatibility and E-MIG-01 boundary regression tests.
 
-原 bug：docstring 承诺「先写 embeddings.db.migrating，全部跑完再原子 swap
-进主库」，但实际代码从头到尾直接往 live embeddings.db 写，中途崩溃/失败会
-让主库永久混入新旧模型/维度不一致的半截向量。
-
-修复：target_engine 的 db_path 被调用方指到 staging_db_path_for(live_db)
-返回的独立文件；只有全部成功才 os.replace() 原子替换进 live db；checkpoint
-额外记录目标签名（backend:model:dim），目标一变就整个重来，不会把不兼容的
-旧向量当成「已完成」直接换进主库。
+The old fixed `.migrating` swap protocol is intentionally retired.  Whole-DB
+publication now requires a caller-owned E-MIG-01 reservation and an internally
+named private shadow generation; legacy helpers remain non-mutating only.
 """
 import ast
 import os
@@ -19,8 +14,10 @@ from migration_engine import (
     MigrationConfig,
     _run_migration,
     _write_checkpoint,
+    backup_db_once,
     checkpoint_path_for,
     read_status,
+    reserve_migration,
     reset_stale_migration_state,
     staging_db_path_for,
     status_path_for,
@@ -41,8 +38,6 @@ class FakeTargetEngine:
 
     async def generate_and_store(self, bucket_id, content):
         self.calls.append(bucket_id)
-        # 模拟真的往 db_path 写了东西，确保 os.replace 时文件确实存在且和
-        # live db 内容不同，才能验证「swap 前 live 不变」这件事有意义。
         with open(self.db_path, "a", encoding="utf-8") as f:
             f.write(f"{bucket_id}\n")
         return True
@@ -52,65 +47,32 @@ class FakeTargetEngine:
 
 
 @pytest.mark.asyncio
-async def test_successful_migration_atomically_swaps_staging_into_live(tmp_path):
-    buckets_dir = str(tmp_path / "buckets")
-    os.makedirs(buckets_dir, exist_ok=True)
+async def test_direct_worker_call_requires_transaction_reservation(tmp_path):
     live_db = str(tmp_path / "embeddings.db")
-    with open(live_db, "w", encoding="utf-8") as f:
-        f.write("OLD-LIVE-CONTENT\n")
-
-    staged_path = staging_db_path_for(live_db)
-    target_engine = FakeTargetEngine(staged_path)
-
-    async def fetch_buckets():
-        return [("b1", "content 1"), ("b2", "content 2")]
-
+    Path(live_db).write_text("OLD-LIVE-CONTENT\n", encoding="utf-8")
     cfg = MigrationConfig(
-        buckets_dir=buckets_dir,
+        buckets_dir=str(tmp_path / "buckets"),
         db_path=live_db,
         target_backend="api",
         target_model="test-model",
         target_dim=8,
-        target_engine=target_engine,
-        fetch_buckets=fetch_buckets,
+        target_engine=FakeTargetEngine(staging_db_path_for(live_db)),
+        fetch_buckets=lambda: None,
     )
 
-    await _run_migration(cfg)
+    with pytest.raises(TypeError, match="reservation"):
+        await _run_migration(cfg)
 
-    with open(live_db, "r", encoding="utf-8") as f:
-        live_content = f.read()
-    assert "OLD-LIVE-CONTENT" not in live_content
-    assert "b1" in live_content and "b2" in live_content
-    assert not os.path.exists(staged_path), "swap 后 staging 文件应该已经不存在（被 rename 进 live）"
-    assert target_engine.db_path == live_db, (
-        "swap 后 target_engine 必须指向 live 路径，不能还指着已经消失的 staging 路径"
-    )
-
-    status = read_status(status_path_for(buckets_dir))
-    assert status["phase"] == "completed"
-    assert not os.path.exists(checkpoint_path_for(buckets_dir)), "全部成功后 checkpoint 应该被清掉"
+    assert Path(live_db).read_text(encoding="utf-8") == "OLD-LIVE-CONTENT\n"
 
 
 @pytest.mark.asyncio
-async def test_failed_migration_never_touches_live_db(tmp_path):
+async def test_fixed_legacy_staging_path_is_never_publishable(tmp_path):
     buckets_dir = str(tmp_path / "buckets")
     os.makedirs(buckets_dir, exist_ok=True)
     live_db = str(tmp_path / "embeddings.db")
-    with open(live_db, "w", encoding="utf-8") as f:
-        f.write("OLD-LIVE-CONTENT\n")
-
-    staged_path = staging_db_path_for(live_db)
-
-    class FailingTargetEngine(FakeTargetEngine):
-        async def generate_and_store(self, bucket_id, content):
-            if bucket_id == "b2":
-                raise RuntimeError("simulated embedding provider failure")
-            return await super().generate_and_store(bucket_id, content)
-
-    target_engine = FailingTargetEngine(staged_path)
-
-    async def fetch_buckets():
-        return [("b1", "content 1"), ("b2", "content 2")]
+    Path(live_db).write_text("OLD-LIVE-CONTENT\n", encoding="utf-8")
+    completions = []
 
     cfg = MigrationConfig(
         buckets_dir=buckets_dir,
@@ -118,57 +80,35 @@ async def test_failed_migration_never_touches_live_db(tmp_path):
         target_backend="api",
         target_model="test-model",
         target_dim=8,
-        target_engine=target_engine,
-        fetch_buckets=fetch_buckets,
+        target_engine=FakeTargetEngine(staging_db_path_for(live_db)),
+        fetch_buckets=lambda: None,
     )
+    reservation = reserve_migration(live_db)
+    assert reservation is not None
+    try:
+        await _run_migration(
+            cfg,
+            reservation=reservation,
+            on_complete=completions.append,
+        )
+    finally:
+        reservation.close()
 
-    await _run_migration(cfg)
-
-    with open(live_db, "r", encoding="utf-8") as f:
-        live_content = f.read()
-    assert live_content == "OLD-LIVE-CONTENT\n", "任何失败都不能让新旧向量混进 live db"
-
+    assert Path(live_db).read_text(encoding="utf-8") == "OLD-LIVE-CONTENT\n"
     status = read_status(status_path_for(buckets_dir))
     assert status["phase"] == "failed"
-    assert status["failed_count"] >= 1
-    assert os.path.exists(checkpoint_path_for(buckets_dir)), "失败时应保留 checkpoint 供下次续传"
+    assert "private shadow" in status["error"]
+    assert completions == [False]
 
 
-@pytest.mark.asyncio
-async def test_post_swap_publish_failure_is_reported_in_status(tmp_path):
-    buckets_dir = str(tmp_path / "buckets")
-    os.makedirs(buckets_dir, exist_ok=True)
-    live_db = str(tmp_path / "embeddings.db")
-    with open(live_db, "w", encoding="utf-8") as f:
-        f.write("OLD-LIVE-CONTENT\n")
+def test_backup_compatibility_helper_does_not_create_fixed_backup(tmp_path):
+    live_db = tmp_path / "embeddings.db"
+    live_db.write_bytes(b"live")
 
-    target_engine = FakeTargetEngine(staging_db_path_for(live_db))
+    reported = backup_db_once(str(live_db))
 
-    async def fetch_buckets():
-        return [("b1", "content 1")]
-
-    def fail_publish(success):
-        assert success is True
-        raise OSError("simulated config publish failure")
-
-    cfg = MigrationConfig(
-        buckets_dir=buckets_dir,
-        db_path=live_db,
-        target_backend="api",
-        target_model="test-model",
-        target_dim=8,
-        target_engine=target_engine,
-        fetch_buckets=fetch_buckets,
-    )
-
-    await _run_migration(cfg, on_complete=fail_publish)
-
-    status = read_status(status_path_for(buckets_dir))
-    assert status["phase"] == "publish_failed"
-    assert "运行态/配置发布失败" in status["error"]
-    assert "simulated config publish failure" in status["error"]
-    with open(live_db, "r", encoding="utf-8") as f:
-        assert "b1" in f.read(), "publish 失败不应伪装成原子替换未发生"
+    assert reported == str(live_db) + ".backup"
+    assert not Path(reported).exists()
 
 
 def test_embedding_yaml_persistence_failure_propagates(monkeypatch):
@@ -192,7 +132,7 @@ def test_embedding_package_mode_uses_parent_migration_module():
     ]
 
     assert not [node for node in migration_imports if node.level == 1]
-    assert len([node for node in migration_imports if node.level == 2]) >= 4
+    assert len([node for node in migration_imports if node.level == 2]) >= 3
 
 
 def test_dashboard_treats_publish_failure_as_visible_terminal_state():

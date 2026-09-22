@@ -15,6 +15,7 @@ web/meta.py — 版本 / 部署信息 / 热更新 / 作者 / 首启引导 / 系�
 
 import os
 import re
+import stat
 import sys
 import asyncio as _asyncio
 import threading
@@ -24,6 +25,7 @@ from starlette.requests import Request
 from starlette.responses import Response, StreamingResponse
 
 from . import _shared as sh
+from runtime_owner import spawn_background
 
 try:
     from utils import parse_bool, atomic_update_config_yaml  # type: ignore
@@ -196,7 +198,7 @@ async def _await_update_worker(
     until the step has genuinely stopped.
     """
 
-    worker = _asyncio.create_task(_asyncio.to_thread(func, *args, **kwargs))
+    worker = spawn_background(_asyncio.to_thread(func, *args, **kwargs))
     try:
         return await _asyncio.shield(worker)
     except _asyncio.CancelledError:
@@ -324,6 +326,61 @@ def _atomic_write_bytes(path: str, data: bytes) -> None:
             pass
 
 
+def _is_reparse_point(info: os.stat_result) -> bool:
+    return bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
+def _prepare_update_target(root: str, subpath: str) -> str:
+    """Reject symlink/reparse traversal before writing one planned update."""
+
+    root_abs = os.path.abspath(root)
+    target = os.path.abspath(os.path.join(root_abs, subpath))
+    try:
+        if os.path.commonpath([root_abs, target]) != root_abs or target == root_abs:
+            raise ValueError("更新目标越界")
+    except ValueError as exc:
+        raise ValueError("更新目标越界") from exc
+
+    if not os.path.lexists(root_abs):
+        os.makedirs(root_abs, exist_ok=False)
+    root_info = os.lstat(root_abs)
+    if (
+        stat.S_ISLNK(root_info.st_mode)
+        or _is_reparse_point(root_info)
+        or not stat.S_ISDIR(root_info.st_mode)
+    ):
+        raise ValueError("更新根目录不安全")
+
+    relative_parts = os.path.relpath(target, root_abs).split(os.sep)
+    parent = root_abs
+    for part in relative_parts[:-1]:
+        parent = os.path.join(parent, part)
+        try:
+            os.mkdir(parent)
+        except FileExistsError:
+            pass
+        info = os.lstat(parent)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or _is_reparse_point(info)
+            or not stat.S_ISDIR(info.st_mode)
+        ):
+            raise ValueError("更新路径包含符号链接或 reparse point")
+
+    if os.path.lexists(target):
+        info = os.lstat(target)
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or _is_reparse_point(info)
+            or not stat.S_ISREG(info.st_mode)
+        ):
+            raise ValueError("更新目标不是常规文件")
+    return target
+
+
 def _read_bounded_zip_member(zf, name: str, max_bytes: int) -> bytes:
     matches = [info for info in zf.infolist() if info.filename == name]
     if not matches:
@@ -369,6 +426,7 @@ def _plan_update_files(zf, top: str) -> dict:
         }
 
     candidates: dict[str, bytes] = {}
+    candidate_casefolds: set[str] = set()
     skipped_unsafe = 0
     total_uncompressed = 0
     for info in infos:
@@ -384,7 +442,8 @@ def _plan_update_files(zf, top: str) -> dict:
         if _is_unsafe_path(rel) or _is_protected_path(rel):
             skipped_unsafe += 1
             continue
-        if rel in candidates:
+        rel_casefold = rel.casefold()
+        if rel in candidates or rel_casefold in candidate_casefolds:
             return {
                 "files": {}, "skipped_unsafe": skipped_unsafe,
                 "skipped_unlisted": 0, "verified": False,
@@ -425,6 +484,7 @@ def _plan_update_files(zf, top: str) -> dict:
                 "abort": f"更新文件读取长度不一致：{rel}",
             }
         candidates[rel] = data
+        candidate_casefolds.add(rel_casefold)
 
     # 2) 若含完整性清单，逐文件核对 sha256/size；篡改即整体中止
     try:
@@ -452,6 +512,7 @@ def _plan_update_files(zf, top: str) -> dict:
                 "abort": f"update_manifest.json 解析失败：{e}"}
 
     verified: dict[str, bytes] = {}
+    listed_paths: set[str] = set()
     if not isinstance(listed, list) or len(listed) > _MAX_UPDATE_MEMBERS:
         return {"files": {}, "skipped_unsafe": skipped_unsafe,
                 "skipped_unlisted": 0, "verified": False,
@@ -461,21 +522,46 @@ def _plan_update_files(zf, top: str) -> dict:
             return {"files": {}, "skipped_unsafe": skipped_unsafe,
                     "skipped_unlisted": 0, "verified": False,
                     "abort": "update_manifest.json 包含无效文件项"}
-        path = str(fm.get("path", "")).replace("\\", "/")
+        raw_path = fm.get("path", "")
+        if not isinstance(raw_path, str):
+            return {"files": {}, "skipped_unsafe": skipped_unsafe,
+                    "skipped_unlisted": 0, "verified": False,
+                    "abort": "update_manifest.json 包含无效路径"}
+        path = raw_path.replace("\\", "/")
+        path_key = path.casefold()
+        if path_key in listed_paths:
+            return {"files": {}, "skipped_unsafe": skipped_unsafe,
+                    "skipped_unlisted": 0, "verified": False,
+                    "abort": f"完整性清单包含重复路径：{path}"}
+        listed_paths.add(path_key)
         if path not in candidates:
             continue  # 清单列了但不在 src/frontend 候选里（如根文件）：本流程不覆盖，跳过
         data = candidates[path]
+        raw_size = fm.get("size")
+        if isinstance(raw_size, bool) or not isinstance(raw_size, int) or raw_size < 0:
+            return {"files": {}, "skipped_unsafe": skipped_unsafe,
+                    "skipped_unlisted": 0, "verified": False,
+                    "abort": f"完整性清单大小无效：{path}"}
         try:
-            want_size = int(fm.get("size", -1))
+            want_size = int(raw_size)
         except (TypeError, ValueError, OverflowError):
             return {"files": {}, "skipped_unsafe": skipped_unsafe,
                     "skipped_unlisted": 0, "verified": False,
                     "abort": f"完整性清单大小无效：{path}"}
-        want_sha = str(fm.get("sha256", "")).lower()
-        if want_size >= 0 and len(data) != want_size:
+        raw_sha = fm.get("sha256")
+        if (
+            not isinstance(raw_sha, str)
+            or len(raw_sha) != 64
+            or any(char not in "0123456789abcdefABCDEF" for char in raw_sha)
+        ):
+            return {"files": {}, "skipped_unsafe": skipped_unsafe,
+                    "skipped_unlisted": 0, "verified": False,
+                    "abort": f"完整性清单 sha256 无效：{path}"}
+        want_sha = raw_sha.lower()
+        if len(data) != want_size:
             return {"files": {}, "skipped_unsafe": skipped_unsafe, "skipped_unlisted": 0,
                     "verified": True, "abort": f"完整性校验失败（大小不符）：{path}"}
-        if want_sha and _hashlib.sha256(data).hexdigest() != want_sha:
+        if _hashlib.sha256(data).hexdigest() != want_sha:
             return {"files": {}, "skipped_unsafe": skipped_unsafe, "skipped_unlisted": 0,
                     "verified": True, "abort": f"完整性校验失败（sha256 不符）：{path}"}
         verified[path] = data
@@ -640,11 +726,10 @@ def _apply_update_files(
         dest_root = dest_roots.get(segment)
         if not dest_root:
             continue
-        dest = os.path.join(dest_root, subpath)
-        root_abs = os.path.abspath(dest_root)
-        dest_abs = os.path.abspath(dest)
-        if dest_abs != root_abs and not dest_abs.startswith(root_abs + os.sep):
-            raise ValueError(f"更新目标越界：{rel}")
+        try:
+            dest = _prepare_update_target(dest_root, subpath)
+        except ValueError as exc:
+            raise ValueError(f"更新目标不安全：{rel}：{exc}") from exc
         _atomic_write_bytes(dest, data)
         updated += 1
 
@@ -973,7 +1058,7 @@ def register(mcp) -> None:
             await _asyncio.sleep(0.8)
             _restart_self()
 
-        _asyncio.create_task(_delayed_restart())
+        spawn_background(_delayed_restart())
         return JSONResponse({"ok": True, "restarting": True})
 
     @mcp.custom_route("/api/version", methods=["GET"])
@@ -1339,7 +1424,7 @@ def register(mcp) -> None:
                         reservation.release()
                     _restart_self()
 
-                restart_task = _asyncio.create_task(_restart())
+                restart_task = spawn_background(_restart())
                 _UPDATE_RESTART_TASKS.add(restart_task)
                 restart_task.add_done_callback(_UPDATE_RESTART_TASKS.discard)
                 reservation.defer_to_restart()
@@ -1430,6 +1515,7 @@ def register(mcp) -> None:
         from tools._common import restore_archived_letters
 
         ids: list[str] | None = None
+        revisions: dict[str, str] | None = None
         apply = request.method == "POST"
         if apply:
             try:
@@ -1475,11 +1561,31 @@ def register(mcp) -> None:
                     status_code=400,
                 )
             ids = normalized
+            raw_revisions = body.get("revisions")
+            if not isinstance(raw_revisions, dict):
+                return no_store_json(
+                    {"ok": False, "reason": "invalid_revisions"},
+                    status_code=400,
+                )
+            revisions = {}
+            for bucket_id in ids:
+                value = raw_revisions.get(bucket_id)
+                if (
+                    not isinstance(value, str)
+                    or len(value) != 64
+                    or any(char not in "0123456789abcdef" for char in value.casefold())
+                ):
+                    return no_store_json(
+                        {"ok": False, "reason": "invalid_revisions"},
+                        status_code=400,
+                    )
+                revisions[bucket_id] = value.casefold()
 
         try:
             result = await restore_archived_letters(
                 sh.bucket_mgr,
                 ids=ids,
+                revisions=revisions,
                 apply=apply,
             )
             return no_store_json({"ok": True, **result})

@@ -20,8 +20,8 @@ def _install_trace_runtime(bucket_mgr) -> None:
 
 @pytest.mark.asyncio
 async def test_only_creation_marked_test_bucket_can_be_hard_deleted(bucket_mgr):
-    real_id = await bucket_mgr.create(content="a real memory", domain=["life"])
-    test_id = await bucket_mgr.create(
+    real_id = await bucket_mgr.create_internal(content="a real memory", domain=["life"])
+    test_id = await bucket_mgr.create_internal(
         content="synthetic memory for a test",
         domain=["test"],
         source_tool="hold",
@@ -48,9 +48,10 @@ async def test_only_creation_marked_test_bucket_can_be_hard_deleted(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_trace_hard_delete_refuses_normal_plan_without_archiving(bucket_mgr):
-    plan_id = await bucket_mgr.create(
+    plan_id = await bucket_mgr.create_internal(
         content="a real plan that must remain recoverable",
         domain=["plan"],
+        tags=["owner:cheng"],
         bucket_type="plan",
         source_tool="plan",
     )
@@ -83,9 +84,10 @@ async def test_trace_hard_delete_refuses_normal_plan_without_archiving(bucket_mg
 async def test_test_data_cleanup_requires_reason_and_rejects_conflicting_modes(
     bucket_mgr,
 ):
-    test_id = await bucket_mgr.create(
+    test_id = await bucket_mgr.create_internal(
         content="synthetic gateway test payload",
         domain=["test"],
+        tags=["owner:cheng"],
         source_tool="hold",
         test_data=True,
     )
@@ -137,6 +139,30 @@ async def test_test_data_cleanup_requires_reason_and_rejects_conflicting_modes(
     )
     assert delete_event["payload"]["reason"] == "gateway test cleanup"
     assert FormalInvariantChecker.default().evaluate_ledger(events).ok is True
+
+
+@pytest.mark.asyncio
+async def test_trace_can_hard_delete_an_owned_test_bucket_after_archiving(bucket_mgr):
+    test_id = await bucket_mgr.create_internal(
+        content="archived synthetic payload",
+        domain=["test"],
+        tags=["owner:cheng"],
+        source_tool="hold",
+        test_data=True,
+    )
+    _install_trace_runtime(bucket_mgr)
+
+    assert "存入档案" in await trace_core(test_id, delete=True)
+    assert await bucket_mgr.get(test_id) is None
+    assert await bucket_mgr.get_including_archive(test_id) is not None
+
+    deleted = await trace_core(
+        test_id,
+        hard_delete=True,
+        delete_reason="archived integration cleanup",
+    )
+    assert deleted == f"已永久删除测试桶: {test_id}"
+    assert await bucket_mgr.get_including_archive(test_id) is None
 
 
 def test_dashboard_separates_normal_batch_actions_from_developer_erasure():

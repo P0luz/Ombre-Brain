@@ -23,7 +23,7 @@ tools/breath/feel.py — feel 检索通道
 
 from datetime import datetime  # noqa: F401 —— 供签名注解使用
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from ..plan.core import is_letter_bucket
 from ._date_range import bucket_in_created_range
 from ._shared import footprint_reader, render_within_budget
@@ -91,6 +91,7 @@ async def surface_feels(
 
     try:
         all_buckets = await rt.bucket_mgr.list_all(include_archive=False)
+        all_buckets = _identity.filter_default(all_buckets)
         feels = [
             b for b in all_buckets
             if b.get("metadata", {}).get("type") == "feel"

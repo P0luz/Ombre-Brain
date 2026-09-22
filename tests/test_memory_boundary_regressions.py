@@ -6,11 +6,18 @@ import pytest
 from bucket_manager import BucketManager
 from dehydrator import Dehydrator
 from tools import _common as common
+from tools import _identity
 from tools import _runtime as rt
 from tools.hold import core as hold_core
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_caller():
+    with _identity.caller_context("cheng"):
+        yield
 
 
 class _Logger:
@@ -29,14 +36,18 @@ async def test_plan_resolution_keyword_match_records_suggestion_without_closing(
         {
             "id": f"plan-{index}",
             "content": f"无关计划 {index}",
-            "metadata": {"type": "plan", "status": "active"},
+            "metadata": {
+                "type": "plan", "status": "active", "tags": ["owner:cheng"]
+            },
         }
         for index in range(common._PLAN_FALLBACK_CAP)
     ]
     related = {
         "id": "plan-related",
         "content": "周日完成 Zeabur 模板发布",
-        "metadata": {"type": "plan", "status": "active"},
+        "metadata": {
+            "type": "plan", "status": "active", "tags": ["owner:cheng"]
+        },
     }
     plans.append(related)
 
@@ -152,7 +163,7 @@ async def test_hold_analysis_failure_preserves_exact_content(monkeypatch):
     async def background(*_args, **_kwargs):
         return None
 
-    def close_task(coro):
+    def close_background(coro):
         coro.close()
         return None
 
@@ -161,7 +172,7 @@ async def test_hold_analysis_failure_preserves_exact_content(monkeypatch):
     monkeypatch.setattr(hold_core, "merge_or_create", fake_merge_or_create)
     monkeypatch.setattr(hold_core, "check_plan_resolution", background)
     monkeypatch.setattr(hold_core, "check_duplicate_for", background)
-    monkeypatch.setattr(hold_core.asyncio, "create_task", close_task)
+    monkeypatch.setattr(hold_core, "spawn_background", close_background)
 
     result = await hold_core.store_core(
         original, extra_tags=[], importance=5,
@@ -189,7 +200,7 @@ async def test_bucket_manager_hold_fallback_keeps_markdown_without_embedding(tmp
     manager = BucketManager({"buckets_dir": str(vault)}, embedding_engine=None)
     original = "这是 hold 的原文。\n换行、标点和 [brackets] 都应保留。"
 
-    bucket_id = await manager.create(
+    bucket_id = await manager.create_internal(
         content=original,
         source_tool="hold",
         allow_embedding_fallback=True,
@@ -199,7 +210,7 @@ async def test_bucket_manager_hold_fallback_keeps_markdown_without_embedding(tmp
     assert bucket is not None
     assert bucket["content"] == original
 
-    grow_id = await manager.create(content="grow 也应先保留原文")
+    grow_id = await manager.create_internal(content="grow 也应先保留原文")
     grow_bucket = await manager.get(grow_id)
     assert grow_bucket is not None
     assert grow_bucket["content"] == "grow 也应先保留原文"
@@ -212,8 +223,9 @@ async def test_hold_merge_appends_raw_text_and_never_calls_llm_merge(tmp_path, m
     )
     old = "旧记忆原文，保持它。"
     new = "新记忆原文，也保持它。"
-    bucket_id = await manager.create(
+    bucket_id = await manager.create_internal(
         content=old,
+        tags=["owner:cheng"],
         source_tool="hold",
         allow_embedding_fallback=True,
     )
@@ -266,8 +278,9 @@ async def test_hold_similar_but_cross_date_event_does_not_merge(tmp_path, monkey
     )
     old = "2026年7月18日晚上，我们在客厅玩游戏并聊了很久。"
     new = "2026年7月19日凌晨，我在卧室玩了另一局游戏。"
-    bucket_id = await manager.create(
-        content=old, source_tool="hold", allow_embedding_fallback=True
+    bucket_id = await manager.create_internal(
+        content=old, tags=["owner:cheng"], source_tool="hold",
+        allow_embedding_fallback=True
     )
 
     async def fake_search(*_args, **_kwargs):
@@ -398,8 +411,12 @@ async def test_exact_content_dedup_ignores_nondeterministic_derived_domain(tmp_p
         embedding_engine=None,
     )
     content = "the exact same concurrent event"
-    original_id = await manager.create(content=content, domain=["first-domain"])
-    await manager.create(content="a distractor", domain=["second-domain"])
+    original_id = await manager.create_internal(
+        content=content, domain=["first-domain"], tags=["owner:cheng"]
+    )
+    await manager.create_internal(
+        content="a distractor", domain=["second-domain"], tags=["owner:cheng"]
+    )
     rt.bucket_mgr = manager
     rt.embedding_engine = None
     rt.embedding_outbox = None

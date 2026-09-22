@@ -43,11 +43,14 @@ def test_identical_content_turns_serialize_across_thread_event_loops():
 
 @pytest.mark.asyncio
 async def test_bucket_boundary_rejects_oversize_and_normalizes_nonfinite(bucket_mgr):
+    from ombrebrain.eventsourcing.footprint import system_origin
+
     bucket_id = await bucket_mgr.create(
         content="finite metadata",
         importance=float("inf"),
         valence=float("nan"),
         arousal=float("-inf"),
+        footprint_origin=system_origin(),
     )
     bucket = await bucket_mgr.get(bucket_id)
     assert bucket["metadata"]["importance"] == 5
@@ -60,17 +63,20 @@ async def test_bucket_boundary_rejects_oversize_and_normalizes_nonfinite(bucket_
 
     oversized = "x" * (50 * 1024 + 1)
     with pytest.raises(ValueError, match="内容过大"):
-        await bucket_mgr.create(content=oversized)
+        await bucket_mgr.create(content=oversized, footprint_origin=system_origin())
     with pytest.raises(ValueError, match="内容过大"):
         await bucket_mgr.update(bucket_id, content=oversized)
 
 
 @pytest.mark.asyncio
 async def test_bucket_boundary_bounds_tags_and_domains(bucket_mgr):
+    from ombrebrain.eventsourcing.footprint import system_origin
+
     bucket_id = await bucket_mgr.create(
         content="bounded metadata",
         tags=[f"tag-{index}-" + "x" * 200 for index in range(100)],
         domain=[f"domain-{index}-" + "y" * 200 for index in range(30)],
+        footprint_origin=system_origin(),
     )
     metadata = (await bucket_mgr.get(bucket_id))["metadata"]
     assert len(metadata["tags"]) == 64
@@ -81,7 +87,13 @@ async def test_bucket_boundary_bounds_tags_and_domains(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_exact_content_lookup_bypasses_a_stale_active_cache(bucket_mgr):
-    bucket_id = await bucket_mgr.create(content="disk truth", domain=["audit"])
+    from ombrebrain.eventsourcing.footprint import system_origin
+
+    bucket_id = await bucket_mgr.create(
+        content="disk truth",
+        domain=["audit"],
+        footprint_origin=system_origin(),
+    )
     bucket_mgr._active_cache = []
 
     found = bucket_mgr.find_exact_content("disk truth", domain_filter=["audit"])
@@ -262,6 +274,7 @@ def test_write_memory_uses_structured_frontmatter_and_atomic_output(tmp_path, mo
         "literal body",
         ["domain\nimportance: 10"],
         ["tag\ntype: permanent"],
+        owner="cheng",
         importance=4,
         valence=float("nan"),
         arousal=float("inf"),

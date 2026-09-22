@@ -11,7 +11,7 @@ async def test_bucket_manager_delete_writes_tombstone_metadata_and_ledger_payloa
     fake_embedding_engine,
 ):
     manager = BucketManager(test_config, embedding_engine=fake_embedding_engine)
-    bucket_id = await manager.create("remember me as a tombstone", domain=["phase4"])
+    bucket_id = await manager.create_internal("remember me as a tombstone", domain=["phase4"])
 
     assert await manager.delete(bucket_id)
 

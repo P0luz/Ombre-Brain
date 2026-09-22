@@ -27,7 +27,7 @@ tools/hold/feel.py — hold(feel=True) 分支
 
 from datetime import datetime
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 
 
 def _build_feel_id(valence: float) -> str:
@@ -56,7 +56,7 @@ async def store_feel(
 ) -> str:
     feel_valence = valence if 0 <= valence <= 1 else 0.5
     feel_arousal = arousal if 0 <= arousal <= 1 else 0.3
-    feel_tags = list(dict.fromkeys(["__feel__"] + extra_tags))
+    feel_tags = _identity.ensure_write_owner(["__feel__", *extra_tags])
     bucket_id = await rt.bucket_mgr.create(
         content=content,
         tags=feel_tags,
@@ -77,13 +77,26 @@ async def store_feel(
         allow_embedding_fallback=True,
         meaning=meaning,
         media=media,
+        footprint_origin=_identity.origin_for_mcp("hold"),
     )
     if source_bucket and source_bucket.strip():
         try:
+            source = await rt.bucket_mgr.get(source_bucket.strip())
+            if not source or not _identity.owners_compatible(
+                source.get("metadata") or {}, feel_tags
+            ):
+                rt.logger.warning(
+                    "feel source identity mismatch; source not marked digested"
+                )
+                return f"🫧feel→{bucket_id}"
+            source_owner = _identity.mutation_owner(source.get("metadata") or {})
             update_kwargs: dict[str, bool | float] = {"digested": True}
             if 0 <= valence <= 1:
                 update_kwargs["model_valence"] = feel_valence
-            await rt.bucket_mgr.update(source_bucket.strip(), **update_kwargs)
+            with _identity.manager_mutation_guard(
+                rt.bucket_mgr, {source_bucket.strip(): source_owner}
+            ):
+                await rt.bucket_mgr.update(source_bucket.strip(), **update_kwargs)
         except Exception as e:
             rt.logger.warning(f"Failed to mark source as digested / 标记已消化失败: {e}")
     return f"🫧feel→{bucket_id}"

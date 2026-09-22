@@ -30,6 +30,7 @@ tools/grow/core.py — grow 长内容主路径（digest + merge）
 from errors import ToolInputError
 import asyncio
 import uuid
+from runtime_owner import spawn_background
 
 from utils import normalize_memory_title
 
@@ -38,7 +39,7 @@ try:
 except ImportError:  # pragma: no cover - 包内导入兜底
     from ...errors import llm_step_failed_error, safe_error_detail  # type: ignore
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 from .._common import (
     merge_or_create,
     check_content_size,
@@ -125,7 +126,7 @@ async def grow_core(content: str, test_data: bool = False) -> str:
                 ]
             result_name, is_merged, embed_warn = await merge_or_create(
                 content=item["content"],
-                tags=item.get("tags") or [],
+                tags=_identity.strip_owner_tags(item.get("tags")),
                 importance=item.get("importance") or 5,
                 domain=item.get("domain") or ["未分类"],
                 valence=item.get("valence") or 0.5,
@@ -172,9 +173,9 @@ async def grow_core(content: str, test_data: bool = False) -> str:
             embed_warnings.append(embed_warn)
         dup_check = outcome.get("dup_check")
         if dup_check:
-            asyncio.create_task(check_duplicate_for(*dup_check))
+            spawn_background(check_duplicate_for(*dup_check))
 
-    asyncio.create_task(check_plan_resolution(content))
+    spawn_background(check_plan_resolution(content))
     summary = f"{len(items)}条|新{created}合{merged} batch:{batch_id}\n" + "\n".join(results)
     if embed_warnings:
         summary += f"\n⚠️ {embed_warnings[0]}"
@@ -209,6 +210,20 @@ async def grow_items(items: list, source_content: str = "", test_data: bool = Fa
         else:
             s = ""
         if s:
+            if "tags" in item and item.get("tags") is not None:
+                explicit_tags = item.get("tags")
+                if isinstance(explicit_tags, str):
+                    explicit_tags = [
+                        tag.strip()
+                        for tag in explicit_tags.split(",")
+                        if tag.strip()
+                    ]
+                if not isinstance(explicit_tags, list):
+                    raise ToolInputError("item.tags 必须是列表或逗号分隔字符串。")
+                try:
+                    item["tags"] = _identity.ensure_write_owner(explicit_tags)
+                except ValueError as exc:
+                    raise ToolInputError(str(exc)) from exc
             clean.append(item)
     if not clean:
         raise ToolInputError("items 为空或都不合法，未创建任何桶。")
@@ -308,7 +323,11 @@ async def grow_items(items: list, source_content: str = "", test_data: bool = Fa
             why_remembered = str(item.get("why_remembered") or "").strip()
             result_name, is_merged, embed_warn = await merge_or_create(
                 content=content_str,
-                tags=explicit_tags if explicit_tags is not None else (meta.get("tags") or []),
+                tags=(
+                    explicit_tags
+                    if explicit_tags is not None
+                    else _identity.strip_owner_tags(meta.get("tags"))
+                ),
                 importance=importance,
                 domain=explicit_domain if explicit_domain is not None else (meta.get("domain") or ["未分类"]),
                 valence=valence,
@@ -358,9 +377,9 @@ async def grow_items(items: list, source_content: str = "", test_data: bool = Fa
             metadata_fallback = True
         dup_check = outcome.get("dup_check")
         if dup_check:
-            asyncio.create_task(check_duplicate_for(*dup_check))
+            spawn_background(check_duplicate_for(*dup_check))
 
-    asyncio.create_task(check_plan_resolution("\n".join(item["content"] for item in clean)))
+    spawn_background(check_plan_resolution("\n".join(item["content"] for item in clean)))
     summary = f"{len(clean)}条(预拆分·逐字)|新{created}合{merged} batch:{batch_id}\n" + "\n".join(results)
     if embed_warnings:
         summary += f"\n⚠️ {embed_warnings[0]}"

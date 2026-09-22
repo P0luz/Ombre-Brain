@@ -73,7 +73,7 @@ def test_hot_update_downgrade_guard(current, target, expected):
 
 
 def test_hot_update_defaults_to_same_main_branch_as_version_check():
-    source = open(meta.__file__, encoding="utf-8").read()
+    source = Path(meta.__file__).read_text(encoding="utf-8")
     assert '_ucfg.get("channel") or "branch"' in source
 
 
@@ -98,12 +98,24 @@ def test_ci_lock_verification_freezes_package_index_snapshot():
 
     assert step.count("uv pip compile ") == 2
     assert "--upgrade" not in step
-    assert "--exclude-newer" not in step, (
+    assert re.search(r"--exclude-newer(?:\s|=)", step) is None, (
         "cutoff 必须通过环境变量传入，避免 uv 把参数写进 lock 头部造成纯文本漂移"
     )
+    package_cutoffs = set(
+        re.findall(r"--exclude-newer-package\s+['\"]?([^'\"\s]+)", step)
+    )
+    assert package_cutoffs == {
+        "httpx2=2026-09-15T00:00:00Z",
+        "httpcore2=2026-09-15T00:00:00Z",
+        "httpx2-jsfetch=2026-09-15T00:00:00Z",
+        "truststore=2026-09-15T00:00:00Z",
+    }, "全局快照之外只允许已审计的 httpx2 测试栈定点例外"
     reset_command = "rm -f requirements.lock.txt requirements-dev.lock.txt"
     assert reset_command in step, "lock 校验必须从空输出重建，不能依赖已有 pin 偏好"
     assert step.index(reset_command) < step.index("uv pip compile ")
+    assert workflow.count("pip-audit -r requirements-dev.lock.txt") == 1, (
+        "CI 必须审计开发锁，避免测试栈重新引入已知漏洞"
+    )
 
 
 def test_release_archive_omits_loose_requirements_but_keeps_lock():

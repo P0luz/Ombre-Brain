@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime, timedelta, timezone
 from unittest.mock import MagicMock
 
@@ -7,6 +8,7 @@ import pytest
 from errors import ToolInputError
 
 import tools._runtime as rt
+from tools import _identity
 from tools.plan.core import (
     PERMANENT_UNLOCK_DATE,
     letter_lock_state,
@@ -16,6 +18,11 @@ from tools.plan.core import (
     normalize_unlock_date,
 )
 from web import letters
+
+
+windows_safe_commit_only = pytest.mark.skipif(
+    os.name != "nt", reason="historical Letter safe commit is Windows-only"
+)
 
 
 class DisabledEmbedding:
@@ -38,6 +45,7 @@ def install_runtime(bucket_mgr, embedding=None):
     rt.bucket_mgr = bucket_mgr
     rt.embedding_engine = embedding or DisabledEmbedding()
     rt.logger = MagicMock()
+    _identity.set_caller("cheng")
 
 
 def created_id(result):
@@ -54,7 +62,7 @@ def assert_lock_update_succeeded(result, letter_id, lock_type):
 @pytest.mark.asyncio
 async def test_old_and_none_letters_remain_readable_and_proxy_write_compatible(bucket_mgr):
     install_runtime(bucket_mgr)
-    old = await bucket_mgr.create(content="historical body", bucket_type="letter", domain=["letter"])
+    old = await bucket_mgr.create_internal(content="historical body", bucket_type="letter", domain=["letter"])
     await bucket_mgr.update(old, author="user", title="historical title")
     result = await letter_write(author="user", content="proxy body", lock_type="none")
     output = await letter_read(limit=10)
@@ -121,7 +129,7 @@ async def test_owner_reads_locked_full_text_and_other_side_gets_only_metadata(bu
         author="ai", content="hidden body", title="hidden title", lock_type="permanent"
     )
     bucket = await bucket_mgr.get(created_id(result))
-    owner_state = letter_lock_state(bucket, "ai")
+    owner_state = letter_lock_state(bucket, "cheng")
     other_state = letter_lock_state(bucket, "human")
     output = await letter_read(limit=10)
 
@@ -164,7 +172,7 @@ async def test_lock_owner_can_change_every_supported_transition_without_editing_
 @pytest.mark.asyncio
 async def test_non_owner_cannot_change_lock(bucket_mgr):
     install_runtime(bucket_mgr)
-    letter_id = await bucket_mgr.create(content="body", bucket_type="letter", domain=["letter"])
+    letter_id = await bucket_mgr.create_internal(content="body", bucket_type="letter", domain=["letter"])
     await bucket_mgr.update(
         letter_id,
         author="user",
@@ -243,7 +251,7 @@ def test_invalid_timezone_falls_back_to_plus_eight(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_expired_timed_lock_is_lazily_readable_and_normalized(bucket_mgr):
     install_runtime(bucket_mgr)
-    letter_id = await bucket_mgr.create(content="released body", bucket_type="letter", domain=["letter"])
+    letter_id = await bucket_mgr.create_internal(content="released body", bucket_type="letter", domain=["letter"])
     await bucket_mgr.update(
         letter_id,
         author="user",
@@ -261,8 +269,8 @@ async def test_expired_timed_lock_is_lazily_readable_and_normalized(bucket_mgr):
 
 @pytest.mark.asyncio
 async def test_search_excludes_hidden_letter_before_embedding_ranking(bucket_mgr):
-    hidden = await bucket_mgr.create(content="unique hidden nebula", bucket_type="letter", domain=["letter"])
-    visible = await bucket_mgr.create(content="visible garden", bucket_type="letter", domain=["letter"])
+    hidden = await bucket_mgr.create_internal(content="unique hidden nebula", bucket_type="letter", domain=["letter"])
+    visible = await bucket_mgr.create_internal(content="visible garden", bucket_type="letter", domain=["letter"])
     await bucket_mgr.update(
         hidden,
         author="user",
@@ -324,6 +332,7 @@ async def test_dashboard_creates_human_lock_hides_it_from_ai_and_rejects_ai_prox
     bucket = await bucket_mgr.get(data["id"])
     assert response.status_code == 200
     assert bucket["metadata"]["locked_by"] == "human"
+    assert "owner:shared" in bucket["metadata"]["tags"]
     assert letter_lock_state(bucket, "ai")["locked"] is True
 
     rejected = await create(JsonRequest({
@@ -337,7 +346,7 @@ async def test_dashboard_creates_human_lock_hides_it_from_ai_and_rejects_ai_prox
 async def test_dashboard_list_hides_locked_title_and_body_and_patch_only_changes_lock(
     bucket_mgr, monkeypatch
 ):
-    letter_id = await bucket_mgr.create(content="hidden dashboard body", bucket_type="letter", domain=["letter"])
+    letter_id = await bucket_mgr.create_internal(content="hidden dashboard body", bucket_type="letter", domain=["letter"])
     await bucket_mgr.update(
         letter_id,
         author="张三",
@@ -373,7 +382,7 @@ async def test_dashboard_list_hides_locked_title_and_body_and_patch_only_changes
 async def test_dashboard_content_edit_is_separate_and_preserves_lock_metadata(
     bucket_mgr, monkeypatch
 ):
-    letter_id = await bucket_mgr.create(
+    letter_id = await bucket_mgr.create_internal(
         content="original body", bucket_type="letter", domain=["letter"]
     )
     await bucket_mgr.update(
@@ -409,10 +418,10 @@ async def test_dashboard_content_edit_is_separate_and_preserves_lock_metadata(
 
 @pytest.mark.asyncio
 async def test_historical_and_unlocked_dashboard_letters_remain_editable(bucket_mgr, monkeypatch):
-    historical = await bucket_mgr.create(
+    historical = await bucket_mgr.create_internal(
         content="historical body", bucket_type="letter", domain=["letter"]
     )
-    unlocked = await bucket_mgr.create(
+    unlocked = await bucket_mgr.create_internal(
         content="unlocked body", bucket_type="letter", domain=["letter"]
     )
     await bucket_mgr.update(unlocked, author="user", lock_type="none", locked_by="human")
@@ -434,7 +443,7 @@ async def test_historical_and_unlocked_dashboard_letters_remain_editable(bucket_
 async def test_locked_owner_edit_refreshes_embedding_and_other_side_sees_it_only_after_unlock(
     bucket_mgr, monkeypatch
 ):
-    letter_id = await bucket_mgr.create(
+    letter_id = await bucket_mgr.create_internal(
         content="old searchable phrase", bucket_type="letter", domain=["letter"]
     )
     await bucket_mgr.update(
@@ -513,7 +522,7 @@ async def test_expired_timed_letter_keeps_owner_and_can_be_locked_again(
 ):
     monkeypatch.setenv("AI_NAME", "张三")
     install_runtime(bucket_mgr)
-    letter_id = await bucket_mgr.create(
+    letter_id = await bucket_mgr.create_internal(
         content="expired then relocked", bucket_type="letter", domain=["letter"]
     )
     await bucket_mgr.update(
@@ -542,7 +551,7 @@ async def test_expired_timed_letter_keeps_owner_and_can_be_locked_again(
 @pytest.mark.asyncio
 async def test_other_side_cannot_relock_now_public_letter(bucket_mgr):
     install_runtime(bucket_mgr)
-    letter_id = await bucket_mgr.create(
+    letter_id = await bucket_mgr.create_internal(
         content="public but still human owned", bucket_type="letter", domain=["letter"]
     )
     await bucket_mgr.update(
@@ -592,7 +601,7 @@ async def test_dashboard_owner_can_relock_public_letter_but_not_ai_owned_public_
     human_bucket = await bucket_mgr.get(human_id)
     assert human_bucket["metadata"]["locked_by"] == "human"
 
-    ai_id = await bucket_mgr.create(
+    ai_id = await bucket_mgr.create_internal(
         content="AI public owner letter", bucket_type="letter", domain=["letter"]
     )
     await bucket_mgr.update(
@@ -616,7 +625,7 @@ async def test_dashboard_converts_historical_letter_to_ai_owned_lockable_format(
     bucket_mgr, monkeypatch
 ):
     monkeypatch.setenv("AI_NAME", "张三")
-    historical_id = await bucket_mgr.create(
+    historical_id = await bucket_mgr.create_internal(
         content="unchanged historical content",
         bucket_type="letter",
         domain=["letter"],
@@ -679,7 +688,7 @@ async def test_dashboard_converts_historical_letter_to_ai_owned_lockable_format(
 async def test_historical_conversion_is_one_way_and_requires_actual_ai_name(
     bucket_mgr, monkeypatch
 ):
-    historical_id = await bucket_mgr.create(
+    historical_id = await bucket_mgr.create_internal(
         content="historical", bucket_type="letter", domain=["letter"]
     )
     monkeypatch.setattr(letters.sh, "_require_auth", lambda request: None)
@@ -708,7 +717,7 @@ async def test_historical_conversion_accepts_request_scoped_ai_name_override(
     bucket_mgr, monkeypatch
 ):
     """AI_NAME 未配置时，Dashboard 弹窗当场填的名字能直接完成这一次转换。"""
-    historical_id = await bucket_mgr.create(
+    historical_id = await bucket_mgr.create_internal(
         content="historical", bucket_type="letter", domain=["letter"]
     )
     monkeypatch.setattr(letters.sh, "_require_auth", lambda request: None)
@@ -733,7 +742,7 @@ async def test_historical_conversion_accepts_request_scoped_ai_name_override(
 
     # 通用占位名（"ai" 等）不算实际关系名，请求覆盖同样要经过这道检查，
     # 不能靠传参绕过。
-    other_id = await bucket_mgr.create(
+    other_id = await bucket_mgr.create_internal(
         content="historical-2", bucket_type="letter", domain=["letter"]
     )
     generic_name_rejected = await patch(JsonRequest({
@@ -744,12 +753,13 @@ async def test_historical_conversion_accepts_request_scoped_ai_name_override(
 
 
 @pytest.mark.asyncio
+@windows_safe_commit_only
 async def test_archived_letter_compat_restore_keeps_opposite_side_lock_hidden(
     bucket_mgr,
 ):
     """恢复历史 Letter 不能把原本对 AI 隐藏的信意外解锁。"""
     secret = "restored locked letter must remain hidden"
-    letter_id = await bucket_mgr.create(
+    letter_id = await bucket_mgr.create_internal(
         content=secret,
         tags=["__letter__"],
         domain=["letter"],
@@ -788,16 +798,18 @@ async def test_archived_letter_compat_restore_keeps_opposite_side_lock_hidden(
 async def test_literal_match_survives_vector_ranking(bucket_mgr):
     install_runtime(bucket_mgr)
 
-    target = await bucket_mgr.create(
+    target = await bucket_mgr.create_internal(
         content="这封信里有一个确切的词组：蓝鲸观测站。",
-        bucket_type="letter", domain=["letter"],
+        bucket_type="letter", domain=["letter"], lock_type="none",
+        locked_by="ai", locked_by_principal="cheng", writer_name="张三",
     )
-    await bucket_mgr.update(target, author="user", writer_name="张三", lock_type="none")
-    noise = await bucket_mgr.create(
+    await bucket_mgr.update(target, author="user")
+    noise = await bucket_mgr.create_internal(
         content="一封完全无关的信，只是恰好被向量排在了前面。",
-        bucket_type="letter", domain=["letter"],
+        bucket_type="letter", domain=["letter"], lock_type="none",
+        locked_by="ai", locked_by_principal="cheng", writer_name="张三",
     )
-    await bucket_mgr.update(noise, author="user", writer_name="张三", lock_type="none")
+    await bucket_mgr.update(noise, author="user")
 
     class _NoiseFirstEngine:
         """模拟无门槛向量检索：把无关信排在前面，且不返回目标信。"""
@@ -819,10 +831,12 @@ async def test_semantic_only_matches_still_returned(bucket_mgr):
     """没有字面命中时，语义相似的结果仍要正常返回。"""
     install_runtime(bucket_mgr)
 
-    semantic = await bucket_mgr.create(
-        content="今天心情很好，阳光不错。", bucket_type="letter", domain=["letter"],
+    semantic = await bucket_mgr.create_internal(
+        content="今天心情很好，阳光不错。", bucket_type="letter",
+        domain=["letter"], lock_type="none", locked_by="ai",
+        locked_by_principal="cheng", writer_name="张三",
     )
-    await bucket_mgr.update(semantic, author="user", writer_name="张三", lock_type="none")
+    await bucket_mgr.update(semantic, author="user")
 
     class _SemanticEngine:
         enabled = True
@@ -835,3 +849,16 @@ async def test_semantic_only_matches_still_returned(bucket_mgr):
     out = await letter_read(query="天气", author="user", limit=10)
 
     assert "阳光不错" in out
+
+@pytest.fixture(autouse=True)
+def _owner_safe_letter_fixtures(bucket_mgr, monkeypatch):
+    """Letters exercised through caller-facing reads belong to this test caller."""
+    create_internal = bucket_mgr.create_internal
+
+    async def create_owned(*args, **kwargs):
+        tags = list(kwargs.pop("tags", []) or [])
+        if not any(str(tag).lower().startswith("owner:") for tag in tags):
+            tags.append("owner:cheng")
+        return await create_internal(*args, tags=tags, **kwargs)
+
+    monkeypatch.setattr(bucket_mgr, "create_internal", create_owned)

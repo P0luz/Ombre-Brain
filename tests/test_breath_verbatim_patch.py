@@ -129,7 +129,7 @@ async def test_query_single_bucket_returns_stored_content_exactly(bucket_mgr, mo
         "原话中的次数是三次，顺序是先确认、再等待、最后离开。\n"
         "这是一段普通叙述，不是任务清单。"
     )
-    bucket_id = await bucket_mgr.create(content=original, domain=["记忆"], importance=8)
+    bucket_id = await bucket_mgr.create_internal(content=original, domain=["记忆"], importance=8)
     stored_before = (await bucket_mgr.get(bucket_id))["content"]
     dehydrator = _install_runtime(bucket_mgr)
     monkeypatch.setattr("tools.breath.search.random.random", lambda: 1.0)
@@ -156,7 +156,7 @@ async def test_query_equal_to_bucket_id_reads_raw_content_without_indexes(
     bucket_mgr, monkeypatch
 ):
     original = "- 第一条原始 bullet\n- 第二条保留缩进\n  - 子项不能被摘要\n- 第三条"
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content=original, domain=["记忆"], importance=10, pinned=True
     )
     dehydrator = _install_runtime(bucket_mgr)
@@ -183,7 +183,7 @@ async def test_query_multiple_buckets_return_each_body_exactly(bucket_mgr, monke
         "群星校验词：第二段。\n次数=7，先后顺序不能变化。\n",
     ]
     ids = [
-        await bucket_mgr.create(content=content, domain=["测试"], importance=7)
+        await bucket_mgr.create_internal(content=content, domain=["测试"], importance=7)
         for content in contents
     ]
     stored = {bucket_id: (await bucket_mgr.get(bucket_id))["content"] for bucket_id in ids}
@@ -205,7 +205,7 @@ async def test_query_multiple_buckets_return_each_body_exactly(bucket_mgr, monke
 @pytest.mark.asyncio
 async def test_catalog_still_returns_metadata_without_body(bucket_mgr):
     body = "目录模式绝不能返回的完整私密正文。"
-    await bucket_mgr.create(content=body, name="目录校验", domain=["测试"], importance=9)
+    await bucket_mgr.create_internal(content=body, name="目录校验", domain=["测试"], importance=9)
     dehydrator = _install_runtime(bucket_mgr)
 
     output = await dispatch(catalog=True)
@@ -221,7 +221,7 @@ async def test_breath_never_exposes_source_evidence(
 ):
     source_ref = "src_" + "a" * 64
     body = "只返回这条记忆正文，不自动展开背后的聊天原文。"
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content=body,
         title="京都计划",
         domain=["旅行"],
@@ -243,7 +243,7 @@ async def test_breath_never_exposes_source_evidence(
 async def test_catalog_never_exposes_source_evidence(bucket_mgr):
     source_ref = "src_" + "b" * 64
     body = "目录里绝不能出现的原文或记忆正文。"
-    await bucket_mgr.create(
+    await bucket_mgr.create_internal(
         content=body,
         name="京都旅行",
         title="京都旅行",
@@ -278,7 +278,7 @@ async def test_token_budget_omits_whole_bucket_instead_of_truncating(monkeypatch
     dehydrator = _install_runtime(manager)
     monkeypatch.setattr("tools.breath.search.random.random", lambda: 1.0)
     _, first_cost = render_stored_bucket(
-        first, "[bucket_id:first]", "👣 Footprint：暂时无法读取"
+        first, "[bucket_id:first]", ""
     )
 
     output = await _search("预算校验", max_tokens=first_cost)
@@ -320,7 +320,7 @@ async def test_default_surface_skips_oversized_core_and_keeps_later_core(monkeyp
     _, later_cost = render_stored_bucket(
         later,
         "📌 [核心准则] [bucket_id:later-core]",
-        "👣 Footprint：暂时无法读取",
+        "",
     )
 
     output = await surface_default(
@@ -396,17 +396,17 @@ async def test_oversized_core_rule_does_not_take_ordinary_surfacing_down_with_it
     _, first_core_cost = render_stored_bucket(
         first_core,
         "📌 [核心准则] [bucket_id:first-core]",
-        "👣 Footprint：暂时无法读取",
+        "",
     )
     _, oversized_core_cost = render_stored_bucket(
         oversized_core,
         "📌 [核心准则] [bucket_id:oversized-core]",
-        "👣 Footprint：暂时无法读取",
+        "",
     )
     _, ordinary_cost = render_stored_bucket(
         ordinary,
         "[权重:10.00] [bucket_id:ordinary]",
-        "👣 Footprint：暂时无法读取",
+        "",
     )
 
     output = await surface_default(
@@ -486,12 +486,12 @@ async def test_default_surface_keeps_ordinary_results_when_all_core_fits(monkeyp
     _, core_cost = render_stored_bucket(
         core,
         "📌 [核心准则] [bucket_id:fitting-core]",
-        "👣 Footprint：暂时无法读取",
+        "",
     )
     _, ordinary_cost = render_stored_bucket(
         ordinary,
         "[权重:9.00] [bucket_id:fitting-ordinary]",
-        "👣 Footprint：暂时无法读取",
+        "",
     )
 
     output = await surface_default(
@@ -550,10 +550,10 @@ async def test_default_surface_skips_random_oversized_candidate_and_keeps_later_
     monkeypatch.setattr("tools.breath.surface.random.shuffle", blocker_first)
     monkeypatch.setattr("tools.breath.surface.random.random", lambda: 1.0)
     _, top_cost = render_stored_bucket(
-        top, "[权重:10.00] [bucket_id:top]", "👣 Footprint：暂时无法读取"
+        top, "[权重:10.00] [bucket_id:top]", ""
     )
     _, high_cost = render_stored_bucket(
-        high, "[权重:9.00] [bucket_id:high]", "👣 Footprint：暂时无法读取"
+        high, "[权重:9.00] [bucket_id:high]", ""
     )
     rt.config["surfacing"]["breath_max_tokens"] = top_cost + high_cost
 
@@ -597,7 +597,7 @@ async def test_oversized_passive_association_does_not_report_primary_truncation(
     monkeypatch.setattr("tools.breath.surface.random.shuffle", lambda items: None)
     monkeypatch.setattr("tools.breath.surface.random.random", lambda: 1.0)
     _, top_cost = render_stored_bucket(
-        top, "[权重:10.00] [bucket_id:top]", "👣 Footprint：暂时无法读取"
+        top, "[权重:10.00] [bucket_id:top]", ""
     )
 
     output = await surface_default(
@@ -613,7 +613,7 @@ async def test_oversized_passive_association_does_not_report_primary_truncation(
 
 @pytest.mark.asyncio
 async def test_filters_and_importance_mode_remain_active(bucket_mgr, monkeypatch):
-    keep_id = await bucket_mgr.create(
+    keep_id = await bucket_mgr.create_internal(
         content="过滤校验词：应当命中。",
         tags=["保留"],
         domain=["工作"],
@@ -621,13 +621,13 @@ async def test_filters_and_importance_mode_remain_active(bucket_mgr, monkeypatch
         valence=0.8,
         arousal=0.7,
     )
-    wrong_domain_id = await bucket_mgr.create(
+    wrong_domain_id = await bucket_mgr.create_internal(
         content="过滤校验词：错误 domain。",
         tags=["保留"],
         domain=["私人"],
         importance=4,
     )
-    wrong_tag_id = await bucket_mgr.create(
+    wrong_tag_id = await bucket_mgr.create_internal(
         content="过滤校验词：错误 tag。",
         tags=["忽略"],
         domain=["工作"],

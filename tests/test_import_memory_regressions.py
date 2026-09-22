@@ -14,6 +14,7 @@ import os
 
 import pytest
 
+from tools import _identity
 from import_memory import (
     ImportEngine,
     ImportState,
@@ -22,7 +23,14 @@ from import_memory import (
     chunk_turns,
     diagnose_import_errors,
 )
+from ombrebrain.eventsourcing.footprint import import_origin
 from utils import count_tokens_approx
+
+
+@pytest.fixture(autouse=True)
+def _authenticated_caller():
+    with _identity.caller_context("cheng"):
+        yield
 
 
 def test_import_error_diagnostics_cover_known_and_unknown_provider_errors():
@@ -90,6 +98,9 @@ class FakeBucketManager:
         })
         return bid
 
+    async def create_internal(self, *args, **kwargs):
+        return await self.create(*args, **kwargs)
+
     async def search(self, query, limit=1, domain_filter=None):
         return []
 
@@ -109,8 +120,35 @@ class FakeBucketManager:
         return True
 
 
+def _route_owner_safe_store_to_fake(monkeypatch, bucket_mgr):
+    """Keep unit tests isolated while preserving ImportEngine's public contract."""
+    import import_memory as im
+
+    async def store(**kwargs):
+        duplicate = bucket_mgr.find_exact_content(kwargs["content"])
+        if duplicate is not None:
+            return duplicate["id"], True, ""
+        bucket_id = await bucket_mgr.create_internal(
+            content=kwargs["content"],
+            tags=kwargs.get("tags"),
+            importance=kwargs.get("importance", 5),
+            domain=kwargs.get("domain"),
+            valence=kwargs.get("valence", 0.5),
+            arousal=kwargs.get("arousal", 0.3),
+            name=kwargs.get("name"),
+            source_tool=kwargs.get("source_tool"),
+            event_actor="human",
+            imported=True,
+        )
+        return bucket_id, False, ""
+
+    monkeypatch.setattr(im, "_owner_safe_merge_or_create", store)
+
+
 @pytest.mark.asyncio
-async def test_structured_json_import_is_deterministic_and_skips_llm(tmp_path):
+async def test_structured_json_import_is_deterministic_and_skips_llm(
+    tmp_path, monkeypatch
+):
     bucket_mgr = FakeBucketManager()
     dehydrator = FakeDehydrator()
     dehydrator.api_available = False
@@ -119,6 +157,7 @@ async def test_structured_json_import_is_deterministic_and_skips_llm(tmp_path):
         bucket_mgr,
         dehydrator,
     )
+    _route_owner_safe_store_to_fake(monkeypatch, bucket_mgr)
     raw = json.dumps([
         {
             "name": "第一条",
@@ -140,7 +179,12 @@ async def test_structured_json_import_is_deterministic_and_skips_llm(tmp_path):
         },
     ], ensure_ascii=False)
 
-    result = await engine.start(raw, filename="memories.json")
+    result = await engine.start(
+        raw,
+        filename="memories.json",
+        owner="cheng",
+        footprint_origin=import_origin("mcp_tool", "cheng"),
+    )
 
     assert result["status"] == "completed"
     assert result["api_calls"] == 0
@@ -159,7 +203,9 @@ async def test_structured_json_import_is_deterministic_and_skips_llm(tmp_path):
 # ------------------------------------------------------------
 
 @pytest.mark.asyncio
-async def test_preserve_raw_reprocessing_same_chunk_does_not_duplicate(tmp_path):
+async def test_preserve_raw_reprocessing_same_chunk_does_not_duplicate(
+    tmp_path, monkeypatch
+):
     item = {
         "name": "暗号", "content": "我们的暗号是灯塔", "domain": ["情感"],
         "valence": 0.6, "arousal": 0.5, "tags": ["仪式"], "importance": 8,
@@ -169,6 +215,9 @@ async def test_preserve_raw_reprocessing_same_chunk_does_not_duplicate(tmp_path)
     dehydrator = FakeDehydrator(extraction_items=[item])
     config = {"buckets_dir": str(tmp_path), "human": "阿明"}
     engine = ImportEngine(config, bucket_mgr, dehydrator)
+    _route_owner_safe_store_to_fake(monkeypatch, bucket_mgr)
+    engine._job_owner = "cheng"
+    engine._job_origin = import_origin("mcp_tool", "cheng")
 
     chunk = {"content": "[阿明] 我们的暗号是灯塔", "timestamp_start": "", "timestamp_end": ""}
 
@@ -181,8 +230,8 @@ async def test_preserve_raw_reprocessing_same_chunk_does_not_duplicate(tmp_path)
     matches = [b for b in bucket_mgr.created if b["content"] == "我们的暗号是灯塔"]
     assert len(matches) == 1, f"preserve_raw 内容被重复建桶: {matches}"
     assert engine.state.data["memories_created"] == 1
-    assert engine.state.data["memories_skipped"] == 1
-    assert engine.state.data["memories_merged"] == 0
+    assert engine.state.data["memories_skipped"] == 0
+    assert engine.state.data["memories_merged"] == 1
 
 
 @pytest.mark.asyncio
@@ -190,7 +239,7 @@ async def test_import_creates_new_bucket_instead_of_semantically_merging_old_mem
     bucket_mgr,
     test_config,
 ):
-    target_id = await bucket_mgr.create(
+    target_id = await bucket_mgr.create_internal(
         content="import merge target",
         importance=5,
         domain=["import"],
@@ -229,7 +278,7 @@ async def test_import_exact_duplicate_is_skipped_without_mutating_existing(
     bucket_mgr,
     test_config,
 ):
-    existing_id = await bucket_mgr.create(
+    existing_id = await bucket_mgr.create_internal(
         content="exact imported event",
         importance=4,
         domain=["import"],
@@ -295,7 +344,7 @@ def test_chunk_turns_rejects_non_positive_budget():
 @pytest.mark.asyncio
 async def test_import_builds_exact_content_index_once_per_job(tmp_path):
     bucket_mgr = FakeBucketManager()
-    await bucket_mgr.create(content="已有正文")
+    await bucket_mgr.create_internal(content="已有正文")
     engine = ImportEngine(
         {"buckets_dir": str(tmp_path), "human": "用户"},
         bucket_mgr,
@@ -362,7 +411,12 @@ async def test_import_preflight_failure_replaces_stale_status(tmp_path):
     )
     engine.state.data.update({"status": "completed", "source_file": "old.txt"})
 
-    result = await engine.start("Human: 新对话", filename="new.txt")
+    result = await engine.start(
+        "Human: 新对话",
+        filename="new.txt",
+        owner="cheng",
+        footprint_origin=import_origin("mcp_tool", "cheng"),
+    )
 
     assert result["status"] == "error"
     assert result["source_file"] == "new.txt"
@@ -401,7 +455,13 @@ async def test_resume_with_changed_human_label_starts_fresh_not_misaligned(tmp_p
     config["human"] = "小美帮手"
     new_hash = hashlib.sha256(f"小美帮手\x00{raw}".encode()).hexdigest()[:16]
 
-    result = await engine.start(raw, filename="f.md", resume=True)
+    result = await engine.start(
+        raw,
+        filename="f.md",
+        resume=True,
+        owner="cheng",
+        footprint_origin=import_origin("mcp_tool", "cheng"),
+    )
 
     assert result["source_hash"] == new_hash, (
         "human_label 变化后应该识别为「源变了」走全新导入，"

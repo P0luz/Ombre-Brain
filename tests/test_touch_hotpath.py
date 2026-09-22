@@ -8,7 +8,7 @@ import pytest
 
 @pytest.mark.asyncio
 async def test_touch_default_still_ripples(bucket_mgr, monkeypatch):
-    bid = await bucket_mgr.create(content="内容一号一号一号", name="一", domain=["测试"])
+    bid = await bucket_mgr.create_internal(content="内容一号一号一号", name="一", domain=["测试"])
     called = {"n": 0}
     orig = bucket_mgr._time_ripple
 
@@ -23,7 +23,7 @@ async def test_touch_default_still_ripples(bucket_mgr, monkeypatch):
 
 @pytest.mark.asyncio
 async def test_touch_ripple_false_skips_time_ripple(bucket_mgr, monkeypatch):
-    bid = await bucket_mgr.create(content="内容一号一号一号", name="一", domain=["测试"])
+    bid = await bucket_mgr.create_internal(content="内容一号一号一号", name="一", domain=["测试"])
     called = {"n": 0}
 
     async def spy(*a, **k):
@@ -41,7 +41,7 @@ async def test_touch_ripple_false_skips_time_ripple(bucket_mgr, monkeypatch):
 async def test_touch_many_bumps_all_and_ripples_at_most_once(bucket_mgr, monkeypatch):
     ids = []
     for i in range(3):
-        ids.append(await bucket_mgr.create(content=f"内容{i}号内容内容", name=f"桶{i}", domain=["测试"]))
+        ids.append(await bucket_mgr.create_internal(content=f"内容{i}号内容内容", name=f"桶{i}", domain=["测试"]))
     called = {"n": 0}
 
     async def spy(*a, **k):
@@ -62,7 +62,7 @@ async def test_touch_many_bumps_all_and_ripples_at_most_once(bucket_mgr, monkeyp
 
 @pytest.mark.asyncio
 async def test_touch_many_tolerates_bad_id(bucket_mgr):
-    good = await bucket_mgr.create(content="内容好好好好好", name="好", domain=["测试"])
+    good = await bucket_mgr.create_internal(content="内容好好好好好", name="好", domain=["测试"])
     await bucket_mgr.touch_many(["nonexistent-id", good], ripple=False)  # 不抛
     b = await bucket_mgr.get(good)
     assert float(b["metadata"].get("activation_count") or 0) >= 1

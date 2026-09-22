@@ -141,7 +141,7 @@ async def test_dict_items_preserve_explicit_metadata_and_title(grow_rt):
     bucket = (await bucket_mgr.list_all(include_archive=False))[0]
     metadata = bucket["metadata"]
     assert metadata["title"] == "wife"
-    assert metadata["tags"] == ["老婆", "称呼"]
+    assert metadata["tags"] == ["老婆", "称呼", "owner:cheng"]
     assert metadata["importance"] == 8
     assert metadata["domain"] == ["恋爱"]
     assert metadata["valence"] == 0.9
@@ -279,10 +279,11 @@ async def test_shortpath_reason_keeps_invalid_and_length_boundaries(
 async def test_digest_merge_never_overwrites_existing_why_remembered(grow_rt):
     bucket_mgr, _stub = grow_rt
     event_content = "旧桶已经有人工写下的保留理由。"
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content=event_content,
         title="旧理由优先",
         why_remembered="这是旧桶中已经确认的理由。",
+        tags=["owner:cheng"],
     )
 
     class DigestWhyDehydrator(StubDehydrator):
@@ -314,9 +315,10 @@ async def test_digest_merge_never_overwrites_existing_why_remembered(grow_rt):
 async def test_items_merge_fills_empty_why_once_and_preserves_it(grow_rt):
     bucket_mgr, _stub = grow_rt
     event_content = "items 二次写入命中的同一个具体事件。"
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content=event_content,
         title="items 合并原因",
+        tags=["owner:cheng"],
     )
 
     first = await grow_items([{
@@ -344,9 +346,10 @@ async def test_concurrent_trace_why_wins_over_stale_grow_merge(
 ):
     bucket_mgr, _stub = grow_rt
     event_content = "grow 合并与 trace 同时为同一桶补写原因。"
-    bucket_id = await bucket_mgr.create(
+    bucket_id = await bucket_mgr.create_internal(
         content=event_content,
         title="并发原因",
+        tags=["owner:cheng"],
     )
     original_get = bucket_mgr.get
     snapshot_ready = asyncio.Event()
@@ -419,7 +422,7 @@ async def test_missing_title_and_importance_are_filled_by_analysis(grow_rt):
     bucket = (await bucket_mgr.list_all(include_archive=False))[0]
     assert bucket["metadata"]["title"] == "模型补齐标题"
     assert bucket["metadata"]["importance"] == 7
-    assert bucket["metadata"]["tags"] == ["模型补全"]
+    assert bucket["metadata"]["tags"] == ["模型补全", "owner:cheng"]
     assert "why_remembered" not in bucket["metadata"]
     assert dehydrator.analyze_calls == 1
 
@@ -434,7 +437,7 @@ async def test_explicit_empty_tags_are_not_refilled_by_model(grow_rt):
     }])
 
     bucket = (await bucket_mgr.list_all(include_archive=False))[0]
-    assert bucket["metadata"]["tags"] == []
+    assert bucket["metadata"]["tags"] == ["owner:cheng"]
 
 
 @pytest.mark.asyncio

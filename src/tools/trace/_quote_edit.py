@@ -35,7 +35,7 @@ from errors import ToolInputError
 from ombrebrain.storage.attribution import names_from_config
 from ombrebrain.storage.quote_store import quotes_from_metadata, render_quotes
 
-from .. import _runtime as rt
+from .. import _identity, _runtime as rt
 
 _REJECT_EMPTY = (
     "这条记忆没有引语，trace 不能补录。"
@@ -69,6 +69,10 @@ async def apply(bucket_id: str, quotes_replace: list) -> str:
     bucket = await rt.bucket_mgr.get(bucket_id)
     if not bucket:
         raise ToolInputError(f"找不到记忆 {bucket_id}；本次未修改。")
+    try:
+        owner = _identity.mutation_owner(bucket.get("metadata") or {})
+    except ValueError as exc:
+        raise ToolInputError(str(exc)) from exc
 
     # 已存在的用宽容读取——磁盘上的 frontmatter 可能被手工编辑坏，
     # 一条坏数据不该让整个订正入口失效。
@@ -79,7 +83,10 @@ async def apply(bucket_id: str, quotes_replace: list) -> str:
 
     try:
         # 结构、条数、长度的校验在 BucketManager 里统一做（超限拒绝不截断）。
-        ok = await rt.bucket_mgr.update(bucket_id, event_actor="llm", quotes=incoming)
+        with _identity.manager_mutation_guard(rt.bucket_mgr, {bucket_id: owner}):
+            ok = await rt.bucket_mgr.update(
+                bucket_id, event_actor="llm", quotes=incoming
+            )
     except ValueError as exc:
         raise ToolInputError(f"引语未通过校验：{exc} 本次未修改。")
 

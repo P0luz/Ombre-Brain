@@ -1,0 +1,6 @@
+# Development and test dependencies; direct test tools are pinned.
+# Runtime dependencies stay authoritative in requirements.txt.
+-r requirements.txt
+
+pytest==9.1.1
+pytest-asyncio==1.4.0

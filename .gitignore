@@ -27,6 +27,7 @@ plan.md
 scarp_paper
 backup_*/
 *.db
+.locks/
 import_state.json
 data/
 

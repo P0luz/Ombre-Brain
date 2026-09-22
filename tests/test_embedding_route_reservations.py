@@ -211,7 +211,7 @@ async def test_embedding_migration_reserves_before_staging_and_provider_await(
     assert losing_request.json_calls == 0
     assert calls == {
         "construct": 1,
-        "reset": 1,
+        "reset": 0,
         "stop": 0,
         "start": 0,
         "swap": 0,
@@ -222,21 +222,22 @@ async def test_embedding_migration_reserves_before_staging_and_provider_await(
     assert first_response.status_code == 202
     payload = response_json(first_response)
     assert payload["ok"] is True
+    assert payload["accepted"] is True
+    assert payload["completed"] is False
     assert payload["status_path"].endswith("_pending_migration_status.json")
 
     assert migration_engine._migration_task is not None
     await asyncio.wait_for(migration_engine._migration_task, timeout=2)
     await asyncio.sleep(0)
 
-    assert calls["stop"] == 1
-    assert calls["start"] == 1
-    assert calls["swap"] == 1
-    assert embedding_web.sh.config["embedding"]["base_url"] == ""
-    assert embedding_web.sh.config["embedding"]["api_format"] == "ollama"
-    assert embedding_web.sh.config["embedding"]["model"] == "bge-m3"
-    assert persisted_updates[-1]["base_url"] == ""
-    assert persisted_updates[-1]["api_format"] == "ollama"
-    assert persisted_updates[-1]["model"] == "bge-m3"
+    # E-MIG-01 coordinates the outbox through the shared DB gate and only
+    # publishes runtime/config after a validated private SQLite generation.
+    # This deliberately minimal fake cannot publish, so none of the legacy
+    # stop/swap/persist hooks may run.
+    assert calls["stop"] == 0
+    assert calls["start"] == 0
+    assert calls["swap"] == 0
+    assert persisted_updates == []
     assert migration_engine.is_running() is False
 
 
@@ -260,8 +261,16 @@ async def test_cancelled_migration_releases_owner_and_runs_cleanup_callback(tmp_
         target_engine=SimpleNamespace(),
         fetch_buckets=fetch_buckets,
     )
-    reservation = migration_engine.reserve_migration()
+    reservation = migration_engine.reserve_migration(cfg.db_path)
     assert reservation is not None
+    shadow_path = migration_engine.create_shadow_path(
+        cfg.db_path,
+        reservation=reservation,
+    )
+    cfg.target_engine = SimpleNamespace(
+        db_path=str(shadow_path),
+        list_all_ids=lambda: [],
+    )
     task = migration_engine.start_migration(
         cfg,
         on_complete=completions.append,
@@ -276,9 +285,9 @@ async def test_cancelled_migration_releases_owner_and_runs_cleanup_callback(tmp_
 
     assert completions == [False]
     assert migration_engine.is_running() is False
-    next_reservation = migration_engine.reserve_migration()
+    next_reservation = migration_engine.reserve_migration(cfg.db_path)
     assert next_reservation is not None
-    assert migration_engine.release_migration_reservation(next_reservation)
+    next_reservation.close()
 
 
 @pytest.mark.asyncio

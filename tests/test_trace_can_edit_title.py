@@ -24,6 +24,11 @@ import pytest_asyncio
 from errors import ToolInputError
 
 
+async def _create_owned(manager, **kwargs):
+    kwargs.setdefault("tags", ["owner:cheng"])
+    return await manager.create_internal(**kwargs)
+
+
 class _NoopDecay:
     is_running = True
 
@@ -60,7 +65,7 @@ async def 环境(bucket_mgr, monkeypatch):
     monkeypatch.setattr(rt, "mark_op", None)
     monkeypatch.setattr(rt, "record_v3_tool_event", lambda *a, **k: None)
 
-    编号 = await bucket_mgr.create(
+    编号 = await _create_owned(bucket_mgr,
         content="一条有标题的普通记忆。", title="原来的标题", importance=6,
     )
     return bucket_mgr, 编号
@@ -143,7 +148,7 @@ async def test_对方锁着的信改不动标题(环境):
     from tools.trace import dispatch as trace
 
     管理器, _ = 环境
-    信id = await 管理器.create(
+    信id = await _create_owned(管理器,
         content="user 锁住的信。",
         title="锁着的信题",
         bucket_type="letter",

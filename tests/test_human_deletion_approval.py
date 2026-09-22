@@ -7,7 +7,7 @@ from deletion_requests import DeletionRequestStore
 
 @pytest.mark.asyncio
 async def test_formal_request_is_pending_required_unique_withdrawable_and_persistent(bucket_mgr, test_config):
-    bid = await bucket_mgr.create("keep me")
+    bid = await bucket_mgr.create_internal("keep me")
     store = DeletionRequestStore(test_config["buckets_dir"], bucket_mgr)
     assert (await store.submit(bid, "   "))["code"] == "reason_required"
     submitted = await store.submit(bid, "no longer useful")
@@ -26,16 +26,16 @@ async def test_formal_request_is_pending_required_unique_withdrawable_and_persis
 async def test_daily_limit_counts_successful_submissions(bucket_mgr, test_config):
     store = DeletionRequestStore(test_config["buckets_dir"], bucket_mgr)
     for index in range(10):
-        bid = await bucket_mgr.create(f"memory {index}")
+        bid = await bucket_mgr.create_internal(f"memory {index}")
         assert (await store.submit(bid, "reason"))["ok"] is True
         assert (await store.withdraw(bid))["ok"] is True
-    extra = await bucket_mgr.create("extra")
+    extra = await bucket_mgr.create_internal("extra")
     assert (await store.submit(extra, "reason"))["code"] == "daily_limit"
 
 
 @pytest.mark.asyncio
 async def test_lifetime_limit_counts_rejections_and_withdrawals(bucket_mgr, test_config):
-    bid = await bucket_mgr.create("one life")
+    bid = await bucket_mgr.create_internal("one life", tags=["owner:cheng"])
     store = DeletionRequestStore(test_config["buckets_dir"], bucket_mgr)
     for index in range(5):
         submitted = await store.submit(bid, f"reason {index}")
@@ -52,17 +52,17 @@ async def test_lifetime_limit_counts_rejections_and_withdrawals(bucket_mgr, test
 @pytest.mark.asyncio
 async def test_test_bucket_exempt_letter_included_and_direct_delete_unchanged(bucket_mgr, test_config):
     store = DeletionRequestStore(test_config["buckets_dir"], bucket_mgr)
-    test_id = await bucket_mgr.create("fixture", test_data=True)
+    test_id = await bucket_mgr.create_internal("fixture", test_data=True)
     result = await store.submit(test_id, "cleanup")
     assert result["deleted"] is True and result["exempt_test_data"] is True
     assert await bucket_mgr.get(test_id) is None
 
-    letter_id = await bucket_mgr.create("sealed words", bucket_type="letter")
+    letter_id = await bucket_mgr.create_internal("sealed words", bucket_type="letter")
     pending = await store.submit(letter_id, "obsolete")
     assert pending["pending"] is True
     assert await bucket_mgr.get(letter_id) is not None
 
-    ai_id = await bucket_mgr.create("AI may delete directly")
+    ai_id = await bucket_mgr.create_internal("AI may delete directly")
     assert await bucket_mgr.delete(ai_id) is True
     assert store.status(ai_id) is None
 
@@ -70,8 +70,8 @@ async def test_test_bucket_exempt_letter_included_and_direct_delete_unchanged(bu
 @pytest.mark.asyncio
 async def test_breath_batch_approve_reject_and_undecided(bucket_mgr, test_config):
     store = DeletionRequestStore(test_config["buckets_dir"], bucket_mgr)
-    first = await bucket_mgr.create("first body")
-    second = await bucket_mgr.create("second body")
+    first = await bucket_mgr.create_internal("first body", tags=["owner:cheng"])
+    second = await bucket_mgr.create_internal("second body", tags=["owner:cheng"])
     one = await store.submit(first, "first reason")
     two = await store.submit(second, "second reason")
 
@@ -97,12 +97,13 @@ async def test_breath_batch_approve_reject_and_undecided(bucket_mgr, test_config
 async def test_breath_batch_does_not_reveal_ai_locked_letter_body(bucket_mgr, test_config):
     store = DeletionRequestStore(test_config["buckets_dir"], bucket_mgr)
     secret = "sealed letter body must never enter deletion breath"
-    letter_id = await bucket_mgr.create(
+    letter_id = await bucket_mgr.create_internal(
         secret,
         bucket_type="letter",
         lock_type="permanent",
         locked_by="human",
         unlock_date="9999-12-31",
+        tags=["owner:cheng"],
     )
     submitted = await store.submit(letter_id, "please remove this letter", is_letter=True)
 
@@ -123,7 +124,7 @@ async def test_missing_pending_target_is_durably_superseded_before_breath(
     bucket_mgr, test_config, terminal_action
 ):
     store = DeletionRequestStore(test_config["buckets_dir"], bucket_mgr)
-    bucket_id = await bucket_mgr.create("independently removed")
+    bucket_id = await bucket_mgr.create_internal("independently removed")
     submitted = await store.submit(bucket_id, "remove this")
 
     assert await getattr(bucket_mgr, terminal_action)(bucket_id) is True
