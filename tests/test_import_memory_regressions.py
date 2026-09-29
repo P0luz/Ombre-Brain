@@ -58,14 +58,17 @@ def test_import_provider_error_detail_redacts_credentials():
 class FakeDehydrator:
     api_available = True
 
-    def __init__(self, extraction_items=None):
+    def __init__(self, extraction_items=None, import_max_tokens=8192):
         self.extraction_items = extraction_items if extraction_items is not None else []
+        self.import_max_tokens = import_max_tokens
         self.prompts: list[str] = []
         self.chat_calls: list[str] = []
+        self.chat_max_tokens: list[int] = []
 
     async def _chat(self, prompt, content, max_tokens=0, temperature=0.0):
         self.prompts.append(prompt)
         self.chat_calls.append(content)
+        self.chat_max_tokens.append(max_tokens)
         return json.dumps(self.extraction_items)
 
     async def merge(self, old, new):
@@ -152,6 +155,33 @@ async def test_structured_json_import_is_deterministic_and_skips_llm(tmp_path):
     ]
     assert all(item["source_tool"] == "import" for item in bucket_mgr.created)
     assert all(item["event_actor"] == "human" for item in bucket_mgr.created)
+
+
+@pytest.mark.asyncio
+async def test_import_extraction_uses_dedicated_budget_for_large_valid_json(tmp_path):
+    full_output = json.dumps(
+        [{"name": "长记忆", "content": "x" * 3000, "importance": 6}]
+    )
+    assert 2048 < len(full_output) < 6144
+
+    class BudgetedDehydrator(FakeDehydrator):
+        async def _chat(self, prompt, content, max_tokens=0, temperature=0.0):
+            self.prompts.append(prompt)
+            self.chat_calls.append(content)
+            self.chat_max_tokens.append(max_tokens)
+            return full_output[:max_tokens]
+
+    dehydrator = BudgetedDehydrator(import_max_tokens=6144)
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path), "human": "用户"},
+        FakeBucketManager(),
+        dehydrator,
+    )
+
+    items = await engine._extract_memories("Human: 一段用于导入的合成对话")
+
+    assert dehydrator.chat_max_tokens == [6144]
+    assert items[0]["content"] == "x" * 3000
 
 
 # ------------------------------------------------------------

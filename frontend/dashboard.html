@@ -2895,7 +2895,8 @@
           <span id="dehy-key-msg" style="margin-left:8px;font-size:11px;"></span>
         </div>
         <div style="margin-top:-4px;margin-bottom:12px;padding-left:122px;font-size:11px;color:var(--text-light);">留空不改。Key 保存后立即生效并写入 .env（重启持久）。</div>
-        <div class="config-row"><label>Max Tokens</label><input type="number" id="cfg-dehy-maxtokens" min="128" max="8192" /></div>
+        <div class="config-row"><label>通用/默认 Max Tokens</label><input type="number" id="cfg-dehy-maxtokens" min="128" max="8192" /></div>
+        <div class="config-row"><label>批量导入 Max Tokens</label><input type="number" id="cfg-dehy-import-maxtokens" min="1" max="9007199254740991" /></div>
         <div class="config-row"><label>Temperature</label><input type="number" id="cfg-dehy-temp" min="0" max="2" step="0.05" /></div>
       </div>
 
@@ -7938,6 +7939,19 @@ async function loadOwnerBadge(cfg) {
   } catch (e) { /* ignore：徽标是锦上添花，失败不影响主流程 */ }
 }
 
+var IMPORT_MAX_TOKENS_DEFAULT = '8192';
+var IMPORT_MAX_TOKENS_MAX_SAFE = '9007199254740991';
+
+function normalizeImportMaxTokens(value) {
+  var raw = String(value == null ? '' : value).trim();
+  if (!/^\d+$/.test(raw)) return null;
+  raw = raw.replace(/^0+/, '') || '0';
+  if (raw === '0') return null;
+  if (raw.length > IMPORT_MAX_TOKENS_MAX_SAFE.length) return null;
+  if (raw.length === IMPORT_MAX_TOKENS_MAX_SAFE.length && raw > IMPORT_MAX_TOKENS_MAX_SAFE) return null;
+  return raw;
+}
+
 async function loadConfig() {
   try {
     var res = await authFetch('/api/config');
@@ -7951,6 +7965,7 @@ async function loadConfig() {
     var dehyNotice = document.getElementById('dehy-key-notice');
     if (dehyNotice) dehyNotice.style.display = cfg.dehydration.api_key_masked ? 'none' : '';
     document.getElementById('cfg-dehy-maxtokens').value = cfg.dehydration.max_tokens || 1024;
+    document.getElementById('cfg-dehy-import-maxtokens').value = normalizeImportMaxTokens(cfg.dehydration.import_max_tokens) || IMPORT_MAX_TOKENS_DEFAULT;
     document.getElementById('cfg-dehy-temp').value = cfg.dehydration.temperature != null
       ? cfg.dehydration.temperature : 0.1;
     document.getElementById('cfg-emb-enabled').value = cfg.embedding.enabled ? 'true' : 'false';
@@ -8290,6 +8305,12 @@ async function saveEmbedKey() {
 
 async function saveConfig(persist) {
   var dehyTemperatureRaw = document.getElementById('cfg-dehy-temp').value.trim();
+  var dehyImportMaxTokensRaw = normalizeImportMaxTokens(document.getElementById('cfg-dehy-import-maxtokens').value);
+  var status = document.getElementById('config-status');
+  if (dehyImportMaxTokensRaw == null) {
+    status.innerHTML = '<span style="color:var(--negative)">' + _SV.err + ' 批量导入 Max Tokens 必须是 1 到 9007199254740991 之间的整数</span>';
+    return;
+  }
   var mergeThresholdRaw = document.getElementById('cfg-merge').value.trim();
   var dehyTemperature = dehyTemperatureRaw === '' ? NaN : Number(dehyTemperatureRaw);
   var mergeThreshold = mergeThresholdRaw === '' ? NaN : Number(mergeThresholdRaw);
@@ -8298,6 +8319,7 @@ async function saveConfig(persist) {
       model: document.getElementById('cfg-dehy-model').value,
       base_url: document.getElementById('cfg-dehy-url').value,
       max_tokens: parseInt(document.getElementById('cfg-dehy-maxtokens').value) || 1024,
+      import_max_tokens: dehyImportMaxTokensRaw,
       temperature: Number.isFinite(dehyTemperature) ? dehyTemperature : 0.1,
       api_format: (document.getElementById('cfg-dehy-format') || {value:'openai_compat'}).value || 'openai_compat',
     },
@@ -8317,7 +8339,6 @@ async function saveConfig(persist) {
     timezone: (document.getElementById('cfg-timezone').value || '').trim(),
     persist: persist,
   };
-  var status = document.getElementById('config-status');
   try {
     var res = await authFetch('/api/config', {
       method: 'POST',

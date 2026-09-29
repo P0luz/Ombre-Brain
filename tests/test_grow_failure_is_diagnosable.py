@@ -64,6 +64,7 @@ async def test_digest_budget_is_configurable(tmp_path):
     """预算得能调：thinking 模型下多少算够跟具体模型强相关，写死必然有人撞上。"""
     default = _dehydrator(tmp_path)
     assert default.digest_max_tokens == 8192
+    assert default.import_max_tokens == 8192
     default._cache_conn.close()
 
     tuned = Dehydrator(
@@ -72,12 +73,16 @@ async def test_digest_budget_is_configurable(tmp_path):
                 "api_key": "test-key",
                 "base_url": "https://example.invalid/v1",
                 "model": "test-model",
+                "max_tokens": 1024,
                 "digest_max_tokens": 32768,
+                "import_max_tokens": 32768,
             },
             "buckets_dir": str(tmp_path),
         }
     )
     assert tuned.digest_max_tokens == 32768
+    assert tuned.max_tokens == 1024
+    assert tuned.import_max_tokens == 32768
     tuned._cache_conn.close()
 
 

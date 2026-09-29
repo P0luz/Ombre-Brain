@@ -63,7 +63,6 @@ _CHUNK_ERR_PREVIEW = 200       # 单 chunk 错误信息截断长度
 # 拒绝，绝不再静默截断上传正文。这样任何解析边界问题都会变成可见错误，而不是
 # 悄悄丢失长对话的尾部。
 _EXTRACT_TOKEN_CEILING = _CHUNK_TARGET_TOKENS
-_EXTRACT_MAX_TOKENS = 2048
 _EXTRACT_MAX_ITEMS = 5         # 提示词之外再做强制写入上限
 _STRUCTURED_IMPORT_MAX_ITEMS = 10000  # 人工整理 JSON 的单文件安全上限
 _EXTRACT_TEMPERATURE = 0.0     # 提取需确定性
@@ -1367,7 +1366,7 @@ class ImportEngine:
         raw = await self.dehydrator._chat(
             prompt,
             data_record,
-            max_tokens=_EXTRACT_MAX_TOKENS,
+            max_tokens=self.dehydrator.import_max_tokens,
             temperature=_EXTRACT_TEMPERATURE,
         )
 

@@ -125,6 +125,7 @@ dehydration:
   #   Gemini:      https://generativelanguage.googleapis.com/v1beta/openai
   # api_key: ""    # ⚠️ Use env var OMBRE_COMPRESS_API_KEY instead / 请使用环境变量 OMBRE_COMPRESS_API_KEY
   max_tokens: 1024
+  import_max_tokens: 8192          # 默认 8192，可按模型能力调整；最大值仅为 Dashboard/JSON 无损整数边界
   temperature: 0.1
   timeout_seconds: 120             # LLM request timeout seconds / LLM 请求超时秒数
   # OpenAI-compatible provider extensions / OpenAI 兼容服务商扩展参数

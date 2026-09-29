@@ -1,4 +1,9 @@
+import json
+import shutil
+import subprocess
 from pathlib import Path
+
+import pytest
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -117,3 +122,54 @@ def test_main_config_load_and_save_preserve_valid_zero_values():
     assert "Number.isFinite(mergeThreshold) ? mergeThreshold : 75" in save_source
     assert "parseFloat(document.getElementById('cfg-dehy-temp').value) || 0.1" not in save_source
     assert "parseInt(document.getElementById('cfg-merge').value) || 75" not in save_source
+
+
+def test_import_budget_dashboard_declares_safe_integer_contract():
+    html = DASHBOARD.read_text(encoding="utf-8")
+    input_markup = (
+        '<input type="number" id="cfg-dehy-import-maxtokens" min="1" '
+        'max="9007199254740991" />'
+    )
+    load_start = html.index("async function loadConfig()")
+    save_start = html.index("async function saveConfig(", load_start)
+    load_source = html[load_start:save_start]
+    save_end = html.index("checkAuth().then", save_start)
+    save_source = html[save_start:save_end]
+
+    assert input_markup in html
+    assert "normalizeImportMaxTokens(cfg.dehydration.import_max_tokens)" in load_source
+    assert "import_max_tokens: dehyImportMaxTokensRaw" in save_source
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js unavailable")
+def test_import_budget_dashboard_executes_lossless_load_save_round_trip():
+    html = DASHBOARD.read_text(encoding="utf-8")
+    helper_start = html.index("var IMPORT_MAX_TOKENS_DEFAULT")
+    helper_end = html.index("async function loadConfig()", helper_start)
+    helpers = html[helper_start:helper_end]
+    script = helpers + r"""
+const valid = [32768, Number.MAX_SAFE_INTEGER].map(function(value) {
+  const loaded = normalizeImportMaxTokens(value);
+  return {loaded: loaded, saved: normalizeImportMaxTokens(loaded)};
+});
+const invalid = normalizeImportMaxTokens('9007199254740992');
+process.stdout.write(JSON.stringify({valid: valid, invalid: invalid}));
+"""
+
+    completed = subprocess.run(
+        ["node", "-e", script],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+
+    assert json.loads(completed.stdout) == {
+        "valid": [
+            {"loaded": "32768", "saved": "32768"},
+            {
+                "loaded": "9007199254740991",
+                "saved": "9007199254740991",
+            },
+        ],
+        "invalid": None,
+    }

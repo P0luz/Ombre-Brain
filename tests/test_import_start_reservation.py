@@ -3,11 +3,13 @@
 import asyncio
 import json
 import threading
+from types import SimpleNamespace
 
 import pytest
 
 import import_memory as import_memory_module
 from import_memory import ImportEngine
+from dehydrator import Dehydrator
 from web import import_api
 
 
@@ -26,6 +28,7 @@ class FakeMCP:
 
 class BlockingDehydrator:
     api_available = True
+    import_max_tokens = 8192
 
     def __init__(self):
         self.entered = asyncio.Event()
@@ -41,6 +44,7 @@ class BlockingDehydrator:
 
 class ImmediateDehydrator:
     api_available = True
+    import_max_tokens = 8192
 
     async def _chat(self, *_args, **_kwargs):
         return "[]"
@@ -163,6 +167,79 @@ async def test_upload_toctou_returns_one_started_and_one_409(tmp_path, monkeypat
     assert status["source_file"] == started_payload["filename"]
     assert status["source_file"] == first_request.query_params["filename"]
     assert status["source_file"] != second_request.query_params["filename"]
+
+
+@pytest.mark.asyncio
+async def test_upload_uses_import_budget_and_accepts_json_larger_than_2048(
+    tmp_path, monkeypatch
+):
+    calls = []
+    full_output = json.dumps(
+        [{"name": "导入结果", "content": "x" * 3000, "importance": 6}]
+    )
+    assert 2048 < len(full_output) < 8192
+
+    class Completions:
+        async def create(self, **kwargs):
+            calls.append(kwargs)
+            limit = kwargs["max_tokens"]
+            content = full_output[:limit]
+            return SimpleNamespace(
+                choices=[SimpleNamespace(
+                    finish_reason="length" if len(full_output) > limit else "stop",
+                    message=SimpleNamespace(content=content),
+                )]
+            )
+
+    class BucketManager:
+        def __init__(self):
+            self.created = []
+
+        async def list_all(self, include_archive=False):
+            assert include_archive is False
+            return list(self.created)
+
+        async def create(self, content, **kwargs):
+            self.created.append({"id": "imported-1", "content": content, **kwargs})
+            return "imported-1"
+
+    config = {
+        "buckets_dir": str(tmp_path),
+        "human": "用户",
+        "dehydration": {
+            "api_key": "test-key",
+            "base_url": "https://example.invalid/v1",
+            "model": "test-model",
+            "max_tokens": 1024,
+            "digest_max_tokens": 16384,
+            "import_max_tokens": 8192,
+        },
+    }
+    dehydrator = Dehydrator(config)
+    dehydrator.client = SimpleNamespace(chat=SimpleNamespace(completions=Completions()))
+    bucket_mgr = BucketManager()
+    engine = ImportEngine(config, bucket_mgr, dehydrator)
+    monkeypatch.setattr(import_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(import_api.sh, "import_engine", engine, raising=False)
+    mcp = FakeMCP()
+    import_api.register(mcp)
+
+    try:
+        response = await mcp.routes[("POST", "/api/import/upload")](
+            BodyRequest("Human: 合成导入内容\nAssistant: 已记录", "budget.md")
+        )
+        await _wait_until_finished(engine)
+    finally:
+        dehydrator._cache_conn.close()
+
+    status = engine.get_status()
+    assert response.status_code == 200
+    assert _payload(response)["status"] == "started"
+    assert calls[0]["max_tokens"] == 8192
+    assert status["status"] == "completed"
+    assert status["chunks_failed"] == 0
+    assert status["memories_created"] == 1
+    assert bucket_mgr.created[0]["content"] == "x" * 3000
 
 
 @pytest.mark.asyncio

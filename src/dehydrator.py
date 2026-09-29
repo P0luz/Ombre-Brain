@@ -38,7 +38,12 @@ from typing import Optional
 
 from openai import AsyncOpenAI
 
-from utils import clean_llm_json, count_tokens_approx, parse_bool, positive_float
+from utils import (
+    clean_llm_json,
+    count_tokens_approx,
+    parse_bool,
+    positive_float,
+)
 
 from ombrebrain.integrations.provider_detect import (
     is_gemini_native_host,
@@ -97,6 +102,8 @@ _SAME_EVENT_INPUT_LIMIT = 1800  # 旧桶与新内容各一份
 # --- 各专用调用的 max_tokens 覆盖 ---
 _ANALYZE_MAX_TOKENS = 4096      # Gemini 2.5 thinking 会消耗大量 token，需留足余量
 _DIGEST_MAX_TOKENS = 8192       # 日记拆条内容多，thinking + 输出都需要足量空间
+_IMPORT_MAX_TOKENS = 8192       # 批量导入会返回多条结构化记忆，需独立可调预算
+_JS_MAX_SAFE_INTEGER = 9_007_199_254_740_991  # Dashboard/JSON 无损整数边界
 _PLAN_JUDGE_MAX_TOKENS = 2048   # thinking 模型下 200 token 完全不够
 _PLAN_JUDGE_TEMPERATURE = 0.0   # 判定需确定性
 _SAME_EVENT_MAX_TOKENS = 1024   # 仅返回紧凑 JSON
@@ -115,6 +122,21 @@ _PLAN_REASON_MAX = 200   # plan 判定 reason 上限
 _SAME_EVENT_REASON_MAX = 200  # 合并边界判定 reason 上限
 _PARSE_ERR_PREVIEW = 200  # JSON 解析失败时日志中 raw 预览长度
 _WHY_REMEMBERED_MAX_CHARS = 500
+
+
+def _positive_safe_int(value, default: int) -> int:
+    """Parse a positive integer that survives Dashboard JSON round-trips."""
+    if isinstance(value, bool):
+        return int(default)
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return int(default)
+    if isinstance(value, float) and value != parsed:
+        return int(default)
+    if not 1 <= parsed <= _JS_MAX_SAFE_INTEGER:
+        return int(default)
+    return parsed
 
 # --- importance 范围（与哲学边界一致）---
 _IMPORTANCE_MIN = 1
@@ -328,6 +350,9 @@ class Dehydrator:
         # 撞上。撞上时的表现是「短内容正常、长内容一直失败」。
         self.digest_max_tokens = int(
             positive_float(dehy_cfg.get("digest_max_tokens"), _DIGEST_MAX_TOKENS)
+        )
+        self.import_max_tokens = _positive_safe_int(
+            dehy_cfg.get("import_max_tokens"), _IMPORT_MAX_TOKENS
         )
         self.temperature = dehy_cfg.get("temperature", _DEFAULT_TEMPERATURE)
         self.timeout_seconds = positive_float(dehy_cfg.get("timeout_seconds"), _API_TIMEOUT_SECONDS)

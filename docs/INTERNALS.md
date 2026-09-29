@@ -1429,7 +1429,8 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `dehydration.model` | `deepseek-chat` | LLM 模型名 |
 | `dehydration.base_url` | `https://api.deepseek.com/v1` | OpenAI 兼容 endpoint |
 | `dehydration.api_key` | `""` | 推荐用环境变量传入，不要写文件 |
-| `dehydration.max_tokens` | `1024` | 单次生成上限 |
+| `dehydration.max_tokens` | `1024` | 未指定专用预算时的单次生成上限 |
+| `dehydration.import_max_tokens` | `8192` | 批量历史导入提取的独立输出预算；默认 8192，可按模型能力调整。最大值 9007199254740991 仅用于保证 Dashboard/JSON 整数无损往返，不是模型预算的业务上限 |
 | `dehydration.temperature` | `0.1` | 采样温度 |
 | `embedding.enabled` | `true` | 启用向量检索 |
 | `embedding.backend` | `api` | 只支持 `api`（OpenAI 兼容端点）；本地离线向量化不是另一个后端，而是把 `base_url` 指向 OB 托管的 Ollama 边车 |

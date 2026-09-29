@@ -703,7 +703,8 @@ docker compose -f deploy/docker-compose.yml up -d
 | `transport` | `stdio`（本地）/ `streamable-http`（远程） | Docker 部署用 `streamable-http` |
 | `dehydration.model` | 脱水/打标 LLM 模型 | `gemini-2.0-flash` |
 | `dehydration.base_url` | LLM API 地址 | `https://generativelanguage.googleapis.com/v1beta/openai/` |
-| `dehydration.max_tokens` | 模型最大输出 token | `4096`（必须足够大，否则 JSON 截断导致域分类失败） |
+| `dehydration.max_tokens` | 未指定专用预算时的默认输出 token | `4096`（必须足够大，否则 JSON 截断导致域分类失败） |
+| `dehydration.import_max_tokens` | 批量历史导入提取的独立输出预算；默认 8192，可按模型能力调整（最大值仅为 Dashboard/JSON 无损整数边界） | `8192` |
 | `dehydration.timeout_seconds` | LLM 请求超时秒数 | 国内服务器连云端 API 可设 `120` 或更高 |
 | `embedding.api_format` | `gemini`（云端）/ `ollama`（本地 bge-m3）/ `openai_compat` | `gemini` |
 | `embedding.model` | embedding 模型 | 云端 `gemini-embedding-001` / 本地 `bge-m3` |

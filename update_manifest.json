@@ -7,8 +7,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "372237698aaed9901f47c1e9d39d62dd7a6326a72feebfdc26d382c4f520a8c1",
-      "size": 574294
+      "sha256": "cb6baad55ec33974d8acb91762ea1a59d42c742c7301b01afc81cb7a966cf471",
+      "size": 575517
     },
     {
       "path": "frontend/favicon.svg",
@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "050b1be586f238ff4c9b66a45397a4df7bd9de6a8809205f4f7dba0234d93790",
+      "sha256": "67d62752f371c91ee8f1f00359136e7bec7ba2f05445c646c60ab9188c6e6903",
       "size": 6
     },
     {
@@ -52,8 +52,8 @@
     },
     {
       "path": "src/dehydrator.py",
-      "sha256": "2981bd50ecbfeea7f3d673a41954c07161a0a8397cefb8a19d54c7bf7d55a0a9",
-      "size": 62379
+      "sha256": "0c2687bd422ad56db90921af36ac4c472e30870cc6c016fd7030b67d824fe051",
+      "size": 63194
     },
     {
       "path": "src/deletion_requests.py",
@@ -77,8 +77,8 @@
     },
     {
       "path": "src/import_memory.py",
-      "sha256": "9b37820cef77aa98a4668ed3f1bfc330a361792a007d2802b0e0181cc51c7a80",
-      "size": 60715
+      "sha256": "9f89c8ef32b09f0d6ee3274bba1984b8d383ee2ae338ccd4e56dd04171ab5f55",
+      "size": 60702
     },
     {
       "path": "src/migrate_engine.py",
@@ -802,8 +802,8 @@
     },
     {
       "path": "src/web/config_api.py",
-      "sha256": "5e99ac9704c1feb3696e761360b731203f14dcb872bc4d78bf87713a3b28cd63",
-      "size": 73932
+      "sha256": "acc4025caf5403a5f00b0ab58361fa80eda4b4a47c21fc6dd50d5b04884be96e",
+      "size": 74867
     },
     {
       "path": "src/web/dashboard.py",
@@ -897,5 +897,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "3.6.14"
+  "version": "3.6.15"
 }

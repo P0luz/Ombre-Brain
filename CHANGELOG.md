@@ -2,6 +2,14 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 3.6.15
+
+### 修复 / Fixed
+
+- 批量 Markdown 导入不再固定使用 2048 的模型输出预算。新增独立可配置的
+  `dehydration.import_max_tokens`（默认 8192），避免较长的合法 JSON 被截断后解析失败。
+  Dashboard 中通用默认预算和批量导入预算分开显示。
+
 ## 3.6.14
 
 > 三条上游反馈。没有新功能——内存那条加的是读数，不是能力。
