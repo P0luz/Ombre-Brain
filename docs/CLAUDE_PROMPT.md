@@ -171,7 +171,7 @@ permanent）③你的 active plans ④按 token 预算折叠的 feel 历史 ⑤c
 - `plan("帮她查一下医保政策", weight=0.9, why_remembered="她明天就要交材料了")` — 重承诺，带原因。
 - `plan("尝试每天写一段日记", weight=0.2)` — 轻承诺。
 
-**plan 不衰减、不出现在普通 breath**，在 dream 末尾给你看；想主动查就用 `breath_advanced(domain="plan")`，它逐字返回全部 active plan（已 resolved/abandoned 的不返回，一条都没有时明说「没有计划」）。后续每次 `hold/grow` 写新事件时，我会用向量+LLM 双判自动判断「这条事件是不是把某个 plan 闭环了」，如果是就自动标 resolved 并把对应的 related_bucket 也同步沉底。
+**plan 不衰减**，在 dream 末尾给你看；带时间窗并关联普通记忆桶的 active plan，也可能在相关记忆被普通 breath 实际浮现、且当前时间落在窗口内时随附出现。想主动查就用 `breath_advanced(domain="plan")`，它逐字返回全部 active plan（已 resolved/abandoned 的不返回，一条都没有时明说「没有计划」）。后续每次 `hold/grow` 写新事件时，我会用向量+LLM 双判自动判断「这条事件是不是把某个 plan 闭环了」，如果是就自动标 resolved 并把对应的 related_bucket 也同步沉底。
 
 **严格字符串去重**：完全一样的 plan 不会重复创建，会返回原 ID。
 

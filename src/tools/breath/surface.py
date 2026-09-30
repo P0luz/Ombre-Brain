@@ -33,11 +33,11 @@ tools/breath/surface.py — 无 query 浮现模式
 
 import random
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from .. import _runtime as rt
-from ..plan.core import is_letter_bucket
+from ..plan.core import is_letter_bucket, collect_resurfaced_plans
 from utils import parse_bool, parse_iso_datetime
 from ._date_range import bucket_in_created_range
 from ._shared import bucket_has_tags, footprint_reader, render_within_budget
@@ -70,6 +70,19 @@ _PIN_BUDGET_NOTICE = (
     "token 预算不足：核心准则 required≈{required} tokens（完整渲染核心准则总计），"
     "limit={limit} tokens，omitted={omitted} 条没能返回。"
 )
+
+# Phase 3：末尾 Plan section 的预留 token（第一版固定常量，不配置化）。
+_PLAN_SECTION_RESERVE_TOKENS = 600
+
+
+def _plan_section_reserve(max_tokens: int) -> int:
+    """为末尾 Plan section 预留的 token，仅当本轮有 eligible plan 时才实际扣。
+
+    `min(600, max_tokens // 4)`：600 约够 1~2 条典型 plan；`// 4` 上限避免小
+    budget 时过度挤压普通浮现。没有 eligible plan 时调用方按 0 处理，普通浮现
+    预算与改动前逐字一致。
+    """
+    return min(_PLAN_SECTION_RESERVE_TOKENS, max(0, max_tokens // 4))
 
 
 def _can_surface(bucket: dict) -> bool:
@@ -437,6 +450,19 @@ async def surface_default(
     )
     candidates = candidates[:max_results]
 
+    # --- Phase 3：resurfacing 预留（仅当本轮预判有 eligible plan 时才扣预算）---
+    # 预判用 candidates（乐观），最终渲染用真正渲染成功的 shown_dynamic_ids。
+    # _maybe_plans 为空时 plan_reserve=0、token_budget 不变，普通浮现行为逐字一致。
+    _now_utc = datetime.now(timezone.utc)
+    _candidate_ids = {b["id"] for b in candidates}
+    _maybe_plans = collect_resurfaced_plans(all_buckets, _candidate_ids, _now_utc)
+    plan_reserve = _plan_section_reserve(max_tokens) if _maybe_plans else 0
+    # clamp：reserve 按 max_tokens 算，但此刻 token_budget 已被 pinned/核心准则扣过，
+    # 不夹这一手就可能减成负数（pinned 占满时），拖着 dynamic/passive/dream 全 omit。
+    plan_reserve = min(plan_reserve, max(0, token_budget))
+    token_budget -= plan_reserve
+    shown_dynamic_ids: list = []
+
     dynamic_results = []
     dynamic_omitted = 0
     # 曾经这里是 `if not pinned_omitted:`——一条核心准则装不下，普通浮现
@@ -456,6 +482,7 @@ async def surface_default(
                 dynamic_omitted += 1
                 continue
             dynamic_results.append(rendered)
+            shown_dynamic_ids.append(b["id"])
             token_budget -= entry_tokens
         except Exception as e:
             rt.logger.warning(f"Failed to render surfaced bucket / 浮现渲染失败: {e}")
@@ -614,6 +641,21 @@ async def surface_default(
         except Exception as e:
             rt.logger.warning(f"Dream surface block failed / 偶遇模块异常: {e}")
 
+    # --- Phase 3：末尾 Plan section（用真正渲染成功的 shown_dynamic_ids 最终筛选）---
+    plan_lines: list[str] = []
+    plan_omitted = 0
+    if plan_reserve and shown_dynamic_ids:
+        try:
+            final_plans = collect_resurfaced_plans(
+                all_buckets, set(shown_dynamic_ids), _now_utc
+            )
+            if final_plans:
+                plan_lines, plan_omitted = render_within_budget(
+                    final_plans, plan_reserve, _footprint
+                )
+        except Exception as e:
+            rt.logger.warning(f"plan resurfacing render failed / plan 浮现渲染失败: {e}")
+
     parts = []
     if core_filter_notice:
         parts.append(core_filter_notice)
@@ -627,6 +669,10 @@ async def surface_default(
         parts.append("=== 那天的今天 ===\n" + "\n---\n".join(anniversary_results))
     if dream_results:
         parts.append("=== 偶然想起 ===\n" + "\n---\n".join(dream_results))
+    if plan_lines:
+        parts.append("=== 到点的计划 ===\n" + "\n---\n".join(plan_lines))
+    if plan_omitted:
+        parts.append(f"另有 {plan_omitted} 条相关计划因输出预算未展示。")
     if pinned_omitted:
         parts.append(
             _pin_budget_notice(
