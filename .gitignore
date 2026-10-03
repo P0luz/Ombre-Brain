@@ -49,6 +49,8 @@ tests/unit/
 # 忽略，导致新增脚本 git add 时被静默吞掉、本地 pytest 绿但推上去缺文件。已移除。
 
 rule.md
+_mcp_token.txt
+_server.err
 models/
 test_analyze.py
 test_flow.py
