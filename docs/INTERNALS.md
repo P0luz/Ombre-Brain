@@ -127,7 +127,7 @@ Ombre-Brain/
 - **reclassify_api.py** — 一次性脚本：把历史落在「未分类/」的桶重新 `analyze()` 打标并搬到正确 domain 目录，只改 frontmatter 与文件位置。
 - **errors.py** — OB 统一错误码（如 OB-W005 embedding 模型漂移、OB-Startup 系列），供各模块抛结构化异常。
 
-> **第一人称豁免**：`import_memory.py` 在喂给 LLM 的 prompt 里把对话格式化成 `[用户] ... [AI] ...` 文本块（[src/import_memory.py](src/import_memory.py) `_chunk_turns` 第 291 行），这是给 LLM 看的「对话块」标签，不是写入桶 frontmatter 或返回给模型的 docstring，因此不违反 §2.9 第一人称原则。修改这段时勿误删。
+> **第一人称豁免**：`import_memory.py` 在喂给 LLM 的 prompt 里把对话格式化成 `[用户] ... [AI] ...` 文本块（[src/import_memory.py](../src/import_memory.py) 的 `chunk_turns`），这是给 LLM 看的「对话块」标签，不是写入桶 frontmatter 或返回给模型的 docstring，因此不违反 §2.9 第一人称原则。修改这段时勿误删。
 > **导入阈值**：`_PATTERN_MIN_DYNAMIC_BUCKETS = 5` / `_PATTERN_PIN_SUGGEST_THRESHOLD = 5`，详见 rule.md §6 备注。
 - **utils.py** — 配置加载（env > yaml > defaults 三级优先级）、日志、12 位 hex 短 ID 生成、`safe_path()` 路径遍历防护、`count_tokens_approx()` 中英混排 token 估算。
 
