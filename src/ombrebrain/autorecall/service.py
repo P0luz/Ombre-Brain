@@ -9,7 +9,8 @@
     提醒里不带原文（模型手里有）。
   - 只有命中唤醒词（「记得 / 上次 / 之前…」+ 面板上加的词）才召回，取第 1 名；召不到就交给模型自己 breath_search。
     召回 = 字面 bigram BM25 与向量的 RRF 融合。
-    唤醒词 = 回忆语气词 + 库里 [[人名/事物名/宠物名]]（只在服务端比对，名单不回传）+ 面板上加的词。
+    唤醒词 = 回忆语气词 + Them 名册里的人名（只在服务端比对，名单不回传）+ 面板上加的词（宠物名、事物名放这里）。
+    不再把所有 [[链接]] 当名字：「工作」这种常用词被写成链接时会误唤醒。
     唤醒词 = 用户在主动回忆，按 SurfacePolicy 的显式查询（search 模式）放行 digested。
     离线评测（48 句带回忆语气的问句、约 500 桶的真实库）：Hit@1 0.938 / Hit@3 1.0。
   - 反向门（``agree_top``，默认 2）：唤醒之后，只有字面和向量两路的前 N 名里有同一个桶才注入；
@@ -20,7 +21,8 @@
 - **SessionEnd**：整段补存一遍（幂等，Stop 漏掉的会补上），再连一次线。
 
 可见性：信件 / feel / plan / 归档 不出；准则桶（pinned / permanent）每次开场已在场，不重复；
-dont_surface 不出。注入文本一律陈述句，不是指令。
+dont_surface 不出；self / I（含候选）/ anchor 不出——自我认知和坐标系不该因为一句「记得」就被送进上下文。
+注入文本一律陈述句，不是指令。
 
 对外暴露：AutoRecallService / autorecall_config。
 """
@@ -31,6 +33,7 @@ import asyncio
 import json
 import logging
 import re
+import time
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta
 from typing import Any
@@ -44,12 +47,13 @@ from .transcript_store import MAX_LINKS_PER_BUCKET, TranscriptStore
 logger = logging.getLogger("ombre_brain.autorecall")
 
 _SURFACE_POLICY = SurfacePolicyVM.default()
-_HIDDEN_TYPES = frozenset({"feel", "plan", "letter", "archived", "permanent"})
+_HIDDEN_TYPES = frozenset({"feel", "plan", "letter", "archived", "permanent", "self", "i"})
+_I_CANDIDATE_TAG = "__i_candidate__"
+_NAMES_TTL_SECONDS = 60.0
 _RRF_K = 60
 _POOL = 20
 _EXCERPT_CHARS = 800
 DEFAULT_WAKE_WORDS = ("记得", "上次", "之前", "那次", "那天", "想起", "以前", "当时", "来着")
-_WIKILINK = re.compile(r"\[\[([^\[\]|#\n]{2,20})(?:[|#][^\]]*)?\]\]")
 _ASCII_NAME = re.compile(r"^[A-Za-z0-9_.-]+$")
 
 _REMINDER = (
@@ -129,6 +133,7 @@ class AutoRecallService:
         embedding_engine: Any = None,
         dream_fn: Callable[[], Awaitable[str]] | None = None,
         today_fn: Callable[[], str] | None = None,
+        names_fn: Callable[[], list[str]] | None = None,
     ) -> None:
         self.bucket_mgr = bucket_mgr
         self.config = config
@@ -141,7 +146,9 @@ class AutoRecallService:
         self._index: BM25Index | None = None
         self._ids: list[str] = []
         self._by_id: dict[str, dict] = {}
+        self.names_fn = names_fn
         self._names: frozenset[str] = frozenset()
+        self._names_at = 0.0
 
     @property
     def settings(self) -> dict[str, Any]:
@@ -153,6 +160,8 @@ class AutoRecallService:
     def _visible(bucket: dict) -> bool:
         meta = bucket.get("metadata") or {}
         if str(meta.get("type") or "") in _HIDDEN_TYPES or _truthy(meta.get("pinned")):
+            return False
+        if _truthy(meta.get("anchor")) or meta.get("i_stage") or _I_CANDIDATE_TAG in (meta.get("tags") or []):
             return False
         if is_letter_bucket(bucket) or _truthy(meta.get("dont_surface")):
             return False
@@ -176,10 +185,6 @@ class AutoRecallService:
             index = await asyncio.to_thread(BM25Index, docs)
             self._ids = [str(b.get("id")) for b in visible]
             self._by_id = {str(b.get("id")): b for b in visible}
-            self._names = frozenset(
-                name.strip() for b in visible for name in _WIKILINK.findall(b.get("content") or "")
-                if name.strip()
-            )
             self._index = index
             self._fingerprint = fingerprint
 
@@ -188,9 +193,20 @@ class AutoRecallService:
         text = str(prompt or "")
         return any(word in text for word in self.settings["wake_words"])
 
+    def _known_names(self) -> frozenset[str]:
+        """Them 名册里的称呼，最多每分钟刷一次（名册改了不一定有桶变）。"""
+        now = time.monotonic()
+        if self.names_fn is not None and now - self._names_at >= _NAMES_TTL_SECONDS:
+            try:
+                self._names = frozenset(n.strip() for n in self.names_fn() if n and len(n.strip()) >= 2)
+            except Exception as exc:
+                logger.info("autorecall names unavailable: %s", type(exc).__name__)
+            self._names_at = now
+        return self._names
+
     def _mentions_known_name(self, prompt: str) -> bool:
         text = str(prompt or "")
-        for name in self._names:
+        for name in self._known_names():
             if _ASCII_NAME.match(name):
                 # 英文名按整词、区分大小写比，免得「ok」「main」这类常用词误唤醒。
                 if re.search(rf"(?<![A-Za-z0-9]){re.escape(name)}(?![A-Za-z0-9])", text):
@@ -221,14 +237,13 @@ class AutoRecallService:
         settings = self.settings
         if not settings["enabled"] or not str(prompt or "").strip():
             return []
-        woke = self.is_wake(prompt)
-        if not woke and not settings["wake_on_names"]:
+        # 先判唤醒、再碰库：没唤醒的句子（绝大多数）一次 list_all 都不做。
+        woke = self.is_wake(prompt) or (settings["wake_on_names"] and self._mentions_known_name(prompt))
+        if not woke:
             return []
         await self._ensure_index()
         index, ids, by_id = self._index, self._ids, self._by_id
         if index is None or not ids:
-            return []
-        if not woke and not self._mentions_known_name(prompt):
             return []
         lexical = [ids[i] for i, _ in sorted(index.scores(prompt).items(), key=lambda kv: -kv[1])[:_POOL]]
         vector = await self._vector_ranking(prompt, set(ids))

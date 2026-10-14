@@ -13,7 +13,12 @@
 环境变量：
     OB_URL         Ombre Brain 地址，默认 http://127.0.0.1:18001
     OB_HOOK_TOKEN  与服务端 OMBRE_HOOK_TOKEN / hooks.token 相同；没设就什么都不做
+    OB_RELAY       设为 0 时不用本地中继，每次直连
     OB_HOOK_DEBUG  设为 1 时把错误打到 stderr
+
+提速：优先走同目录 ob_relay.py 拉起的本地中继（常驻、与 OB 保持长连接）。
+要等结果的（开窗、发问）经中继转发；不用等的（存回复、关窗补存）交给中继就返回。
+中继不在时：这次直连（不用等的就丢给一个脱离的子进程去发），同时把中继拉起来给下一次用。
 
 任何错误都静默退出 0：记忆出问题不能卡住对话。
 不解析对话记录文件取当轮内容——官方说那是内部格式、随版本会变；
@@ -24,14 +29,19 @@
 import hashlib
 import json
 import os
+import subprocess
 import sys
+import time
 import uuid
+from pathlib import Path
 import urllib.error
 import urllib.request
 
 _TIMEOUTS = {"session-start": 40, "prompt": 12, "stop": 25, "session-end": 8}
 _EVENT_NAMES = {"session-start": "SessionStart", "prompt": "UserPromptSubmit"}
 _MAX_BACKFILL = 1000
+_NO_WAIT = frozenset({"stop", "session-end"})
+_HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 
 
 def _debug(message: str) -> None:
@@ -52,6 +62,92 @@ def _post(path: str, payload: dict, timeout: float) -> dict:
     )
     with urllib.request.urlopen(request, timeout=timeout) as response:
         return json.loads(response.read().decode("utf-8") or "{}")
+
+
+def _relay_state():
+    if os.environ.get("OB_RELAY") == "0":
+        return None
+    path = Path(os.environ.get("OB_RELAY_STATE") or Path.home() / ".claude" / "hooks" / ".ob_relay.json")
+    try:
+        state = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    url = os.environ.get("OB_URL", "http://127.0.0.1:18001").rstrip("/")
+    token = os.environ.get("OB_HOOK_TOKEN", "")
+    expected = hashlib.sha256(f"{url}\x1f{token}".encode()).hexdigest()[:16]
+    return state if state.get("fp") == expected else None
+
+
+def _detach(args: list, stdin_bytes: bytes = b"") -> None:
+    """起一个脱离的子进程：Claude Code 退出也不会把它一起杀掉。"""
+    kwargs = {"stdin": subprocess.PIPE, "stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL,
+              "close_fds": True}
+    if os.name == "nt":
+        kwargs["creationflags"] = 0x00000008 | 0x00000200  # DETACHED_PROCESS | NEW_PROCESS_GROUP
+    else:
+        kwargs["start_new_session"] = True
+    proc = subprocess.Popen([sys.executable, *args], **kwargs)
+    if stdin_bytes:
+        proc.stdin.write(stdin_bytes)
+    proc.stdin.close()
+
+
+def _spawn_relay() -> None:
+    relay = _HERE / "ob_relay.py"
+    if os.environ.get("OB_RELAY") == "0" or not relay.is_file():
+        return
+    # 几个钩子同时发现中继不在时只拉一个：10 秒内的启动锁。
+    lock = Path(os.environ.get("OB_RELAY_STATE") or Path.home() / ".claude" / "hooks" / ".ob_relay.json")
+    lock = lock.with_suffix(".spawn")
+    try:
+        if lock.exists() and time.time() - lock.stat().st_mtime < 10:
+            return
+        lock.write_text(str(os.getpid()))
+        _detach([str(relay)])
+    except OSError:
+        pass
+
+
+def _via_relay(state: dict, path: str, payload: dict, wait: bool, timeout: float):
+    request = urllib.request.Request(
+        f"http://127.0.0.1:{int(state['port'])}/{path}" + ("" if wait else "?nowait=1"),
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "X-Relay-Secret": str(state.get("secret") or "")},
+        method="POST",
+    )
+    with urllib.request.urlopen(request, timeout=timeout) as response:
+        if response.status == 202:
+            return {}
+        return json.loads(response.read().decode("utf-8") or "{}")
+
+
+def _send(path: str, payload: dict, timeout: float) -> dict:
+    wait = path not in _NO_WAIT
+    state = _relay_state()
+    if state:
+        try:
+            return _via_relay(state, path, payload, wait, timeout if wait else 2)
+        except urllib.error.HTTPError as exc:
+            if exc.code not in (403, 404, 502, 503):
+                raise
+        except (urllib.error.URLError, OSError):
+            pass  # 中继不在了：往下直连，并重新拉起
+    _spawn_relay()
+    if not wait:
+        _detach([str(Path(__file__).resolve()), "--deliver", path],
+                json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+        return {}
+    return _post(path, payload, timeout)
+
+
+def _deliver(path: str) -> int:
+    """--deliver：脱离的子进程从 stdin 读 payload 直连发出。"""
+    try:
+        payload = json.loads(sys.stdin.read() or "{}")
+        _post(path, payload, _TIMEOUTS.get(path, 20))
+    except Exception as exc:
+        _debug(f"deliver {path} failed: {exc}")
+    return 0
 
 
 def _backfill_user_messages(transcript_path: str) -> list:
@@ -86,6 +182,8 @@ def _backfill_user_messages(transcript_path: str) -> list:
 
 
 def main() -> int:
+    if len(sys.argv) > 2 and sys.argv[1] == "--deliver":
+        return _deliver(sys.argv[2]) if os.environ.get("OB_HOOK_TOKEN") else 0
     mode = sys.argv[1] if len(sys.argv) > 1 else ""
     if mode not in _TIMEOUTS or not os.environ.get("OB_HOOK_TOKEN"):
         return 0
@@ -127,7 +225,7 @@ def main() -> int:
         payload = {"session_id": session_id, "messages": messages, "cwd": cwd}
 
     try:
-        result = _post(mode, payload, _TIMEOUTS[mode])
+        result = _send(mode, payload, _TIMEOUTS[mode])
     except (urllib.error.URLError, OSError, ValueError) as exc:
         _debug(f"{mode} failed: {exc}")
         return 0

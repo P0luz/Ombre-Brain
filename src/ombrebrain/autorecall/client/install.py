@@ -54,13 +54,13 @@ def _fetch(url: str, timeout: float = 15) -> bytes:
         return response.read()
 
 
-def _hook_source(base_url: str) -> bytes:
-    sibling = Path(__file__).resolve().parent / _MARKER if "__file__" in globals() else None
+def _client_source(base_url: str, name: str, must_contain: bytes) -> bytes:
+    sibling = Path(__file__).resolve().parent / name if "__file__" in globals() else None
     if sibling and sibling.is_file():
         return sibling.read_bytes()
-    raw = _fetch(f"{base_url}/autorecall/client/{_MARKER}")
-    if b"def main()" not in raw:
-        raise RuntimeError("下载到的 ob_hook.py 内容不对，请确认 --url 是 Ombre Brain 的地址")
+    raw = _fetch(f"{base_url}/autorecall/client/{name}")
+    if must_contain not in raw:
+        raise RuntimeError(f"下载到的 {name} 内容不对，请确认 --url 是 Ombre Brain 的地址")
     return raw
 
 
@@ -196,8 +196,9 @@ def main(argv=None) -> int:
         if settings_path.exists():
             shutil.copy2(settings_path, settings_path.with_name(f"settings.json.bak-{int(time.time())}"))
             _write_atomic(settings_path, unmerge_settings(settings))
-        if hook_path.exists():
-            hook_path.unlink()
+        for leftover in (hook_path, hook_path.with_name("ob_relay.py"), hook_path.with_name(".ob_relay.json")):
+            if leftover.exists():
+                leftover.unlink()
         _say("✓ 已卸载：settings.json 里的 Ombre Brain 钩子和 env 已去掉（原文件已备份），ob_hook.py 已删除。")
         return 0
 
@@ -218,16 +219,20 @@ def main(argv=None) -> int:
         return 1
 
     try:
-        source = _hook_source(url)
+        sources = {
+            hook_path: _client_source(url, _MARKER, b"def main()"),
+            hook_path.with_name("ob_relay.py"): _client_source(url, "ob_relay.py", b"def serve("),
+        }
     except (urllib.error.URLError, OSError, RuntimeError) as exc:
-        _say(f"✗ 拿不到 ob_hook.py：{exc}")
+        _say(f"✗ 拿不到钩子脚本：{exc}")
         return 1
     hook_path.parent.mkdir(parents=True, exist_ok=True)
-    hook_path.write_bytes(source)
-    try:
-        hook_path.chmod(0o755)
-    except OSError:
-        pass
+    for target, source in sources.items():
+        target.write_bytes(source)
+        try:
+            target.chmod(0o755)
+        except OSError:
+            pass
 
     if settings_path.exists():
         backup = settings_path.with_name(f"settings.json.bak-{int(time.time())}")

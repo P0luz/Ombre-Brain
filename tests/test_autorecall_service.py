@@ -42,11 +42,12 @@ def _b(bid, content, **meta):
     return {"id": bid, "content": content, "metadata": {"name": bid, "type": "dynamic", **meta}}
 
 
-def _svc(tmp_path, buckets=(), *, engine=None, dream=None, today="2026-10-14", **cfg):
+def _svc(tmp_path, buckets=(), *, engine=None, dream=None, today="2026-10-14", names=None, **cfg):
     config = {"autorecall": {"enabled": True, **cfg}}
     return AutoRecallService(
         FakeBuckets(list(buckets)), str(tmp_path), config,
         embedding_engine=engine, dream_fn=dream, today_fn=lambda: today,
+        names_fn=(lambda: list(names)) if names is not None else None,
     )
 
 
@@ -168,11 +169,33 @@ async def test_known_names_wake_without_recall_words(tmp_path):
     svc = _svc(tmp_path, [
         _b("snake", "[[Mochi]] 是一条玉米蛇，十月十号起的名"),
         _b("ws", "[[阿树]] 用 Codex 跑了四批工程"),
-    ], agree_top=0)
+        _b("work", "[[工作]] 区要整理"),
+    ], agree_top=0, names=["阿树", "Mochi"])
     assert [b["id"] for b in await svc.recall("我在和阿树迭代代码")] == ["ws"]
     assert [b["id"] for b in await svc.recall("Mochi吃了吗")] == ["snake"]
     assert await svc.recall("mochi 是什么") == []  # 英文名按整词、区分大小写
     assert await svc.recall("今天好冷") == []
+    assert await svc.recall("帮我整理一下工作区") == []  # [[工作]] 不在名册里，不再当名字
+
+
+@pytest.mark.asyncio
+async def test_unwoken_prompt_never_touches_vault(tmp_path):
+    svc = _svc(tmp_path, [_b("x", "火锅")], names=["阿树"])
+    assert await svc.recall("今天好冷") == []
+    assert svc.bucket_mgr.list_calls == []
+
+
+@pytest.mark.asyncio
+async def test_self_i_anchor_never_surface(tmp_path):
+    svc = _svc(tmp_path, [
+        _b("self", "火锅 火锅", type="self"),
+        _b("i", "火锅 火锅", type="i"),
+        _b("cand", "火锅 火锅", i_stage="candidate"),
+        _b("cand2", "火锅 火锅", tags=["__i_candidate__"]),
+        _b("anchor", "火锅 火锅", anchor=True),
+        _b("prot", "那家火锅", protected=True),
+    ], agree_top=0)
+    assert [b["id"] for b in await svc.recall("记得火锅吗", top_k=9)] == ["prot"]
 
 
 @pytest.mark.asyncio

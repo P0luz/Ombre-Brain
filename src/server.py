@@ -269,6 +269,8 @@ autorecall_service = AutoRecallService(
     embedding_engine=lambda: _wsh.embedding_engine,
     dream_fn=lambda: _t_dream.dispatch(),
     today_fn=lambda: datetime.now(get_tzinfo()).date().isoformat(),
+    # 名字唤醒只认 Them 名册里的人名（Them 关着就没有），不把所有 [[链接]] 当名字。
+    names_fn=lambda: [n for p in them_service.list_people() for n in p.get("names", [])],
 )
 # 认识由模型显式写入，没有后台抽取，也就没有可观察的桶变动事件。
 # bucket_mgr 那套 observer 机制已在 3.5.0 删除：3.4.x 拆掉自动派生流水线时

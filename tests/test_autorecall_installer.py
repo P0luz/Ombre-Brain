@@ -16,12 +16,15 @@ INSTALL = CLIENT / "install.py"
 class _OB(BaseHTTPRequestHandler):
     reply = (200, {})
     hook_source = (CLIENT / "ob_hook.py").read_bytes()
+    relay_source = (CLIENT / "ob_relay.py").read_bytes()
 
     def do_GET(self):
-        if self.path == "/autorecall/client/ob_hook.py":
+        files = {"/autorecall/client/ob_hook.py": type(self).hook_source,
+                 "/autorecall/client/ob_relay.py": type(self).relay_source}
+        if self.path in files:
             self.send_response(200)
             self.end_headers()
-            self.wfile.write(type(self).hook_source)
+            self.wfile.write(files[self.path])
         else:
             self.send_response(404)
             self.end_headers()
@@ -78,6 +81,7 @@ def test_merge_keeps_existing_settings_and_is_idempotent(tmp_path, ob):
     stop = next(h for h in ours if h["command"].endswith(" stop"))
     assert "async" not in stop and stop["timeout"] == 20  # 后台钩子退出时会被杀，回复存不上
     assert (tmp_path / "hooks" / "ob_hook.py").read_bytes() == (CLIENT / "ob_hook.py").read_bytes()
+    assert (tmp_path / "hooks" / "ob_relay.py").read_bytes() == (CLIENT / "ob_relay.py").read_bytes()
     assert list(tmp_path.glob("settings.json.bak-*"))
 
 
@@ -90,7 +94,7 @@ def test_uninstall_removes_only_ours(tmp_path, ob):
     assert code == 0 and _ours(settings) == []
     assert settings["hooks"]["Stop"][0]["hooks"][0]["command"] == "say done"
     assert settings["env"] == {"FOO": "1"}
-    assert not (tmp_path / "hooks" / "ob_hook.py").exists()
+    assert not (tmp_path / "hooks" / "ob_hook.py").exists() and not (tmp_path / "hooks" / "ob_relay.py").exists()
 
 
 def test_broken_settings_json_is_left_untouched(tmp_path, ob):
@@ -121,6 +125,7 @@ def test_piped_install_downloads_hook_and_requires_url(tmp_path, ob):
     source = INSTALL.read_text(encoding="utf-8")
     code, out = _install(tmp_path, ob, "--token", "tok", script=None, stdin=source)
     assert code == 0 and (tmp_path / "hooks" / "ob_hook.py").read_bytes() == _OB.hook_source
+    assert (tmp_path / "hooks" / "ob_relay.py").read_bytes() == _OB.relay_source
     code, out = _install(tmp_path, None, "--token", "tok", script=None, stdin=source)
     assert code == 1 and "--url" in out
 

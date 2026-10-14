@@ -88,7 +88,7 @@ hooks:
   allow_public: false
 
 # --- Claude Code 自动召回（默认关；需要上面的 hooks.token，钩子脚本见 deploy/claude-code-hooks/）---
-# 开窗 / 压缩后接续上一段对话最后几轮原文 + 当日 dream；说到回忆词或库里 [[名字]] 时注入最相关的一条；
+# 开窗 / 压缩后接续上一段对话最后几轮原文 + 当日 dream；说到回忆词或 Them 名册里的人名时注入最相关的一条；
 # 每隔若干轮提醒模型用 hold 存档。原文存在 <buckets_dir>/.autorecall/，随 ZIP 备份导出。
 autorecall:
   enabled: false
@@ -96,7 +96,7 @@ autorecall:
   restore_rounds: 10         # 0-50，开窗 / 压缩后接续的轮数
   dream_on_start: true       # 当天第一次开窗附一次 dream（一天一次）
   dream_timeout: 8           # 2-30 秒，dream 单独限时；超时 / 失败不注入、不占当天额度
-  wake_on_names: true        # 库里 [[名字]] 也算唤醒词（只在服务端比对）
+  wake_on_names: true        # Them 名册里的人名也算唤醒词（只在服务端比对）；宠物名等加进 wake_words
   wake_words: [记得, 上次, 之前, 那次, 那天, 想起, 以前, 当时, 来着]
   agree_top: 2               # 反向门：字面和向量两路前 N 名有同一条才注入；0 = 关
   vector: true               # 向量检索（不通时这一轮不注入）

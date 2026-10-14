@@ -2645,7 +2645,7 @@
       <p id="autorecall-description" style="font-size:12px;color:var(--text-dim);line-height:1.7;margin:4px 0 12px;">
         <span style="display:block;">仅 Claude Code 可用，需要装 deploy/claude-code-hooks 里的钩子。</span>
         <span style="display:block;">开新窗口或压缩后接上上一段对话的最后几轮原文，当天第一次开窗附一次 dream。</span>
-        <span style="display:block;">说到「记得 / 上次 / 之前」或库里的人名时，注入最相关的一条记忆；两路检索不一致就不注入。</span>
+        <span style="display:block;">说到「记得 / 上次 / 之前」或 Them 名册里的人名时，注入最相关的一条记忆；两路检索不一致就不注入。</span>
         <span style="display:block;">每隔若干轮提醒正在聊天的模型考虑用 hold 存档。原文只存在这个记忆库里。</span>
       </p>
       <div class="hw-toggle-row" style="justify-content:space-between;gap:14px;">
@@ -2665,8 +2665,8 @@
       </div>
       <div style="margin:4px 0 10px;font-size:11px;color:var(--text-light);">Windows：先 <code>curl -o install.py</code> 下载同一个地址，再 <code>python install.py --url …</code>。卸载：加 <code>--uninstall</code>。</div>
       <div class="config-row"><label>唤醒词</label><input type="text" id="cfg-ar-wake" placeholder="记得,上次,之前" maxlength="2000" /></div>
-      <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">逗号分隔。库里写成 [[名字]] 的人名 / 宠物名会自动算进来；没被写成链接的名字（比如宠物）加在这里</div>
-      <div class="config-row"><label>库内名字唤醒</label><input type="checkbox" id="cfg-ar-names" style="width:auto;flex:none;accent-color:var(--accent);cursor:pointer;" /></div>
+      <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">逗号分隔。Them 名册里的人名会自动算进来；宠物名、事物名等加在这里</div>
+      <div class="config-row"><label>名册人名唤醒</label><input type="checkbox" id="cfg-ar-names" style="width:auto;flex:none;accent-color:var(--accent);cursor:pointer;" /></div>
       <div class="config-row"><label>hold 提醒间隔</label><input type="number" id="cfg-ar-reminder" min="0" max="500" /></div>
       <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">每多少轮提醒一次，0 = 不提醒</div>
       <div class="config-row"><label>接续轮数</label><input type="number" id="cfg-ar-rounds" min="0" max="50" /></div>

@@ -17,6 +17,7 @@ messages 每项 {"key": 消息 uuid, "role": "user"|"assistant", "text": str}。
 客户端脚本下载（不需要登录，就是仓库里的开源脚本，不含任何密钥）：
 - GET  /autorecall/client/install.py   一键安装（Dashboard 卡片里给出完整命令）
 - GET  /autorecall/client/ob_hook.py   钩子本体
+- GET  /autorecall/client/ob_relay.py  本地中继（钩子按需拉起，和 OB 保持长连接）
 
 另有面板用的设置接口（Dashboard 登录态）：
 - GET  /api/settings/autorecall → 当前设置 + 原文库计数
@@ -138,7 +139,7 @@ def _messages(body: dict) -> list[dict]:
 
 
 _CLIENT_DIR = Path(__file__).resolve().parent.parent / "ombrebrain" / "autorecall" / "client"
-_CLIENT_FILES = frozenset({"install.py", "ob_hook.py"})
+_CLIENT_FILES = frozenset({"install.py", "ob_hook.py", "ob_relay.py"})
 
 _BOOL_KEYS = ("enabled", "dream_on_start", "wake_on_names", "vector")
 _INT_KEYS = {"reminder_every": (0, 500), "restore_rounds": (0, 50), "agree_top": (0, 20)}
