@@ -66,13 +66,13 @@ PROFILES = {
                "events": {"SessionStart": ("session-start", {"timeout": 45000}),
                           "BeforeAgent": ("prompt", {"timeout": 15000}),
                           "AfterAgent": ("stop", {"timeout": 20000})}},
-    # Antigravity（agy），实验：钩子输入不带原话和回复，只做开窗接续；另两个事件跑结构探针（只记字段名），
-    # 供用户贴进 issue 后补齐。配置是「命名钩子」格式：{"ombre-brain": {事件: [处理器…]}}，timeout 单位秒。
+    # Antigravity（agy），实验：钩子输入不带原话和回复，原文从它的记录文件里读（格式参照两个能用的开源实现）。
+    # 配置是「命名钩子」格式：{"ombre-brain": {事件: [处理器…]}}，timeout 单位秒。
     "antigravity": {"label": "Antigravity CLI", "settings": "~/.gemini/config/hooks.json",
                     "hooks_dir": "~/.gemini/config/ombre-brain", "named": "ombre-brain",
                     "events": {"SessionStart": ("session-start", {"timeout": 45}),
-                               "PreInvocation": ("probe PreInvocation", {"timeout": 10}),
-                               "Stop": ("probe Stop", {"timeout": 10})}},
+                               "PreInvocation": ("prompt", {"timeout": 15}),
+                               "Stop": ("stop", {"timeout": 20})}},
 }
 
 
@@ -452,9 +452,8 @@ def main(argv=None) -> int:
     if client == "codex":
         _say("· Codex 要求新钩子先信任：打开 codex，输入 /hooks，逐个信任 ob_hook.py 的条目。")
     if client == "antigravity":
-        _say("· 实验性支持：目前只做开窗接续，用户原话和回复还存不了（agy 的钩子不给正文）。")
-        _say(f"· 聊几句后请把 {hook_path.with_name('ob_agy_probe.json')} 贴到")
-        _say("  https://github.com/P0luz/Ombre-Brain/issues （只含字段名和类型，不含聊天内容），并说说接续有没有生效。")
+        _say("· 实验性支持，开发者没能实测：原文从 agy 的记录文件里读，格式参照别的开源项目。")
+        _say("· 用过请到 https://github.com/P0luz/Ombre-Brain/issues 说说行不行；没存上的排查办法见 deploy/clients/README.md。")
     if args.no_env:
         _say(f"· 记得在启动 Claude Code 的 shell 里设置：export OB_URL={url} OB_HOOK_TOKEN=…")
 

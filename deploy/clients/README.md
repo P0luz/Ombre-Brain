@@ -22,12 +22,16 @@
 - Codex：装完要打开 codex 输入 `/hooks`，把 ob_hook.py 的几条逐个**信任**一次，否则不会执行（Codex 的安全设计，改过的钩子也要重新信任）。
 - Codex / Gemini 的配置里没有 env 段，OB 地址和 token 写在钩子旁边的 `ob_hook.env`（只有自己可读）。
 - Codex / Gemini 没挂「关窗 / 压缩前补存」：那两个钩子要读对话记录文件，目前只认得 Claude Code 的格式。每一轮的原文照常存。
-- **Antigravity 是实验性的，我们没能实测**（开发者的账号过不了 agy 的资格检查）。照 agy 内置的官方钩子文档写：
-  - 能做的：开窗时注入上一段对话的接续和当天的 dream；
-  - 还做不了：存用户原话和回复——agy 的钩子输入里没有正文，只给记录文件路径，而记录文件的格式文档里没写；
-  - 装好后 PreInvocation / Stop 会跑一个「结构探针」，把钩子输入和记录文件的**字段名、类型**（以及 type / role 这类枚举值）
-    写进 `~/.gemini/config/ombre-brain/ob_agy_probe.json`，**不记聊天内容**。用过请把这个文件贴到
-    [GitHub issue](https://github.com/P0luz/Ombre-Brain/issues)，说说接续有没有生效，我们照着补上存原文。
+- **Antigravity 是实验性的，我们没能实测**（开发者的账号过不了 agy 的资格检查）：
+  - agy 的钩子输入里没有正文，只有记录文件路径。原文从记录文件
+    `~/.gemini/antigravity-cli/brain/<会话>/.system_generated/logs/transcript.jsonl` 里读：
+    `USER_INPUT` 是用户原话（取 `<USER_REQUEST>` 里的部分），`PLANNER_RESPONSE` 里正文非空、没有工具调用的那条是最终回复。
+    这个格式参照两个能用的开源项目（lidge-ai/cli-jaw、heyxiaoc/not-fade-away），agy 改版后可能失效。
+  - SessionStart 注入接续 / dream；PreInvocation 只在一轮的第一次调用时存原话、唤醒召回；Stop（正常结束）存回复并补存原话。
+  - 用过请到 [GitHub issue](https://github.com/P0luz/Ombre-Brain/issues) 说说行不行。**没存上时的排查**：在
+    `~/.gemini/config/hooks.json` 的 `ombre-brain` → `Stop` 里加一条
+    `{"type": "command", "command": "python3 ~/.gemini/config/ombre-brain/ob_hook.py --client antigravity probe Stop"}`，
+    再聊一句，把 `~/.gemini/config/ombre-brain/ob_agy_probe.json` 贴进 issue——它只记字段名、类型和 type 这类枚举值，**不记聊天内容**。
 - 自检：`python3 ~/.codex/hooks/install.py --client codex --check`（Gemini 把 codex 换成 gemini、目录换成 `~/.gemini/hooks`）。
 - 卸载：安装命令加 `--uninstall`。原配置先备份，只删自己的条目。
 

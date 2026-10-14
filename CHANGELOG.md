@@ -60,8 +60,10 @@
       一键安装命令。关掉的那家只记到达、返回 disabled，不存不注入；新配置 `autorecall.clients`（默认全开）。
       本机面板实测：关掉 Codex 后写进 config.yaml，Codex 的请求不入库，Claude Code 照常。
     - **Antigravity CLI（agy）实验性支持**：`install.py --client antigravity`，写进 `~/.gemini/config/hooks.json` 的命名钩子 `ombre-brain`。
-      照 agy 1.3.5 内置的钩子文档：SessionStart 用 `injectSteps` 注入接续 / dream；钩子输入不带原话和回复，存原文暂未实现。
-      PreInvocation / Stop 跑结构探针（只记字段名、类型和枚举值，不记内容）供用户贴进 issue。
+      照 agy 1.3.5 内置的钩子文档：SessionStart / PreInvocation 用 `injectSteps` 注入；钩子输入不带原话和回复，
+      原文从 agy 的记录文件 `transcript.jsonl` 读（USER_INPUT / 最终 PLANNER_RESPONSE），格式参照两个能用的开源项目
+      （lidge-ai/cli-jaw、heyxiaoc/not-fade-away）。PreInvocation 只在一轮的第一次调用时召回；Stop 只存正常结束的轮次。
+      另有结构探针（只记字段名、类型和枚举值，不记内容），用户排查时贴进 issue。
       **未实测**：开发者账号在本机和 129（均在美国）都过不了 agy 的资格检查。
 
 ### 性能 / Performance

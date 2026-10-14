@@ -15,8 +15,8 @@
 
     python3 ob_hook.py --client codex prompt    # Codex CLI：事件名同 Claude Code，提问的 id 叫 turn_id
     python3 ob_hook.py --client gemini prompt   # 旧版 Gemini CLI：BeforeAgent 提问，AfterAgent 的 prompt_response 是回复
-    python3 ob_hook.py --client antigravity session-start   # Antigravity（agy），实验：只做开窗接续
-    python3 ob_hook.py --client antigravity probe Stop      # agy 结构探针：只记字段名 / 类型，不记内容
+    python3 ob_hook.py --client antigravity prompt   # Antigravity（agy），实验：PreInvocation / Stop 读它的记录文件取原文
+    python3 ob_hook.py --client antigravity probe Stop      # agy 结构探针：只记字段名 / 类型，不记内容（排查用）
 
 环境变量（也可以写进同目录的 ob_hook.env，一行一个 KEY=VALUE；环境里已有的优先）：
     OB_URL         Ombre Brain 地址，默认 http://127.0.0.1:18001
@@ -322,22 +322,99 @@ def _antigravity_probe(event: str, data: dict) -> None:
     path.write_text(json.dumps((old + [entry])[-10:], ensure_ascii=False, indent=1), encoding="utf-8")
 
 
+_AGY_INTERMEDIATE = ("my_tool_call_analysis:",)
+
+
+def _agy_rows(data: dict) -> list:
+    """agy 的记录文件：每行一个 JSON，type 为 USER_INPUT / PLANNER_RESPONSE / CHECKPOINT / 各种工具步骤。
+    格式参照两个能用的开源实现（lidge-ai/cli-jaw 的 agy-transcript.ts、heyxiaoc/not-fade-away 的规格）；读不懂就返回空。"""
+    path = str(data.get("transcriptPath") or "")
+    if not path:
+        conv = str(data.get("conversationId") or "")
+        path = str(Path.home() / ".gemini" / "antigravity-cli" / "brain" / conv / ".system_generated" / "logs"
+                   / "transcript.jsonl") if conv else ""
+    rows = []
+    try:
+        with open(path, encoding="utf-8") as handle:
+            for line in handle:
+                try:
+                    row = json.loads(line)
+                except ValueError:
+                    continue
+                if isinstance(row, dict) and isinstance(row.get("type"), str):
+                    rows.append(row)
+    except OSError:
+        return []
+    return rows[-2000:]
+
+
+def _agy_user_text(content) -> str:
+    text = str(content or "")
+    start, end = text.find("<USER_REQUEST>"), text.find("</USER_REQUEST>")
+    if start != -1 and end > start:
+        text = text[start + len("<USER_REQUEST>"):end]
+    return text.strip()
+
+
+def _agy_final_reply(row: dict) -> str:
+    """一轮的最终回复：PLANNER_RESPONSE、正文非空、没有工具调用、不是中间分析。"""
+    if row.get("type") != "PLANNER_RESPONSE":
+        return ""
+    content = str(row.get("content") or "").strip()
+    if not content or content.startswith(_AGY_INTERMEDIATE) or row.get("tool_calls"):
+        return ""
+    return content
+
+
+def _agy_last_turn(rows: list):
+    """返回 (最后一条 USER_INPUT 的下标, 它之后的行)。没有就 (-1, [])。"""
+    for index in range(len(rows) - 1, -1, -1):
+        if rows[index].get("type") == "USER_INPUT":
+            return index, rows[index + 1:]
+    return -1, []
+
+
 def _antigravity(mode: str, event: str = "") -> int:
-    """Antigravity（agy）的钩子输入是 camelCase、不带用户原话和回复正文（只给记录文件路径）。
-    目前只做两件事：SessionStart 注入接续 / dream；其他事件跑结构探针。输出必须是 JSON。"""
+    """Antigravity（agy）的钩子输入是 camelCase、不带用户原话和回复正文（只给记录文件路径），原文从记录文件里读：
+    SessionStart 注入接续 / dream；PreInvocation 只在一轮的第一次调用时存原话 + 唤醒召回；
+    Stop（正常结束）存最终回复并补存原话（同一个去重键）。输出必须是 JSON。"""
     out: dict = {}
     try:
         data = json.load(sys.stdin)
+        conv = str(data.get("conversationId") or "")[:200]
+        workspaces = data.get("workspacePaths") or [""]
+        base = {"session_id": conv, "cwd": str(workspaces[0] or ""), "client": "antigravity"}
+        payload = None
         if mode == "probe":
             _antigravity_probe(event or str(data.get("hookEventName") or ""), data)
-        elif mode == "session-start" and os.environ.get("OB_HOOK_TOKEN") and data.get("conversationId"):
-            workspaces = data.get("workspacePaths") or [""]
-            payload = {"session_id": str(data["conversationId"])[:200], "source": "startup",
-                       "cwd": str(workspaces[0] or ""), "client": "antigravity"}
-            pending = _pending_errors()
+        elif not os.environ.get("OB_HOOK_TOKEN") or not conv:
+            pass
+        elif mode == "session-start":
+            payload = {**base, "source": "startup"}
+        elif mode == "prompt":
+            rows = _agy_rows(data)
+            index, after = _agy_last_turn(rows)
+            # 这一轮里模型已经回过话（工具调用后的再次调用）就不再处理，免得一轮召回好几次。
+            if index >= 0 and not any(r.get("type") == "PLANNER_RESPONSE" for r in after):
+                text = _agy_user_text(rows[index].get("content"))
+                if text:
+                    payload = {**base, "prompt": text, "prompt_id": f"agy:{conv}:{rows[index].get('step_index')}"}
+        elif mode == "stop" and str(data.get("terminationReason") or "NO_TOOL_CALL") == "NO_TOOL_CALL":
+            rows = _agy_rows(data)
+            index, after = _agy_last_turn(rows)
+            replies = [r for r in after if _agy_final_reply(r)]
+            if index >= 0 and replies:
+                step = rows[index].get("step_index")
+                messages = [{"key": f"u:agy:{conv}:{step}", "role": "user",
+                             "text": _agy_user_text(rows[index].get("content"))},
+                            {"key": f"a:agy:{conv}:{replies[-1].get('step_index')}", "role": "assistant",
+                             "text": _agy_final_reply(replies[-1])}]
+                payload = {**base, "messages": [m for m in messages if m["text"]]}
+        if payload is not None:
+            pending = _pending_errors() if mode != "stop" else []
             if pending:
                 payload["client_errors"] = pending
-            result = _send("session-start", payload, _TIMEOUTS["session-start"])
+            result = _send(mode, payload, _TIMEOUTS[mode])
             if pending:
                 _clear_pending()
             context = result.get("context") if isinstance(result, dict) else ""

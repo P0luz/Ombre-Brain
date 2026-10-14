@@ -146,3 +146,57 @@ def test_antigravity_probe_records_shape_not_content(tmp_path, ob):
     assert entry["event"] == "Stop" and entry["transcript"]["lines"] == 2
     assert entry["transcript"]["paths"]["content.text"] == ["str"]
     assert entry["transcript"]["enum_values"]["type"] == ["PLANNER_RESPONSE", "USER_INPUT"]
+
+
+def _agy_transcript(path, rows):
+    path.write_text("".join(json.dumps(r, ensure_ascii=False) + "\n" for r in rows), encoding="utf-8")
+
+
+def test_antigravity_prompt_and_stop_read_transcript(tmp_path, ob):
+    """记录文件格式照 lidge-ai/cli-jaw 的 agy-transcript 测试用例：step_index / type / status / content / tool_calls。"""
+    _settings, hooks_dir = _install(tmp_path, "antigravity", ob.url)
+    transcript = tmp_path / "transcript.jsonl"
+    user = {"step_index": 0, "type": "USER_INPUT", "status": "DONE",
+            "content": "<USER_REQUEST>\n你还记得阿树吗\n</USER_REQUEST>"}
+    _agy_transcript(transcript, [user])
+    base = {"conversationId": "ag3", "workspacePaths": ["/w"], "transcriptPath": str(transcript)}
+    out = _run(hooks_dir, tmp_path, ["--client", "antigravity", "prompt"], {**base, "invocationNum": 1})
+    assert json.loads(out.stdout) == {"injectSteps": [{"systemMessage": {"systemMessage": "[记忆] 猫叫阿树"}}]}
+    prompt = [c[1] for c in ob.calls if c[0] == "prompt"][-1]
+    assert prompt["prompt"] == "你还记得阿树吗" and prompt["prompt_id"] == "agy:ag3:0"
+
+    # 工具调用之后的再次调用：这一轮模型已经回过话，不再召回
+    tool_turn = [user,
+                 {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "我先看看", "tool_calls": [{"name": "list_dir"}]},
+                 {"step_index": 2, "type": "LIST_DIRECTORY", "status": "DONE", "content": "a.txt"}]
+    _agy_transcript(transcript, tool_turn)
+    n = len(ob.calls)
+    out = _run(hooks_dir, tmp_path, ["--client", "antigravity", "prompt"], {**base, "invocationNum": 2})
+    assert json.loads(out.stdout) == {} and len(ob.calls) == n
+
+    _agy_transcript(transcript, tool_turn + [
+        {"step_index": 3, "type": "PLANNER_RESPONSE", "content": "my_tool_call_analysis: 看完了", "tool_calls": []},
+        {"step_index": 4, "type": "PLANNER_RESPONSE", "content": "记得，是橘猫阿树", "tool_calls": [],
+         "thinking": "不该被存"}])
+    _run(hooks_dir, tmp_path, ["--client", "antigravity", "stop"], {**base, "terminationReason": "NO_TOOL_CALL"})
+    assert _wait(lambda: "stop" in ob.names(), 10)
+    stop = [c[1] for c in ob.calls if c[0] == "stop"][-1]
+    assert stop["messages"] == [
+        {"key": "u:agy:ag3:0", "role": "user", "text": "你还记得阿树吗"},
+        {"key": "a:agy:ag3:4", "role": "assistant", "text": "记得，是橘猫阿树"}]
+    assert stop["client"] == "antigravity" and stop["cwd"] == "/w"
+
+
+def test_antigravity_stop_skips_cancelled_and_unreadable(tmp_path, ob):
+    _settings, hooks_dir = _install(tmp_path, "antigravity", ob.url)
+    transcript = tmp_path / "t.jsonl"
+    _agy_transcript(transcript, [{"step_index": 0, "type": "USER_INPUT", "content": "嗨"},
+                                 {"step_index": 1, "type": "PLANNER_RESPONSE", "content": "你好", "tool_calls": []}])
+    n = len(ob.calls)
+    for payload in ({"terminationReason": "USER_CANCELED", "transcriptPath": str(transcript)},
+                    {"terminationReason": "NO_TOOL_CALL", "transcriptPath": str(tmp_path / "missing.jsonl")}):
+        out = _run(hooks_dir, tmp_path, ["--client", "antigravity", "stop"], {"conversationId": "ag4", **payload})
+        assert out.returncode == 0 and json.loads(out.stdout) == {}
+    import time as _time
+    _time.sleep(0.5)
+    assert len(ob.calls) == n

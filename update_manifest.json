@@ -7,8 +7,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "dd6d35d0876fe6734d0538f4e1f305cade7b67012d149d84457d5c594385ab19",
-      "size": 591829
+      "sha256": "7998a47d0206f66cadaa3193e1a885ea1e55a9db27f9e9de47195eca00a91e8e",
+      "size": 591835
     },
     {
       "path": "frontend/favicon.svg",
@@ -157,8 +157,8 @@
     },
     {
       "path": "src/ombrebrain/autorecall/client/install.py",
-      "sha256": "b4d4ba96a69e39854792ee4d342e9c9b135937b061b20420b6eb6f664982d287",
-      "size": 22340
+      "sha256": "e33deebfd2756e97751fda5881e0d48f67b1d141c81a183bc2cd77df3ab39c7f",
+      "size": 22205
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_client.mjs",
@@ -177,8 +177,8 @@
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_hook.py",
-      "sha256": "90558e776b73d99d5f6e160ab43b1dc634f96657b13968e39640acac85aec310",
-      "size": 19997
+      "sha256": "0e088430f7c4f919b7c07fb24694b14df9796b832e46ab89ab50935b082bed78",
+      "size": 23576
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_relay.py",
