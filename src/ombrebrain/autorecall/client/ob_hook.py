@@ -40,6 +40,7 @@
 import hashlib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -54,6 +55,13 @@ _EVENT_NAMES = {"session-start": "SessionStart", "prompt": "UserPromptSubmit"}
 # 各客户端注入上下文时回填的事件名；没列出的同 Claude Code。
 _CLIENT_EVENT_NAMES = {"gemini": {"session-start": "SessionStart", "prompt": "BeforeAgent"}}
 _CLIENTS = frozenset({"claude", "codex", "gemini", "antigravity"})
+# Codex 自己的辅助线程（起标题、记忆整理、新手建议）也走 UserPromptSubmit，看起来像用户在说话。
+# 开头文字照 thedotmack/claude-mem src/utils/tag-stripping.ts 的 CODEX_INTERNAL_PROMPT_OPENINGS；只对 Codex 生效。
+_CODEX_INTERNAL_OPENINGS = (
+    re.compile(r"^You are a helpful assistant\. You will be presented with a user prompt, and your job is to provide a short title"),
+    re.compile(r"^## Memory Writing Agent: Phase 2 \(Consolidation\)"),
+    re.compile(r"^# Overview\r?\n(?:\r?\n)?Generate 0 to 3 hyperpersonalized suggestions"),
+)
 _PROBE_ENUM_KEYS = frozenset({"type", "role", "kind", "source", "stepType", "status", "event", "author"})
 _MAX_BACKFILL = 1000
 _NO_WAIT = frozenset({"stop", "session-end", "pre-compact"})
@@ -630,6 +638,9 @@ def main() -> int:
         payload = {"session_id": session_id, "source": data.get("source") or "startup", "cwd": cwd}
     elif mode == "prompt":
         if data.get("source") not in (None, "user"):
+            return 0
+        prompt_text = str(data.get("prompt") or "").lstrip()
+        if client == "codex" and any(p.match(prompt_text) for p in _CODEX_INTERNAL_OPENINGS):
             return 0
         # 没有 prompt_id 时给一个随机键：宁可偶尔多存一份，也不能把重复说的「继续」吞掉。
         payload = {"session_id": session_id, "prompt": data.get("prompt") or "",

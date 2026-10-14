@@ -213,3 +213,20 @@ def test_codex_hooks_feature_flag_detection(tmp_path):
     assert install.codex_hooks_disabled(cfg) is True
     cfg.write_text('[profiles.a]\nhooks = false\n')
     assert install.codex_hooks_disabled(cfg) is False
+
+
+def test_codex_internal_helper_prompts_are_not_stored(tmp_path, ob):
+    """开头文字照 claude-mem 的 CODEX_INTERNAL_PROMPT_OPENINGS；同样的话从 Claude Code 来就是用户本人说的。"""
+    _settings, hooks_dir = _install(tmp_path, "codex", ob.url)
+    helpers = [
+        "You are a helpful assistant. You will be presented with a user prompt, and your job is to provide a short title for it.",
+        "## Memory Writing Agent: Phase 2 (Consolidation)\n...",
+        "# Overview\n\nGenerate 0 to 3 hyperpersonalized suggestions for the user.",
+    ]
+    for text in helpers:
+        _run(hooks_dir, tmp_path, ["--client", "codex", "prompt"], {"session_id": "c9", "turn_id": "t", "prompt": text})
+    assert not [c for c in ob.calls if c[0] == "prompt"]
+    _settings, claude_dir = _install(tmp_path, "claude", ob.url)
+    install.write_env_file(claude_dir / "ob_hook.py", ob.url, "tok")  # Claude Code 平时从 settings.json 的 env 拿
+    _run(claude_dir, tmp_path, ["prompt"], {"session_id": "c9", "prompt": helpers[0]})
+    assert [c for c in ob.calls if c[0] == "prompt"]

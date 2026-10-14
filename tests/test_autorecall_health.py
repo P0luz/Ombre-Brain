@@ -263,3 +263,29 @@ async def test_stale_hook_script_warns(monkeypatch, tmp_path):
     assert any("Codex CLI 用的钩子脚本和 OB 自带的不一样" in w for w in warnings)
     await routes[("POST", "/autorecall/prompt")](_Req({"session_id": "s", "prompt": "嗨", "script": "../../x"}))
     assert set(svc.hook_health()["scripts"]) == {"claude", "codex"}  # 不是 12 位十六进制的不记
+
+
+@pytest.mark.asyncio
+async def test_excluded_paths_neither_store_nor_inject(tmp_path):
+    from ombrebrain.autorecall.service import path_excluded
+
+    assert path_excluded("/Users/me/work", ["/Users/me/work/"]) and path_excluded("/Users/me/work/a/b", ["/Users/me/work"])
+    assert not path_excluded("/Users/me/workshop", ["/Users/me/work"])  # 前缀要按目录切，不是按字符
+    assert path_excluded("C:\\code\\job\\x", ["C:\\code\\job"]) and not path_excluded("", ["/"])
+    svc = AutoRecallService(_Buckets(), str(tmp_path), {"autorecall": {
+        "enabled": True, "exclude_paths": "/Users/me/work，/srv/x", "reminder_every": 1}})
+    assert svc.settings["exclude_paths"] == ["/Users/me/work", "/srv/x"]
+    assert await svc.on_prompt("s1", "你还记得吗", cwd="/Users/me/work/repo") == ""
+    await svc.on_stop("s1", [{"key": "a", "role": "assistant", "text": "好"}], "/Users/me/work/repo")
+    assert svc.store.session_turns("s1") == []
+    assert await svc.on_session_start("s2", "startup", "/srv/x") == ""
+    assert await svc.on_prompt("s3", "嗨", cwd="/Users/me/home") != "" or svc.store.session_turns("s3")
+
+
+def test_exclude_paths_setting_validation(monkeypatch):
+    out = autorecall._validate_settings({"exclude_paths": "/a, /b，/a"})
+    assert out["exclude_paths"] == ["/a", "/b"]
+    with pytest.raises(ValueError):
+        autorecall._validate_settings({"exclude_paths": [1]})
+    with pytest.raises(ValueError):
+        autorecall._validate_settings({"exclude_paths": ["/x" * 300]})

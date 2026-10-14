@@ -115,6 +115,18 @@ def bundled_hook_hash() -> str:
     return hashlib.sha1(raw).hexdigest()[:12]
 
 
+def path_excluded(cwd: str, excludes: list[str]) -> bool:
+    """cwd 等于某个排除目录，或在它下面。只比字符串前缀（按路径分隔符切），不碰文件系统。"""
+    current = str(cwd or "").rstrip("/\\")
+    if not current:
+        return False
+    for raw in excludes:
+        base = str(raw).rstrip("/\\")
+        if base and (current == base or current.startswith(base + "/") or current.startswith(base + "\\")):
+            return True
+    return False
+
+
 def normalize_client(raw: Any) -> str:
     name = str(raw or "").strip().lower()
     if not name:
@@ -130,7 +142,14 @@ def autorecall_config(config: dict | None) -> dict[str, Any]:
     if not isinstance(words, (list, tuple)):
         words = list(DEFAULT_WAKE_WORDS)
     raw_clients = raw.get("clients") if isinstance(raw.get("clients"), dict) else {}
+    excludes = raw.get("exclude_paths")
+    if isinstance(excludes, str):
+        excludes = excludes.replace("，", ",").replace("\n", ",").split(",")
+    if not isinstance(excludes, (list, tuple)):
+        excludes = []
     return {
+        # 这些目录（及其子目录）下的对话：不存原文、不接续、不召回。按工作目录 / 网关的作用域比。
+        "exclude_paths": [str(p).strip().rstrip("/\\") for p in excludes if str(p).strip()][:50],
         # 各客户端单独的开关，默认都开；总开关 enabled 关着时全部不生效。
         "clients": {name: _truthy(raw_clients.get(name, True)) for name in CLIENTS},
         "enabled": _truthy(raw.get("enabled", False)),
@@ -397,7 +416,7 @@ class AutoRecallService:
 
     async def on_prompt(self, session_id: str, prompt: str, key: str = "", cwd: str = "") -> str:
         settings = self.settings
-        if not settings["enabled"]:
+        if not settings["enabled"] or path_excluded(cwd, settings["exclude_paths"]):
             return ""
         parts: list[str] = []
         if str(prompt or "").strip():
@@ -430,7 +449,7 @@ class AutoRecallService:
         return _wrap("\n\n".join(parts), settings["max_chars"])
 
     async def on_stop(self, session_id: str, messages: list[dict], cwd: str = "") -> dict[str, int]:
-        if not self.settings["enabled"]:
+        if not self.settings["enabled"] or path_excluded(cwd, self.settings["exclude_paths"]):
             return {"added": 0, "links": 0}
         # 整条都是复述我们注入内容的回复，剥掉之后什么都不剩：不存空行。
         messages = [m for m in messages if redact(m.get("text") or "").strip()]
@@ -511,6 +530,8 @@ class AutoRecallService:
     async def on_session_start(self, session_id: str, source: str, cwd: str = "") -> str:
         settings = self.settings
         if not settings["enabled"] or source not in ("startup", "clear", "compact"):
+            return ""
+        if path_excluded(cwd, settings["exclude_paths"]):
             return ""
         budget = settings["max_chars"]
         parts: list[str] = []

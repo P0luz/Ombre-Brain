@@ -2668,6 +2668,8 @@
       <div class="config-row"><label>开窗附 dream</label><input type="checkbox" id="cfg-ar-dream" style="width:auto;flex:none;accent-color:var(--accent);cursor:pointer;" /></div>
       <div class="config-row"><label>反向门 前 N 名</label><input type="number" id="cfg-ar-agree" min="0" max="20" /></div>
       <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">字面和向量两路的前 N 名里有同一条才注入；0 = 关闭（不推荐）</div>
+      <div class="config-row"><label>排除目录</label><input type="text" id="cfg-ar-exclude" placeholder="/Users/me/work, /srv/company" maxlength="10000" /></div>
+      <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">逗号分隔。这些目录（含子目录）里的对话不存原文、不接续、不召回；网关按它的作用域名比</div>
       <div class="config-row"><label>向量检索</label><input type="checkbox" id="cfg-ar-vector" style="width:auto;flex:none;accent-color:var(--accent);cursor:pointer;" /></div>
       <div style="margin-top:10px;"><button class="btn-primary" onclick="saveAutorecallSettings()" title="保存 / Save" style="padding:0 14px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="check"></i> 保存 Save</button></div>
       <div id="autorecall-setting-msg" role="status" aria-live="polite" style="min-height:16px;margin-top:8px;font-size:12px;color:var(--text-dim);"></div>
@@ -4676,6 +4678,7 @@ function renderAutorecallSetting(data, message, isError) {
     document.getElementById('cfg-ar-dream').checked = data.dream_on_start !== false;
     document.getElementById('cfg-ar-agree').value = data.agree_top;
     document.getElementById('cfg-ar-vector').checked = data.vector !== false;
+    document.getElementById('cfg-ar-exclude').value = (data.exclude_paths || []).join(', ');
   }
   var status = document.getElementById('autorecall-setting-msg');
   if (status) {
@@ -4851,6 +4854,7 @@ function saveAutorecallSettings() {
   function num(id) { return parseInt(document.getElementById(id).value, 10); }
   postAutorecallSetting({
     wake_words: document.getElementById('cfg-ar-wake').value,
+    exclude_paths: document.getElementById('cfg-ar-exclude').value,
     wake_on_names: document.getElementById('cfg-ar-names').checked,
     reminder_every: num('cfg-ar-reminder'),
     restore_rounds: num('cfg-ar-rounds'),

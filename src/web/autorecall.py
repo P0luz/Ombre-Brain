@@ -150,7 +150,7 @@ _INT_KEYS = {"reminder_every": (0, 500), "restore_rounds": (0, 50), "agree_top":
 
 
 def _validate_settings(body: dict) -> dict:
-    unknown = set(body) - set(_BOOL_KEYS) - set(_INT_KEYS) - {"wake_words", "clients"}
+    unknown = set(body) - set(_BOOL_KEYS) - set(_INT_KEYS) - {"wake_words", "clients", "exclude_paths"}
     if unknown:
         raise ValueError(f"不支持的字段：{', '.join(sorted(unknown))}")
     out: dict = {}
@@ -175,6 +175,16 @@ def _validate_settings(body: dict) -> dict:
         if len(cleaned) > 100 or any(len(w) > 20 for w in cleaned):
             raise ValueError("唤醒词最多 100 个，每个不超过 20 字")
         out["wake_words"] = cleaned
+    if "exclude_paths" in body:
+        paths = body["exclude_paths"]
+        if isinstance(paths, str):
+            paths = paths.replace("，", ",").replace("\n", ",").split(",")
+        if not isinstance(paths, list) or not all(isinstance(p, str) for p in paths):
+            raise ValueError("exclude_paths 必须是字符串列表")
+        cleaned = list(dict.fromkeys(p.strip() for p in paths if p.strip()))
+        if len(cleaned) > 50 or any(len(p) > 500 for p in cleaned):
+            raise ValueError("排除目录最多 50 个，每个不超过 500 字")
+        out["exclude_paths"] = cleaned
     if "clients" in body:
         raw = body["clients"]
         if not isinstance(raw, dict) or not all(k in CLIENTS and isinstance(v, bool) for k, v in raw.items()):
