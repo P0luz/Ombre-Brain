@@ -2656,6 +2656,14 @@
           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleAutorecallSetting(this);}"></span>
         <input type="checkbox" id="autorecall-enabled" style="display:none" aria-hidden="true">
       </div>
+      <div style="margin:10px 0 6px;font-size:12px;color:var(--text-dim);line-height:1.7;">
+        <strong>一键安装</strong>：在装了 Claude Code 的电脑终端里运行下面这行，按提示输入 hook token 即可（会先备份 ~/.claude/settings.json，只增改自己的钩子）。
+      </div>
+      <div style="display:flex;gap:8px;align-items:center;">
+        <code id="autorecall-install-cmd" style="flex:1;min-width:0;overflow-x:auto;white-space:nowrap;font-size:12px;padding:8px 10px;border-radius:8px;background:var(--bg-input, rgba(0,0,0,.05));"></code>
+        <button class="btn-secondary" onclick="copyAutorecallInstall()" title="复制 / Copy" style="padding:6px 10px;font-size:12px;flex:none;">复制</button>
+      </div>
+      <div style="margin:4px 0 10px;font-size:11px;color:var(--text-light);">Windows：先 <code>curl -o install.py</code> 下载同一个地址，再 <code>python install.py --url …</code>。卸载：加 <code>--uninstall</code>。</div>
       <div class="config-row"><label>唤醒词</label><input type="text" id="cfg-ar-wake" placeholder="记得,上次,之前" maxlength="2000" /></div>
       <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">逗号分隔。库里写成 [[名字]] 的人名 / 宠物名会自动算进来；没被写成链接的名字（比如宠物）加在这里</div>
       <div class="config-row"><label>库内名字唤醒</label><input type="checkbox" id="cfg-ar-names" style="width:auto;flex:none;accent-color:var(--accent);cursor:pointer;" /></div>
@@ -4687,6 +4695,8 @@ function renderAutorecallSetting(data, message, isError) {
 }
 
 async function loadAutorecallSetting() {
+  var cmd = document.getElementById('autorecall-install-cmd');
+  if (cmd) cmd.textContent = autorecallInstallCommand();
   try {
     var response = await authFetch('/api/settings/autorecall');
     if (!response) return;
@@ -4721,6 +4731,17 @@ async function postAutorecallSetting(payload) {
   } finally {
     _autorecallBusy = false;
   }
+}
+
+function autorecallInstallCommand() {
+  var origin = window.location.origin;
+  return 'curl -fsSL ' + origin + '/autorecall/client/install.py | python3 - --url ' + origin;
+}
+
+function copyAutorecallInstall() {
+  var text = autorecallInstallCommand();
+  try { navigator.clipboard.writeText(text); renderAutorecallSetting(null, '已复制安装命令', false); }
+  catch (e) { renderAutorecallSetting(null, '复制失败，请手动选中复制', true); }
 }
 
 function toggleAutorecallSetting(control) {

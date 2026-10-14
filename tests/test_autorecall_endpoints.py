@@ -63,7 +63,8 @@ def _routes(monkeypatch, tmp_path, enabled=True, buckets=()):
     mcp = _MCP()
     autorecall.register(mcp)
     return {
-        path.rsplit("/", 1)[-1]: h for (_m, path), h in mcp.routes.items() if path.startswith("/autorecall/")
+        path.rsplit("/", 1)[-1]: h for (m, path), h in mcp.routes.items()
+        if m == "POST" and path.startswith("/autorecall/")
     }, service
 
 
@@ -121,12 +122,12 @@ async def test_oversized_body_rejected(monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_round_trip(monkeypatch, tmp_path):
     routes, service = _routes(monkeypatch, tmp_path, buckets=[("hotpot", "重庆火锅辣到流泪")])
-    stop = await routes["stop"](_Request({"session_id": "old", "messages": [
+    stop = await routes["stop"](_Request({"session_id": "old", "cwd": "/p", "messages": [
         {"key": "u1", "role": "user", "text": "今天想吃火锅"},
         {"key": "a1", "role": "assistant", "text": "好呀"},
     ]}))
     assert stop.status_code == 200 and _json(stop)["added"] == 2
-    start = await routes["session-start"](_Request({"session_id": "new", "source": "startup"}))
+    start = await routes["session-start"](_Request({"session_id": "new", "source": "startup", "cwd": "/p"}))
     assert "今天想吃火锅" in _json(start)["context"]
     prompt = await routes["prompt"](_Request({"session_id": "new", "prompt": "还记得那家火锅吗"}))
     assert "hotpot" in _json(prompt)["context"]

@@ -1,4 +1,4 @@
-"""deploy/claude-code-hooks/ob_hook.py：四种模式的请求与输出，以及出错时静默退出 0。"""
+"""src/ombrebrain/autorecall/client/ob_hook.py：四种模式的请求与输出，以及出错时静默退出 0。"""
 
 import json
 import subprocess
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-SCRIPT = Path(__file__).resolve().parents[1] / "deploy" / "claude-code-hooks" / "ob_hook.py"
+SCRIPT = Path(__file__).resolve().parents[1] / "src" / "ombrebrain" / "autorecall" / "client" / "ob_hook.py"
 
 
 class _Recorder(BaseHTTPRequestHandler):
@@ -54,11 +54,11 @@ def _run(mode, payload, url, token="tok"):
 
 def test_prompt_posts_and_emits_additional_context(server):
     _Recorder.reply = {"context": "记忆：周五吃了火锅"}
-    code, out = _run("prompt", {"session_id": "s", "prompt": "还记得火锅吗", "prompt_id": "p1"}, server)
+    code, out = _run("prompt", {"session_id": "s", "prompt": "还记得火锅吗", "prompt_id": "p1", "cwd": "/w"}, server)
     assert code == 0
     path, token, body = _Recorder.calls[0]
     assert path == "/autorecall/prompt" and token == "tok"
-    assert body == {"session_id": "s", "prompt": "还记得火锅吗", "prompt_id": "p1"}
+    assert body == {"session_id": "s", "prompt": "还记得火锅吗", "prompt_id": "p1", "cwd": "/w"}
     assert json.loads(out) == {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit", "additionalContext": "记忆：周五吃了火锅"}}
 
@@ -67,19 +67,24 @@ def test_session_start_and_empty_context_prints_nothing(server):
     _Recorder.reply = {"context": ""}
     code, out = _run("session-start", {"session_id": "s", "source": "compact"}, server)
     assert code == 0 and out == ""
-    assert _Recorder.calls[0][2] == {"session_id": "s", "source": "compact"}
+    assert _Recorder.calls[0][2] == {"session_id": "s", "source": "compact", "cwd": ""}
 
 
 def test_stop_sends_last_assistant_message(server):
     code, out = _run("stop", {"session_id": "s", "prompt_id": "p1", "last_assistant_message": "好呀"}, server)
     assert code == 0 and out == ""
-    assert _Recorder.calls[0][2]["messages"] == [{"key": "a:p1", "role": "assistant", "text": "好呀"}]
+    [message] = _Recorder.calls[0][2]["messages"]
+    assert message["key"].startswith("a:p1:") and message["text"] == "好呀"
 
 
 def test_session_end_backfills_user_text_only(server, tmp_path):
     transcript = tmp_path / "t.jsonl"
     lines = [
-        {"type": "user", "promptId": "p1", "uuid": "x1", "message": {"role": "user", "content": "今天想吃火锅"}},
+        {"type": "user", "promptId": "p1", "uuid": "x1", "timestamp": "2026-10-14T05:00:00.000Z",
+         "origin": {"kind": "human"}, "message": {"role": "user", "content": "今天想吃火锅"}},
+        {"type": "user", "uuid": "x5", "isCompactSummary": True,
+         "message": {"content": "This session is being continued from a previous conversation"}},
+        {"type": "user", "uuid": "x6", "origin": {"kind": "task-notification"}, "message": {"content": "后台任务完成"}},
         {"type": "user", "uuid": "x2", "toolUseResult": {}, "message": {"content": [{"type": "tool_result"}]}},
         {"type": "user", "uuid": "x3", "message": {"content": "<command-name>/clear</command-name>"}},
         {"type": "assistant", "uuid": "x4", "message": {"content": [{"type": "text", "text": "好"}]}},
@@ -88,7 +93,24 @@ def test_session_end_backfills_user_text_only(server, tmp_path):
     transcript.write_text("\n".join(json.dumps(x) if isinstance(x, dict) else x for x in lines), encoding="utf-8")
     code, _ = _run("session-end", {"session_id": "s", "transcript_path": str(transcript)}, server)
     assert code == 0
-    assert _Recorder.calls[0][2]["messages"] == [{"key": "u:p1", "role": "user", "text": "今天想吃火锅"}]
+    assert _Recorder.calls[0][2]["messages"] == [
+        {"key": "u:p1", "role": "user", "text": "今天想吃火锅", "at": "2026-10-14T05:00:00.000Z"}]
+
+
+@pytest.mark.parametrize("payload", [
+    {"session_id": "s", "prompt": "还记得吗", "source": "loop_wakeup"},
+    {"session_id": "s", "prompt": "还记得吗", "agent_id": "sub-1"},
+])
+def test_non_human_prompts_are_ignored(server, payload):
+    code, out = _run("prompt", payload, server)
+    assert code == 0 and out == "" and _Recorder.calls == []
+
+
+def test_missing_prompt_id_gets_random_key_not_content_hash(server):
+    for _ in range(2):
+        _run("prompt", {"session_id": "s", "prompt": "继续"}, server)
+    keys = [c[2]["prompt_id"] for c in _Recorder.calls]
+    assert len(set(keys)) == 2 and all(k.startswith("rand-") for k in keys)
 
 
 @pytest.mark.parametrize("mode,payload", [

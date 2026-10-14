@@ -468,6 +468,25 @@ Ombre-MCP-Token: 你的Token
 
 ---
 
+## Claude Code 自动召回（可选）/ Auto-recall for Claude Code
+
+只对 Claude Code 生效，默认关。打开后：
+
+- **开新窗口 / `/clear` / 压缩后**：自动接上同一个项目目录里上一段对话的最后 10 轮原文；当天第一次开窗再附一次 dream。
+- **说到「记得 / 上次 / 之前 / 来着」或库里的 `[[名字]]`**：注入最相关的一条记忆。字面和向量两路都认同才注入，拿不准就不注入，交给模型自己 breath_search。
+- **每满 30 轮**：提醒正在聊天的模型考虑用 hold 存档（只提醒，存不存由它决定）。
+- 对话原文存在记忆库的 `.autorecall/` 里，跟着 Dashboard 的 ZIP 备份走。
+
+**一键安装**：先给 OB 设一个 hook token（环境变量 `OMBRE_HOOK_TOKEN` 或 config.yaml 的 `hooks.token`），
+在 Dashboard「设置 → 自动召回」打开开关，然后把卡片里的这行命令复制到装了 Claude Code 的电脑上运行：
+
+```bash
+curl -fsSL <你的OB地址>/autorecall/client/install.py | python3 - --url <你的OB地址>
+```
+
+它会提示输入 token，先备份 `~/.claude/settings.json` 再只增改自己的钩子，最后告诉你连没连通。
+重开一个 Claude Code 窗口就生效。卸载加 `--uninstall`。详细说明和手动安装见 [deploy/claude-code-hooks/README.md](deploy/claude-code-hooks/README.md)。
+
 ## 从源码部署 / Deploy from Source
 
 适合想自己改代码或部署到 VPS 的用户。

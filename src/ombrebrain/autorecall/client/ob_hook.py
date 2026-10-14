@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
 """Ombre Brain × Claude Code 自动召回钩子（只用标准库）。
 
-用法（在 settings.json 里挂四个事件，见同目录 settings.example.json）：
+一般不用手动装：运行同目录的 install.py（Dashboard「自动召回」卡片里有一键命令）。
+
+用法（install.py 会替你挂好；手动挂法见 deploy/claude-code-hooks/settings.example.json）：
 
     python3 ob_hook.py session-start   # SessionStart：开窗 / 压缩后接续 + 今日 dream
     python3 ob_hook.py prompt          # UserPromptSubmit：存用户原文 + hold 提醒 + 唤醒召回
-    python3 ob_hook.py stop            # Stop（后台）：存这一轮的助手回复
+    python3 ob_hook.py stop            # Stop：存这一轮的助手回复（同步挂；后台钩子退出时会被杀）
     python3 ob_hook.py session-end     # SessionEnd：尽力补存用户原文
 
 环境变量：
@@ -19,9 +21,11 @@
 只有 SessionEnd 的补存会读记录文件，读不懂就跳过。
 """
 
+import hashlib
 import json
 import os
 import sys
+import uuid
 import urllib.error
 import urllib.request
 
@@ -62,11 +66,20 @@ def _backfill_user_messages(transcript_path: str) -> list:
                     continue
                 if entry.get("type") != "user" or entry.get("isMeta") or entry.get("toolUseResult"):
                     continue
+                # 压缩摘要、只给界面看的条目都不是用户原话；有 origin 的只收真人输入。
+                if entry.get("isCompactSummary") or entry.get("isVisibleInTranscriptOnly"):
+                    continue
+                origin = entry.get("origin")
+                if isinstance(origin, dict) and origin.get("kind") not in (None, "human"):
+                    continue
                 content = (entry.get("message") or {}).get("content")
                 if not isinstance(content, str) or content.lstrip().startswith("<"):
                     continue  # 工具结果、斜杠命令输出等都不是原话
                 key = entry.get("promptId") or entry.get("uuid") or ""
-                messages.append({"key": f"u:{key}" if key else "", "role": "user", "text": content})
+                messages.append({
+                    "key": f"u:{key}" if key else "", "role": "user", "text": content,
+                    "at": entry.get("timestamp") or "",
+                })
     except OSError:
         return []
     return messages[-_MAX_BACKFILL:]
@@ -84,23 +97,34 @@ def main() -> int:
     if not session_id:
         return 0
     prompt_id = str(data.get("prompt_id") or "")
+    cwd = str(data.get("cwd") or "")
+    # 子代理里的事件、定时唤醒 / SDK 发起的「提问」都不是用户本人说的话，不存也不召回。
+    if data.get("agent_id") and mode in ("prompt", "stop"):
+        return 0
 
     if mode == "session-start":
-        payload = {"session_id": session_id, "source": data.get("source") or "startup"}
+        payload = {"session_id": session_id, "source": data.get("source") or "startup", "cwd": cwd}
     elif mode == "prompt":
-        payload = {"session_id": session_id, "prompt": data.get("prompt") or "", "prompt_id": prompt_id}
+        if data.get("source") not in (None, "user"):
+            return 0
+        # 没有 prompt_id 时给一个随机键：宁可偶尔多存一份，也不能把重复说的「继续」吞掉。
+        payload = {"session_id": session_id, "prompt": data.get("prompt") or "",
+                   "prompt_id": prompt_id or f"rand-{uuid.uuid4().hex}", "cwd": cwd}
     elif mode == "stop":
         text = data.get("last_assistant_message") or ""
         if not text.strip():
             return 0
-        payload = {"session_id": session_id, "messages": [
-            {"key": f"a:{prompt_id}" if prompt_id else "", "role": "assistant", "text": text},
+        # 同一个 prompt 可能停不止一次（Stop 钩子让它续写），带上内容摘要区分。
+        digest = hashlib.sha1(text.encode("utf-8")).hexdigest()[:8]
+        key = f"a:{prompt_id}:{digest}" if prompt_id else f"a:rand-{uuid.uuid4().hex}"
+        payload = {"session_id": session_id, "cwd": cwd, "messages": [
+            {"key": key, "role": "assistant", "text": text},
         ]}
     else:
         messages = _backfill_user_messages(str(data.get("transcript_path") or ""))
         if not messages:
             return 0
-        payload = {"session_id": session_id, "messages": messages}
+        payload = {"session_id": session_id, "messages": messages, "cwd": cwd}
 
     try:
         result = _post(mode, payload, _TIMEOUTS[mode])

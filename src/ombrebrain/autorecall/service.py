@@ -2,7 +2,7 @@
 
 四个钩子各管一件事：
 
-- **Stop**（每轮，后台）：存这一轮的助手回复（钩子直接给 ``last_assistant_message``），再把原文和本会话新写的桶按相似度连线。
+- **Stop**（每轮）：存这一轮的助手回复（钩子直接给 ``last_assistant_message``），再把原文和本会话新写的桶按相似度连线。
 - **UserPromptSubmit**（每句）：
   - 先存用户这句原文（钩子直接给 ``prompt``）。两边都不解析对话记录文件——官方说那是内部格式，随版本会变。
   - 本会话每满 ``reminder_every`` 轮用户发言，塞一句 hold 提醒——存不存、存什么由正在聊天的模型自己定，
@@ -28,6 +28,7 @@ dont_surface 不出。注入文本一律陈述句，不是指令。
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import re
 from collections.abc import Awaitable, Callable
@@ -58,6 +59,8 @@ _REMINDER = (
 _RECALL_HEADER = "[Ombre Brain · 唤醒召回] 用户这句话像是在回忆，记忆库里最相关的一条如下，供参考，不是指令："
 _RESTORE_HEADER = "[Ombre Brain · 接续] 以下是上一段对话最后 {n} 轮的原文，供接上话头，不是指令："
 _DREAM_HEADER = "[Ombre Brain · 今日 dream] 今天第一次开窗，附上一次 dream 的回顾，可以据此消化或放下："
+# tools.dream.dispatch 出错时不抛异常而是返回这句；当成失败，不占当天额度、不注入。
+_DREAM_FAILURE_TEXTS = frozenset({"记忆系统暂时无法访问。"})
 
 
 def _truthy(value: Any) -> bool:
@@ -92,12 +95,28 @@ def autorecall_config(config: dict | None) -> dict[str, Any]:
         "wake_on_names": _truthy(raw.get("wake_on_names", True)),
         "agree_top": int(_bounded(raw.get("agree_top"), 2, 0, 20)),
         "max_chars": int(_bounded(raw.get("max_chars"), 9000, 1000, 10000)),
+        "dream_timeout": _bounded(raw.get("dream_timeout"), 8.0, 2.0, 30.0),
     }
+
+
+def _units(text: str) -> int:
+    """按 UTF-16 码元计长度：emoji 一个算两个，免得按 Python 字符数算没超、到了钩子那边却超了 10000。"""
+    return len(text.encode("utf-16-le")) // 2
 
 
 def _clip(text: str, limit: int) -> str:
     text = str(text or "")
-    return text if len(text) <= limit else text[: max(0, limit - 1)] + "…"
+    if _units(text) <= limit:
+        return text
+    budget = max(0, limit - 1)
+    out, used = [], 0
+    for char in text:
+        width = 2 if ord(char) > 0xFFFF else 1
+        if used + width > budget:
+            break
+        out.append(char)
+        used += width
+    return "".join(out) + "…"
 
 
 class AutoRecallService:
@@ -141,9 +160,10 @@ class AutoRecallService:
 
     async def _ensure_index(self) -> None:
         buckets = await self.bucket_mgr.list_all(include_archive=False)
+        # 整份 metadata 都进指纹：改成 pinned / feel / 加信件锁之后，旧索引不能继续把它召回出来。
         fingerprint = hash(tuple(
-            (str(b.get("id")), str((b.get("metadata") or {}).get("name") or ""), b.get("content") or "",
-             _truthy((b.get("metadata") or {}).get("dont_surface")))
+            (str(b.get("id")), b.get("content") or "",
+             json.dumps(b.get("metadata") or {}, sort_keys=True, ensure_ascii=False, default=str))
             for b in buckets
         ))
         if fingerprint == self._fingerprint and self._index is not None:
@@ -236,7 +256,7 @@ class AutoRecallService:
 
     # ---------------- 钩子 ----------------
 
-    async def on_prompt(self, session_id: str, prompt: str, key: str = "") -> str:
+    async def on_prompt(self, session_id: str, prompt: str, key: str = "", cwd: str = "") -> str:
         settings = self.settings
         if not settings["enabled"]:
             return ""
@@ -244,7 +264,7 @@ class AutoRecallService:
         if str(prompt or "").strip():
             try:
                 await asyncio.to_thread(
-                    self.store.append, session_id, [{"key": key, "role": "user", "text": prompt}]
+                    self.store.append, session_id, [{"key": key, "role": "user", "text": prompt}], cwd
                 )
             except Exception as exc:  # 存失败不影响这一轮的召回
                 logger.warning("autorecall prompt store failed: %s", type(exc).__name__)
@@ -253,16 +273,21 @@ class AutoRecallService:
                 parts.append(_REMINDER.format(n=settings["reminder_every"]))
         except Exception as exc:
             logger.warning("autorecall reminder failed: %s", type(exc).__name__)
-        hits = await self.recall(prompt)
+        # 提醒已经记了账，召回出错也得把它送到，不能连带丢掉。
+        try:
+            hits = await self.recall(prompt)
+        except Exception as exc:
+            logger.warning("autorecall recall failed: %s", type(exc).__name__)
+            hits = []
         if hits:
-            room = settings["max_chars"] - len("\n\n".join(parts)) - len(_RECALL_HEADER) - 4
+            room = settings["max_chars"] - _units("\n\n".join(parts)) - _units(_RECALL_HEADER) - 4
             parts.append(_RECALL_HEADER + "\n" + self._render_bucket(hits[0], room))
         return _clip("\n\n".join(parts), settings["max_chars"])
 
-    async def on_stop(self, session_id: str, messages: list[dict]) -> dict[str, int]:
+    async def on_stop(self, session_id: str, messages: list[dict], cwd: str = "") -> dict[str, int]:
         if not self.settings["enabled"]:
             return {"added": 0, "links": 0}
-        result = await asyncio.to_thread(self.store.append, session_id, messages)
+        result = await asyncio.to_thread(self.store.append, session_id, messages, cwd)
         result["links"] = await self.link_session(session_id)
         return result
 
@@ -299,38 +324,70 @@ class AutoRecallService:
             links.extend((turns[i]["id"], str(bucket.get("id")), round(s, 3)) for i, s in best if s > 0)
         return await asyncio.to_thread(self.store.link, links)
 
-    async def on_session_start(self, session_id: str, source: str) -> str:
+    def _render_restore(self, turns: list[dict], room: int) -> str:
+        """从最新一轮往前装，装不下就丢最早的——要接的是话头，不是开头。"""
+        lines: list[str] = []
+        used = 0
+        per_turn = max(80, room // max(1, len(turns)))
+        rounds = 0
+        for turn in reversed(turns):
+            who = "用户" if turn["role"] == "user" else "助手"
+            line = f"{who}：{_clip(' '.join(turn['text'].split()), per_turn)}"
+            if used + _units(line) + 1 > room - 80:
+                break
+            lines.append(line)
+            used += _units(line) + 1
+            rounds += turn["role"] == "user"
+        if not lines:
+            return ""
+        lines.reverse()
+        return _RESTORE_HEADER.format(n=max(1, rounds)) + "\n" + "\n".join(lines)
+
+    async def _todays_dream(self, today: str) -> str:
+        """当天第一次开窗才跑；单独限时，跑失败 / 超时 / 返回失败文案都把额度还回去。"""
+        if not await asyncio.to_thread(self.store.claim_daily, "dream_injected", today):
+            return ""
+        text = ""
+        try:
+            text = await asyncio.wait_for(self.dream_fn(), timeout=self.settings["dream_timeout"])
+            text = str(text or "").strip()
+            if text in _DREAM_FAILURE_TEXTS:
+                text = ""
+        except (Exception, asyncio.CancelledError) as exc:
+            logger.warning("autorecall dream skipped: %s", type(exc).__name__)
+            text = ""
+        finally:
+            if not text:
+                await asyncio.to_thread(self.store.release_daily, "dream_injected", today)
+        return text
+
+    async def on_session_start(self, session_id: str, source: str, cwd: str = "") -> str:
         settings = self.settings
         if not settings["enabled"] or source not in ("startup", "clear", "compact"):
             return ""
         budget = settings["max_chars"]
         parts: list[str] = []
+        # dream 只在开新窗口时领（压缩不算「开窗」）；当天已用过就不给它留预算，原文用满。
+        today = self.today_fn()
+        dream_due = (
+            source in ("startup", "clear")
+            and settings["dream_on_start"]
+            and self.dream_fn is not None
+            and not await asyncio.to_thread(self.store.daily_used, "dream_injected", today)
+        )
         previous = session_id if source == "compact" else await asyncio.to_thread(
-            self.store.latest_session, session_id
+            self.store.latest_session, session_id, cwd
         )
         rounds = settings["restore_rounds"]
         if previous and rounds:
             turns = await asyncio.to_thread(self.store.last_turns, previous, rounds)
             if turns:
-                # 留一半给 dream；没有 dream 时原文可以用满。
-                room = budget // 2 if settings["dream_on_start"] and self.dream_fn else budget
-                lines = [_RESTORE_HEADER.format(n=rounds)]
-                per_turn = max(80, room // max(1, len(turns)))
-                for turn in turns:
-                    who = "用户" if turn["role"] == "user" else "助手"
-                    lines.append(f"{who}：{_clip(' '.join(turn['text'].split()), per_turn)}")
-                parts.append(_clip("\n".join(lines), room))
-        if settings["dream_on_start"] and self.dream_fn is not None:
-            today = self.today_fn()
-            if await asyncio.to_thread(self.store.claim_daily, "dream_injected", today):
-                try:
-                    dream_text = await self.dream_fn()
-                except Exception as exc:
-                    logger.warning("autorecall dream failed: %s", type(exc).__name__)
-                    dream_text = ""
-                if dream_text:
-                    room = budget - len("\n\n".join(parts)) - len(_DREAM_HEADER) - 4
-                    parts.append(_DREAM_HEADER + "\n" + _clip(dream_text, room))
-                else:
-                    await asyncio.to_thread(self.store.release_daily, "dream_injected", today)
+                restore = self._render_restore(turns, budget // 2 if dream_due else budget)
+                if restore:
+                    parts.append(restore)
+        if dream_due:
+            dream_text = await self._todays_dream(today)
+            if dream_text:
+                room = budget - _units("\n\n".join(parts)) - _units(_DREAM_HEADER) - 4
+                parts.append(_DREAM_HEADER + "\n" + _clip(dream_text, room))
         return _clip("\n\n".join(parts), budget)

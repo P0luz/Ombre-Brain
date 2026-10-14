@@ -221,18 +221,48 @@ async def test_prompt_stores_user_and_stop_stores_assistant(tmp_path):
 @pytest.mark.asyncio
 async def test_session_start_restores_previous_last_rounds(tmp_path):
     svc = _svc(tmp_path, restore_rounds=2)
-    await svc.on_stop("old", _turns(5, prefix="上一窗口"))
-    text = await svc.on_session_start("new", "startup")
+    await svc.on_stop("old", _turns(5, prefix="上一窗口"), cwd="/proj/a")
+    text = await svc.on_session_start("new", "startup", cwd="/proj/a")
     assert "接续" in text and "第4句" in text and "第3句" in text and "第2句" not in text
-    assert await svc.on_session_start("new", "resume") == ""
+    assert await svc.on_session_start("new", "resume", cwd="/proj/a") == ""
+    assert await svc.on_session_start("new", "fork", cwd="/proj/a") == ""
+
+
+@pytest.mark.asyncio
+async def test_restore_never_crosses_projects(tmp_path):
+    svc = _svc(tmp_path)
+    await svc.on_stop("a1", _turns(2, prefix="A 项目"), cwd="/proj/a")
+    await svc.on_stop("b1", _turns(2, prefix="B 项目"), cwd="/proj/b")
+    text = await svc.on_session_start("a2", "clear", cwd="/proj/a")
+    assert "A 项目" in text and "B 项目" not in text
+    assert await svc.on_session_start("x", "startup", cwd="") == ""  # 不知道目录就不猜
+
+
+@pytest.mark.asyncio
+async def test_restore_keeps_newest_rounds_when_over_budget(tmp_path):
+    svc = _svc(tmp_path, restore_rounds=50, max_chars=1500, dream_on_start=False)
+    await svc.on_stop("old", [{"key": f"k{i}", "role": "user", "text": f"第{i}句" + "长" * 200} for i in range(50)],
+                      cwd="/p")
+    text = await svc.on_session_start("new", "startup", cwd="/p")
+    assert "第49句" in text and "第0句" not in text
+
+
+@pytest.mark.asyncio
+async def test_backfilled_turn_sorts_by_time(tmp_path):
+    svc = _svc(tmp_path, restore_rounds=3)
+    await svc.on_stop("old", [{"key": "u1", "role": "user", "text": "第一句", "at": "2026-10-14T01:00:00Z"},
+                              {"key": "u3", "role": "user", "text": "第三句", "at": "2026-10-14T03:00:00Z"}], cwd="/p")
+    await svc.on_session_end("old", [{"key": "u2", "role": "user", "text": "第二句", "at": "2026-10-14T02:00:00Z"}],
+                             cwd="/p")
+    assert [t["text"] for t in svc.store.session_turns("old")] == ["第一句", "第二句", "第三句"]
 
 
 @pytest.mark.asyncio
 async def test_compact_restores_same_session(tmp_path):
     svc = _svc(tmp_path, restore_rounds=1)
-    await svc.on_stop("old", _turns(2, prefix="别的窗口"))
-    await svc.on_stop("cur", _turns(2, prefix="当前窗口"))
-    text = await svc.on_session_start("cur", "compact")
+    await svc.on_stop("old", _turns(2, prefix="别的窗口"), cwd="/p")
+    await svc.on_stop("cur", _turns(2, prefix="当前窗口"), cwd="/p")
+    text = await svc.on_session_start("cur", "compact", cwd="/p")
     assert "当前窗口 第1句" in text and "别的窗口" not in text
 
 
@@ -254,13 +284,67 @@ async def test_dream_once_per_day_and_released_on_failure(tmp_path):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("behaviour", ["failure_text", "timeout", "raises"])
+async def test_bad_dream_keeps_restore_and_returns_quota(tmp_path, behaviour):
+    async def dream():
+        if behaviour == "failure_text":
+            return "记忆系统暂时无法访问。"
+        if behaviour == "timeout":
+            await asyncio.sleep(10)
+        raise RuntimeError("boom")
+
+    svc = _svc(tmp_path, dream=dream, dream_timeout=2)
+    await svc.on_stop("old", _turns(1, prefix="上一窗口"), cwd="/p")
+    text = await svc.on_session_start("new", "startup", cwd="/p")
+    assert "上一窗口" in text and "今日 dream" not in text and "无法访问" not in text
+    assert not svc.store.daily_used("dream_injected", "2026-10-14")
+
+
+@pytest.mark.asyncio
+async def test_compact_does_not_take_daily_dream(tmp_path):
+    calls = []
+
+    async def dream():
+        calls.append(1)
+        return "回顾"
+
+    svc = _svc(tmp_path, dream=dream)
+    await svc.on_stop("cur", _turns(1), cwd="/p")
+    assert "回顾" not in await svc.on_session_start("cur", "compact", cwd="/p")
+    assert calls == []
+    assert "回顾" in await svc.on_session_start("new", "startup", cwd="/p")
+
+
+@pytest.mark.asyncio
+async def test_metadata_change_invalidates_index(tmp_path):
+    svc = _svc(tmp_path, [_b("hotpot", "重庆火锅")], agree_top=0)
+    assert [b["id"] for b in await svc.recall("记得火锅吗")] == ["hotpot"]
+    svc.bucket_mgr.buckets["hotpot"]["metadata"]["pinned"] = True
+    assert await svc.recall("记得火锅吗") == []
+    svc.bucket_mgr.buckets["hotpot"]["metadata"].update(pinned=False, locked_by="human", tags=["__letter__"])
+    assert await svc.recall("记得火锅吗") == []
+
+
+@pytest.mark.asyncio
+async def test_recall_failure_does_not_swallow_reminder(tmp_path):
+    svc = _svc(tmp_path, reminder_every=1)
+
+    async def broken(*_a, **_k):
+        raise RuntimeError("index down")
+
+    svc.recall = broken
+    assert "存档提醒" in await svc.on_prompt("s", "还记得吗", key="u:1")
+
+
+@pytest.mark.asyncio
 async def test_injection_stays_within_budget(tmp_path):
     async def dream():
         return "梦" * 20000
 
     svc = _svc(tmp_path, dream=dream, max_chars=3000)
-    await svc.on_stop("old", [{"key": f"k{i}", "role": "user", "text": "长" * 4000} for i in range(10)])
-    assert len(await svc.on_session_start("new", "startup")) <= 3000
+    await svc.on_stop("old", [{"key": f"k{i}", "role": "user", "text": "长" * 4000} for i in range(10)], cwd="/p")
+    text = await svc.on_session_start("new", "startup", cwd="/p")
+    assert "接续" in text and len(text.encode("utf-16-le")) // 2 <= 3000
 
 
 # ---------------- 原文 ↔ 桶 连线 ----------------

@@ -5,12 +5,18 @@ web/autorecall.py — Claude Code 自动召回的四个钩子端点
 
 给 deploy/claude-code-hooks/ 里的脚本调用，逻辑都在 ombrebrain.autorecall.service：
 
+所有请求都可以带 cwd（Claude Code 的项目目录）：「上一段对话」只在同一个目录里找。
+
 - POST /autorecall/session-start  {session_id, source}           → {"context": str}  开窗 / 压缩后接续 + 今日 dream
 - POST /autorecall/prompt         {session_id, prompt, prompt_id} → {"context": str}  存用户原文 + hold 提醒 + 唤醒召回
 - POST /autorecall/stop           {session_id, messages:[...]}   → {"added", "links"} 存这一轮助手回复
 - POST /autorecall/session-end    {session_id, messages:[...]}   → {"added", "links"} 关窗时整段补存
 
 messages 每项 {"key": 消息 uuid, "role": "user"|"assistant", "text": str}。
+
+客户端脚本下载（不需要登录，就是仓库里的开源脚本，不含任何密钥）：
+- GET  /autorecall/client/install.py   一键安装（Dashboard 卡片里给出完整命令）
+- GET  /autorecall/client/ob_hook.py   钩子本体
 
 另有面板用的设置接口（Dashboard 登录态）：
 - GET  /api/settings/autorecall → 当前设置 + 原文库计数
@@ -27,11 +33,12 @@ prompt / stop 每轮各打一次，/breath-hook 每分钟 10 次的额度对它�
 import asyncio
 import json
 import os
+from pathlib import Path
 import threading
 import time
 from collections import OrderedDict, deque
 
-from starlette.responses import JSONResponse
+from starlette.responses import JSONResponse, PlainTextResponse
 
 from . import _shared as sh
 
@@ -125,9 +132,13 @@ def _messages(body: dict) -> list[dict]:
             "key": str(item.get("key") or "")[:200],
             "role": str(item.get("role") or ""),
             "text": str(item.get("text") or ""),
+            "at": str(item.get("at") or "")[:64],
         })
     return out
 
+
+_CLIENT_DIR = Path(__file__).resolve().parent.parent / "ombrebrain" / "autorecall" / "client"
+_CLIENT_FILES = frozenset({"install.py", "ob_hook.py"})
 
 _BOOL_KEYS = ("enabled", "dream_on_start", "wake_on_names", "vector")
 _INT_KEYS = {"reminder_every": (0, 500), "restore_rounds": (0, 50), "agree_top": (0, 20)}
@@ -177,6 +188,17 @@ def _settings_payload() -> dict:
 
 def register(mcp) -> None:
     settings_lock = threading.Lock()
+
+    @mcp.custom_route("/autorecall/client/{name}", methods=["GET"])
+    async def client_file(request):
+        name = str(request.path_params.get("name") or "")
+        if name not in _CLIENT_FILES:
+            return PlainTextResponse("not found", status_code=404)
+        try:
+            text = (_CLIENT_DIR / name).read_text(encoding="utf-8")
+        except OSError:
+            return PlainTextResponse("not found", status_code=404)
+        return PlainTextResponse(text, media_type="text/x-python; charset=utf-8", headers=_NO_STORE)
 
     @mcp.custom_route("/api/settings/autorecall", methods=["GET"])
     async def get_autorecall_setting(request):
@@ -240,21 +262,25 @@ def register(mcp) -> None:
             return JSONResponse({"error": "failed"}, status_code=500, headers=_NO_STORE)
         return JSONResponse(result, headers=_NO_STORE)
 
+    def _cwd(body) -> str:
+        return str(body.get("cwd") or "")[:1000]
+
     async def _session_start(service, body):
         source = str(body.get("source") or "startup")
-        return {"context": await service.on_session_start(body["session_id"], source)}
+        return {"context": await service.on_session_start(body["session_id"], source, _cwd(body))}
 
     async def _prompt(service, body):
         key = str(body.get("prompt_id") or "")[:200]
         return {"context": await service.on_prompt(
-            body["session_id"], str(body.get("prompt") or "")[:20000], key=f"u:{key}" if key else ""
+            body["session_id"], str(body.get("prompt") or "")[:20000],
+            key=f"u:{key}" if key else "", cwd=_cwd(body),
         )}
 
     async def _stop(service, body):
-        return await service.on_stop(body["session_id"], _messages(body))
+        return await service.on_stop(body["session_id"], _messages(body), _cwd(body))
 
     async def _session_end(service, body):
-        return await service.on_session_end(body["session_id"], _messages(body))
+        return await service.on_session_end(body["session_id"], _messages(body), _cwd(body))
 
     for name, handler in (
         ("session-start", _session_start),

@@ -6,7 +6,9 @@
 - 每条原文用钩子给的消息 uuid 做幂等键：Stop 每轮存一次，SessionEnd 再整段补一遍，重复的自动跳过。
 - 原文只增不改；桶删掉或归档只影响读，不删原文。
 - 连线（原文 → 桶）不设门槛，把相似度分数一起存下，以后读的时候再按扫出来的门槛筛。
-- 会话状态记两件事：上次 hold 提醒在第几轮（每满 N 轮提醒一次）、模块级的上次注入 dream 的日期（一天一次）。
+- 会话状态记三件事：项目目录 cwd（「上一段对话」只在同一个目录里找，两个窗口 / 两个项目不串）、
+  上次 hold 提醒在第几轮（每满 N 轮提醒一次）、模块级的上次注入 dream 的日期（一天一次）。
+- 每条原文记发生时间 ``at``（UTC）；读的时候按它排，关窗补存进来的漏网句子能回到原来的位置。
 
 对外暴露：TranscriptStore / TranscriptStoreError / validate_transcript_snapshot_file。
 """
@@ -33,6 +35,7 @@ CREATE TABLE IF NOT EXISTS turns (
     role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
     text TEXT NOT NULL,
     truncated INTEGER NOT NULL DEFAULT 0,
+    at TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS turns_by_session ON turns(session_id, seq);
@@ -46,6 +49,7 @@ CREATE TABLE IF NOT EXISTS turn_bucket (
 CREATE INDEX IF NOT EXISTS turn_bucket_by_bucket ON turn_bucket(bucket_id);
 CREATE TABLE IF NOT EXISTS sessions (
     session_id TEXT PRIMARY KEY,
+    cwd TEXT NOT NULL DEFAULT '',
     user_turns INTEGER NOT NULL DEFAULT 0,
     last_reminder_turn INTEGER NOT NULL DEFAULT 0,
     started_at TEXT NOT NULL,
@@ -66,6 +70,20 @@ class TranscriptStoreError(RuntimeError):
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _utc(value: object, default: str) -> str:
+    """钩子给的时间（记录文件里是 ...Z，脚本里是 +00:00）统一成 UTC 秒级 ISO，读不懂就用 default。"""
+    raw = str(value or "").strip()
+    if not raw:
+        return default
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return default
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc).isoformat(timespec="seconds")
 
 
 def turn_id(session_id: str, key: str, role: str, text: str) -> str:
@@ -148,10 +166,11 @@ class TranscriptStore:
 
     # ---------------- 写 ----------------
 
-    def append(self, session_id: str, messages: list[dict]) -> dict[str, int]:
-        """按顺序写一批消息：``{"key": uuid, "role": "user"|"assistant", "text": str}``。
+    def append(self, session_id: str, messages: list[dict], cwd: str = "") -> dict[str, int]:
+        """按顺序写一批消息：``{"key": uuid, "role": "user"|"assistant", "text": str, "at"?: ISO}``。
 
         幂等：已存在的消息跳过，不占新序号。返回新增条数和本会话用户轮数。
+        ``cwd`` 是这个会话所在的项目目录；第一次知道就记下，之后不改。
         """
         session = str(session_id or "").strip()
         if not session:
@@ -162,9 +181,13 @@ class TranscriptStore:
             try:
                 connection.execute("BEGIN IMMEDIATE")
                 connection.execute(
-                    "INSERT OR IGNORE INTO sessions(session_id, started_at, updated_at) VALUES (?, ?, ?)",
-                    (session, now, now),
+                    "INSERT OR IGNORE INTO sessions(session_id, cwd, started_at, updated_at) VALUES (?, ?, ?, ?)",
+                    (session, str(cwd or ""), now, now),
                 )
+                if cwd:
+                    connection.execute(
+                        "UPDATE sessions SET cwd = ? WHERE session_id = ? AND cwd = ''", (str(cwd), session)
+                    )
                 seq = connection.execute(
                     "SELECT COALESCE(MAX(seq), 0) FROM turns WHERE session_id = ?", (session,)
                 ).fetchone()[0]
@@ -181,8 +204,8 @@ class TranscriptStore:
                         continue
                     seq += 1
                     connection.execute(
-                        "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?)",
-                        (tid, session, seq, role, text, int(truncated), now),
+                        "INSERT INTO turns VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                        (tid, session, seq, role, text, int(truncated), _utc(message.get("at"), now), now),
                     )
                     added += 1
                     new_user += role == "user"
@@ -249,6 +272,10 @@ class TranscriptStore:
             finally:
                 connection.close()
 
+    def daily_used(self, key: str, today: str) -> bool:
+        rows = self._read("SELECT value FROM module_state WHERE key = ?", (key,))
+        return bool(rows) and rows[0]["value"] == today
+
     def release_daily(self, key: str, today: str) -> None:
         """今天这次没用成（比如 dream 失败）就把额度还回去。"""
         with self._lock:
@@ -284,7 +311,7 @@ class TranscriptStore:
 
     def session_turns(self, session_id: str, *, roles: tuple[str, ...] = ("user", "assistant")) -> list[dict]:
         rows = self._read(
-            "SELECT id, seq, role, text, created_at FROM turns WHERE session_id = ? ORDER BY seq",
+            "SELECT id, seq, role, text, at, created_at FROM turns WHERE session_id = ? ORDER BY at, seq",
             (str(session_id),),
         )
         return [dict(r) for r in rows if r["role"] in roles]
@@ -301,11 +328,14 @@ class TranscriptStore:
             return turns[-rounds * 2:] if rounds > 0 else []
         return turns[starts[max(0, len(starts) - rounds)]:]
 
-    def latest_session(self, exclude: str = "") -> str:
+    def latest_session(self, exclude: str = "", cwd: str = "") -> str:
+        """同一个项目目录里、除当前会话外最近的一段对话。不知道 cwd 就不猜，返回空。"""
+        if not cwd:
+            return ""
         rows = self._read(
-            "SELECT session_id FROM sessions WHERE session_id != ? AND user_turns > 0 "
+            "SELECT session_id FROM sessions WHERE session_id != ? AND cwd = ? AND user_turns > 0 "
             "ORDER BY updated_at DESC LIMIT 1",
-            (str(exclude),),
+            (str(exclude), str(cwd)),
         )
         return rows[0]["session_id"] if rows else ""
 

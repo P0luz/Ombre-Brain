@@ -11,7 +11,7 @@
       { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/ob_hook.py prompt", "timeout": 15 } ] }
     ],
     "Stop": [
-      { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/ob_hook.py stop", "async": true } ] }
+      { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/ob_hook.py stop", "timeout": 20 } ] }
     ],
     "SessionEnd": [
       { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/ob_hook.py session-end", "timeout": 10 } ] }

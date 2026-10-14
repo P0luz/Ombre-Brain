@@ -95,6 +95,7 @@ autorecall:
   reminder_every: 30          # 0-500，每多少轮用户发言提醒一次 hold；0 = 不提醒
   restore_rounds: 10         # 0-50，开窗 / 压缩后接续的轮数
   dream_on_start: true       # 当天第一次开窗附一次 dream（一天一次）
+  dream_timeout: 8           # 2-30 秒，dream 单独限时；超时 / 失败不注入、不占当天额度
   wake_on_names: true        # 库里 [[名字]] 也算唤醒词（只在服务端比对）
   wake_words: [记得, 上次, 之前, 那次, 那天, 想起, 以前, 当时, 来着]
   agree_top: 2               # 反向门：字面和向量两路前 N 名有同一条才注入；0 = 关

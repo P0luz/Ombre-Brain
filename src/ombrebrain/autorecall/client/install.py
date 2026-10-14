@@ -1,0 +1,251 @@
+#!/usr/bin/env python3
+"""一键给 Claude Code 装上 Ombre Brain 自动召回钩子（只用标准库）。
+
+在装了 Claude Code 的那台电脑上运行：
+
+    curl -fsSL <OB地址>/autorecall/client/install.py | python3 - --url <OB地址>
+
+或者先下载再运行（Windows 也行）：
+
+    curl -o install.py <OB地址>/autorecall/client/install.py
+    python install.py --url <OB地址>
+
+它会：
+1. 把 ob_hook.py 放进 ~/.claude/hooks/（同目录有就复制，没有就从 OB 下载）；
+2. 备份 ~/.claude/settings.json，再把四个钩子合并进去——只增改 ob_hook.py 自己的条目，你原有的别的钩子和设置不动；
+3. 把 OB_URL / OB_HOOK_TOKEN 写进 settings.json 的 env（加 --no-env 则不写，改为提示你自己 export）；
+4. 连一下 OB，告诉你 token 对不对、开关开没开。
+
+重复运行是安全的（同样的条目只保留一份）。卸载：加 --uninstall。
+token 不放进命令行参数也行：不给 --token 时会在终端里隐藏输入。
+"""
+
+import argparse
+import getpass
+import json
+import os
+import shutil
+import sys
+import tempfile
+import time
+import urllib.error
+import urllib.request
+from pathlib import Path
+
+_MARKER = "ob_hook.py"
+_EVENTS = {
+    # 事件: (钩子模式, 额外字段)
+    "SessionStart": ("session-start", {"timeout": 45}),
+    "UserPromptSubmit": ("prompt", {"timeout": 15}),
+    # Stop 必须同步：后台（async）钩子在会话退出时会被 Claude Code 直接杀掉，
+    # 2026-10-14 实测 claude -p 下回复一条都没存上。同步只多等一次本地请求（实测约 60ms）。
+    "Stop": ("stop", {"timeout": 20}),
+    "SessionEnd": ("session-end", {"timeout": 10}),
+}
+_ENV_KEYS = ("OB_URL", "OB_HOOK_TOKEN")
+
+
+def _say(message: str) -> None:
+    print(message, flush=True)
+
+
+def _fetch(url: str, timeout: float = 15) -> bytes:
+    with urllib.request.urlopen(url, timeout=timeout) as response:
+        return response.read()
+
+
+def _hook_source(base_url: str) -> bytes:
+    sibling = Path(__file__).resolve().parent / _MARKER if "__file__" in globals() else None
+    if sibling and sibling.is_file():
+        return sibling.read_bytes()
+    raw = _fetch(f"{base_url}/autorecall/client/{_MARKER}")
+    if b"def main()" not in raw:
+        raise RuntimeError("下载到的 ob_hook.py 内容不对，请确认 --url 是 Ombre Brain 的地址")
+    return raw
+
+
+def _load_settings(path: Path) -> dict:
+    if not path.exists():
+        return {}
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        return {}
+    try:
+        data = json.loads(text)
+    except ValueError as exc:
+        raise RuntimeError(f"{path} 不是合法 JSON，为了不弄坏它，这次什么都没改：{exc}") from exc
+    if not isinstance(data, dict):
+        raise RuntimeError(f"{path} 顶层不是对象，这次什么都没改")
+    return data
+
+
+def _write_atomic(path: Path, data: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(prefix=".settings-", suffix=".json", dir=str(path.parent))
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(data, handle, ensure_ascii=False, indent=2)
+            handle.write("\n")
+        os.replace(temp, path)
+    finally:
+        if os.path.exists(temp):
+            os.unlink(temp)
+
+
+def _strip_ours(settings: dict) -> None:
+    """去掉 settings 里所有指向 ob_hook.py 的钩子条目；空掉的组和事件一并去掉。"""
+    hooks = settings.get("hooks")
+    if not isinstance(hooks, dict):
+        return
+    for event in list(hooks):
+        groups = hooks.get(event)
+        if not isinstance(groups, list):
+            continue
+        kept_groups = []
+        for group in groups:
+            if not isinstance(group, dict) or not isinstance(group.get("hooks"), list):
+                kept_groups.append(group)
+                continue
+            kept = [h for h in group["hooks"] if _MARKER not in str((h or {}).get("command", ""))]
+            if kept:
+                kept_groups.append({**group, "hooks": kept})
+        if kept_groups:
+            hooks[event] = kept_groups
+        else:
+            del hooks[event]
+    if not hooks:
+        settings.pop("hooks", None)
+
+
+def _command(hook_path: Path, mode: str) -> str:
+    return f'"{sys.executable}" "{hook_path}" {mode}'
+
+
+def merge_settings(settings: dict, hook_path: Path, url: str, token: str, write_env: bool) -> dict:
+    _strip_ours(settings)
+    hooks = settings.setdefault("hooks", {})
+    for event, (mode, extra) in _EVENTS.items():
+        entry = {"type": "command", "command": _command(hook_path, mode), **extra}
+        hooks.setdefault(event, []).append({"hooks": [entry]})
+    env = settings.get("env") if isinstance(settings.get("env"), dict) else {}
+    if write_env:
+        env.update({"OB_URL": url, "OB_HOOK_TOKEN": token})
+    else:
+        for key in _ENV_KEYS:
+            env.pop(key, None)
+    if env:
+        settings["env"] = env
+    else:
+        settings.pop("env", None)
+    return settings
+
+
+def unmerge_settings(settings: dict) -> dict:
+    _strip_ours(settings)
+    env = settings.get("env")
+    if isinstance(env, dict):
+        for key in _ENV_KEYS:
+            env.pop(key, None)
+        if not env:
+            settings.pop("env", None)
+    return settings
+
+
+def check_connection(url: str, token: str) -> str:
+    """用 resume 调一次 session-start：服务端对 resume 不注入、不存任何东西，只用来验 token 和开关。"""
+    request = urllib.request.Request(
+        f"{url}/autorecall/session-start",
+        data=json.dumps({"session_id": "ob-install-check", "source": "resume"}).encode(),
+        headers={"Content-Type": "application/json", "X-Ombre-Hook-Token": token},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=10) as response:
+            body = json.loads(response.read().decode() or "{}")
+    except urllib.error.HTTPError as exc:
+        if exc.code == 401:
+            return "token 不对（401）：检查 OB 的 OMBRE_HOOK_TOKEN / hooks.token 和你填的是否一致"
+        return f"OB 返回了 {exc.code}"
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        return f"连不上 {url}：{exc}"
+    if isinstance(body, dict) and body.get("disabled"):
+        return "已连通，但自动召回开关还关着：去 Dashboard「设置 → 自动召回」打开"
+    return "ok"
+
+
+def main(argv=None) -> int:
+    parser = argparse.ArgumentParser(description="给 Claude Code 装上 Ombre Brain 自动召回钩子")
+    parser.add_argument("--url", help="Ombre Brain 地址，例如 http://127.0.0.1:18001")
+    parser.add_argument("--token", help="hook token；不给就在终端里隐藏输入")
+    parser.add_argument("--settings", default=str(Path.home() / ".claude" / "settings.json"))
+    parser.add_argument("--hooks-dir", default=str(Path.home() / ".claude" / "hooks"))
+    parser.add_argument("--no-env", action="store_true", help="不把地址和 token 写进 settings.json")
+    parser.add_argument("--uninstall", action="store_true", help="卸载")
+    args = parser.parse_args(argv)
+
+    settings_path = Path(args.settings).expanduser()
+    hook_path = Path(args.hooks_dir).expanduser() / _MARKER
+
+    try:
+        settings = _load_settings(settings_path)
+    except RuntimeError as exc:
+        _say(f"✗ {exc}")
+        return 1
+
+    if args.uninstall:
+        if settings_path.exists():
+            shutil.copy2(settings_path, settings_path.with_name(f"settings.json.bak-{int(time.time())}"))
+            _write_atomic(settings_path, unmerge_settings(settings))
+        if hook_path.exists():
+            hook_path.unlink()
+        _say("✓ 已卸载：settings.json 里的 Ombre Brain 钩子和 env 已去掉（原文件已备份），ob_hook.py 已删除。")
+        return 0
+
+    url = args.url
+    if not url:
+        try:
+            url = input("Ombre Brain 地址（如 http://127.0.0.1:18001）：")
+        except EOFError:  # curl | python3 - 时 stdin 是脚本本身，只能走 --url
+            _say("✗ 请加 --url <Ombre Brain 地址>")
+            return 1
+    url = url.strip().rstrip("/")
+    if not url.startswith(("http://", "https://")):
+        _say("✗ 地址要以 http:// 或 https:// 开头")
+        return 1
+    token = (args.token or getpass.getpass("hook token（输入时不显示）：")).strip()
+    if not token:
+        _say("✗ 没有 token：先在 OB 设置 OMBRE_HOOK_TOKEN 或 config.yaml 的 hooks.token")
+        return 1
+
+    try:
+        source = _hook_source(url)
+    except (urllib.error.URLError, OSError, RuntimeError) as exc:
+        _say(f"✗ 拿不到 ob_hook.py：{exc}")
+        return 1
+    hook_path.parent.mkdir(parents=True, exist_ok=True)
+    hook_path.write_bytes(source)
+    try:
+        hook_path.chmod(0o755)
+    except OSError:
+        pass
+
+    if settings_path.exists():
+        backup = settings_path.with_name(f"settings.json.bak-{int(time.time())}")
+        shutil.copy2(settings_path, backup)
+        _say(f"· 原 settings.json 已备份到 {backup}")
+    _write_atomic(settings_path, merge_settings(settings, hook_path, url, token, not args.no_env))
+    _say(f"✓ 钩子脚本：{hook_path}")
+    _say(f"✓ 已合并进 {settings_path}（SessionStart / UserPromptSubmit / Stop / SessionEnd）")
+    if args.no_env:
+        _say(f"· 记得在启动 Claude Code 的 shell 里设置：export OB_URL={url} OB_HOOK_TOKEN=…")
+
+    status = check_connection(url, token)
+    if status == "ok":
+        _say("✓ 已连通 Ombre Brain，开关已开。重开一个 Claude Code 窗口就生效。")
+        return 0
+    _say(f"! {status}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

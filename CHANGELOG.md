@@ -19,6 +19,17 @@
   - 独立通道，不进 breath_search 的融合打分，不改任何普通记忆的召回分数。
   - 新端点：`/autorecall/{session-start,prompt,stop,session-end}`（hook token 或 Dashboard 登录态，独立限流）；`/api/settings/autorecall`（面板读写，先写盘再生效）。
   - 新配置段 `autorecall`（见 config.example.yaml）。
+  - **一键安装**：`curl -fsSL <OB地址>/autorecall/client/install.py | python3 - --url <OB地址>`（Dashboard 卡片里给出现成命令）。
+    先备份 `~/.claude/settings.json` 再只增改自己的四个钩子，可重复运行、可 `--uninstall`，最后自检 token 与开关。
+    客户端脚本放在 `src/ombrebrain/autorecall/client/`，由 `GET /autorecall/client/{install.py,ob_hook.py}` 提供下载（只有这两个文件）。
+  - 上线前的行为审查与真机测试（Claude Code 2.1.295）修掉的问题：
+    - 「上一段对话」按项目目录（cwd）找，两个窗口 / 不同项目不再串；不知道目录就不接。
+    - dream 单独限时（`dream_timeout`，默认 8 秒），失败 / 超时 / 返回失败文案都不注入、不占当天额度、不拖垮接续原文；压缩不领当天 dream。
+    - 接续超预算时保留最新的几轮。补存的原文按发生时间排序。
+    - 只存真人发言：定时唤醒、子代理、SDK 发起的提问不存不召回；补存跳过压缩摘要。没有 prompt_id 时不再按内容去重（重复说的「继续」不会被吞）。
+    - 召回索引的指纹覆盖整份 metadata：桶改成 pinned / feel / 加信件锁后立即不再被召回。召回出错不吞掉 hold 提醒。
+    - 注入长度按 UTF-16 码元算（和 Claude Code 的 10000 上限一致）。
+    - Stop 钩子改为同步：后台钩子在会话退出时会被 Claude Code 杀掉，实测回复存不上；同步一次约 60ms。
 - `surfacing.you_max_results`（默认 6，1～50）/ `surfacing.you_max_tokens`（默认 0 = 不限，0～40000，#124）：You 读回的
   条数和 token 预算由用户在 Dashboard「设置」里定，热更新；模型传的 max_results 只能更少。写入允许一条认识长达 500 字，
   原先写死的 160 token 连一条正常长度的中文认识都装不下。设了预算时，放不下的那条跳过、后面放得下的照常返回。
