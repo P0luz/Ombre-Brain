@@ -17,10 +17,17 @@
 | Claude Code | `curl -fsSL <OB地址>/autorecall/client/install.py \| python3 - --url <OB地址>` | 开窗、提问、存回复、关窗、压缩前 |
 | Codex CLI | 同上，末尾加 `--client codex` | SessionStart、UserPromptSubmit、Stop |
 | Gemini CLI（旧版 `gemini` 命令） | 同上，末尾加 `--client gemini` | SessionStart、BeforeAgent、AfterAgent |
+| Antigravity CLI（`agy`，**实验**） | 同上，末尾加 `--client antigravity` | SessionStart（接续）；PreInvocation、Stop 只跑结构探针 |
 
 - Codex：装完要打开 codex 输入 `/hooks`，把 ob_hook.py 的几条逐个**信任**一次，否则不会执行（Codex 的安全设计，改过的钩子也要重新信任）。
 - Codex / Gemini 的配置里没有 env 段，OB 地址和 token 写在钩子旁边的 `ob_hook.env`（只有自己可读）。
 - Codex / Gemini 没挂「关窗 / 压缩前补存」：那两个钩子要读对话记录文件，目前只认得 Claude Code 的格式。每一轮的原文照常存。
+- **Antigravity 是实验性的，我们没能实测**（开发者的账号过不了 agy 的资格检查）。照 agy 内置的官方钩子文档写：
+  - 能做的：开窗时注入上一段对话的接续和当天的 dream；
+  - 还做不了：存用户原话和回复——agy 的钩子输入里没有正文，只给记录文件路径，而记录文件的格式文档里没写；
+  - 装好后 PreInvocation / Stop 会跑一个「结构探针」，把钩子输入和记录文件的**字段名、类型**（以及 type / role 这类枚举值）
+    写进 `~/.gemini/config/ombre-brain/ob_agy_probe.json`，**不记聊天内容**。用过请把这个文件贴到
+    [GitHub issue](https://github.com/P0luz/Ombre-Brain/issues)，说说接续有没有生效，我们照着补上存原文。
 - 自检：`python3 ~/.codex/hooks/install.py --client codex --check`（Gemini 把 codex 换成 gemini、目录换成 `~/.gemini/hooks`）。
 - 卸载：安装命令加 `--uninstall`。原配置先备份，只删自己的条目。
 

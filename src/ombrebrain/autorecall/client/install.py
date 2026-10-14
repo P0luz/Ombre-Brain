@@ -66,6 +66,13 @@ PROFILES = {
                "events": {"SessionStart": ("session-start", {"timeout": 45000}),
                           "BeforeAgent": ("prompt", {"timeout": 15000}),
                           "AfterAgent": ("stop", {"timeout": 20000})}},
+    # Antigravity（agy），实验：钩子输入不带原话和回复，只做开窗接续；另两个事件跑结构探针（只记字段名），
+    # 供用户贴进 issue 后补齐。配置是「命名钩子」格式：{"ombre-brain": {事件: [处理器…]}}，timeout 单位秒。
+    "antigravity": {"label": "Antigravity CLI", "settings": "~/.gemini/config/hooks.json",
+                    "hooks_dir": "~/.gemini/config/ombre-brain", "named": "ombre-brain",
+                    "events": {"SessionStart": ("session-start", {"timeout": 45}),
+                               "PreInvocation": ("probe PreInvocation", {"timeout": 10}),
+                               "Stop": ("probe Stop", {"timeout": 10})}},
 }
 
 
@@ -130,6 +137,9 @@ def _write_atomic(path: Path, data: dict) -> None:
 
 def _strip_ours(settings: dict) -> None:
     """去掉 settings 里所有指向 ob_hook.py 的钩子条目；空掉的组和事件一并去掉。"""
+    for name in [k for k, v in settings.items() if k != "hooks" and isinstance(v, dict)
+                 and _MARKER in json.dumps(v, ensure_ascii=False)]:
+        del settings[name]  # Antigravity 的命名钩子整段是我们的
     hooks = settings.get("hooks")
     if not isinstance(hooks, dict):
         return
@@ -184,6 +194,11 @@ def read_env_file(hook_path: Path) -> dict:
 def merge_settings(settings: dict, hook_path: Path, url: str, token: str, write_env: bool,
                    client: str = "claude") -> dict:
     _strip_ours(settings)
+    named = PROFILES[client].get("named")
+    if named:
+        settings[named] = {event: [{"type": "command", "command": _command(hook_path, mode, client), **extra}]
+                           for event, (mode, extra) in PROFILES[client]["events"].items()}
+        return settings
     hooks = settings.setdefault("hooks", {})
     for event, (mode, extra) in PROFILES[client]["events"].items():
         entry = {"type": "command", "command": _command(hook_path, mode, client), **extra}
@@ -261,7 +276,13 @@ def run_check(settings_path: Path, client: str = "claude", hooks_dir: Path | Non
         _say(f"✗ {status}")
         return 1
     commands = {}
+    named = PROFILES[client].get("named")
     for event, (mode, _extra) in events.items():
+        if named:
+            for hook in ((settings.get(named) or {}).get(event) or []):
+                if _MARKER in str((hook or {}).get("command", "")):
+                    commands[mode] = hook["command"]
+            continue
         for group in (settings.get("hooks") or {}).get(event) or []:
             for hook in (group or {}).get("hooks") or []:
                 if _MARKER in str((hook or {}).get("command", "")):
@@ -279,7 +300,8 @@ def run_check(settings_path: Path, client: str = "claude", hooks_dir: Path | Non
         command = commands.get(mode)
         if not command:
             continue
-        data = json.dumps({"session_id": session, "cwd": os.getcwd(), **extra})
+        data = json.dumps({"session_id": session, "cwd": os.getcwd(), **extra,
+                           "conversationId": session, "workspacePaths": [os.getcwd()]})  # 后两项给 Antigravity
         try:
             subprocess.run(command, shell=True, input=data, text=True, env=env, timeout=60,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -334,7 +356,8 @@ def run_check(settings_path: Path, client: str = "claude", hooks_dir: Path | Non
                 _say(f"    {line}")
         _say({"claude": "· 另外确认：装完后重开了 Claude Code 窗口；项目里的 .claude/settings.json 没有 disableAllHooks。",
               "codex": "· 另外确认：在 Codex 里用 /hooks 信任了这几个钩子（新装或改过的钩子不信任不会跑）。",
-              "gemini": "· 另外确认：装完后重开了 Gemini CLI。"}[client])
+              "gemini": "· 另外确认：装完后重开了 Gemini CLI。",
+              "antigravity": "· 另外确认：装完后重开了 agy。"}[client])
         return 1
     _say(f"✓ 钩子都通。注意：这只证明命令能跑通；{PROFILES[client]['label']} 是否真的加载了这些钩子，以重开窗口后面板上的「最后到达」为准。")
     return 0
@@ -428,6 +451,10 @@ def main(argv=None) -> int:
     _say(f"✓ 已合并进 {settings_path}（{' / '.join(profile['events'])}）")
     if client == "codex":
         _say("· Codex 要求新钩子先信任：打开 codex，输入 /hooks，逐个信任 ob_hook.py 的条目。")
+    if client == "antigravity":
+        _say("· 实验性支持：目前只做开窗接续，用户原话和回复还存不了（agy 的钩子不给正文）。")
+        _say(f"· 聊几句后请把 {hook_path.with_name('ob_agy_probe.json')} 贴到")
+        _say("  https://github.com/P0luz/Ombre-Brain/issues （只含字段名和类型，不含聊天内容），并说说接续有没有生效。")
     if args.no_env:
         _say(f"· 记得在启动 Claude Code 的 shell 里设置：export OB_URL={url} OB_HOOK_TOKEN=…")
 

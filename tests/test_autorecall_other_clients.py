@@ -105,3 +105,44 @@ def test_unknown_client_is_a_noop(tmp_path, ob):
     _settings, hooks_dir = _install(tmp_path, "codex", ob.url)
     out = _run(hooks_dir, tmp_path, ["--client", "nope", "prompt"], {"session_id": "x", "prompt": "你还记得吗"})
     assert out.returncode == 0 and out.stdout == "" and not ob.calls[1:]
+
+
+def test_antigravity_named_hooks_install_and_uninstall(tmp_path, ob):
+    path = tmp_path / "antigravity-settings.json"
+    path.write_text(json.dumps({"lint": {"PostToolUse": [{"matcher": "*", "hooks": [{"command": "x"}]}]}}))
+    settings, hooks_dir = _install(tmp_path, "antigravity", ob.url)
+    ours = settings["ombre-brain"]
+    assert set(ours) == {"SessionStart", "PreInvocation", "Stop"} and "lint" in settings
+    assert "--client antigravity session-start" in ours["SessionStart"][0]["command"]
+    assert ours["SessionStart"][0]["timeout"] == 45  # 秒
+    _install(tmp_path, "antigravity", ob.url)  # 重复安装只留一份
+    assert list(json.loads(path.read_text())).count("ombre-brain") == 1
+    assert install.main(["--client", "antigravity", "--uninstall", "--settings", str(path),
+                         "--hooks-dir", str(hooks_dir)]) == 0
+    assert json.loads(path.read_text()) == {"lint": {"PostToolUse": [{"matcher": "*", "hooks": [{"command": "x"}]}]}}
+
+
+def test_antigravity_session_start_injects_steps(tmp_path, ob):
+    _settings, hooks_dir = _install(tmp_path, "antigravity", ob.url)
+    out = _run(hooks_dir, tmp_path, ["--client", "antigravity", "session-start"], {
+        "conversationId": "ag1", "workspacePaths": ["/w"], "transcriptPath": "", "modelName": "auto"})
+    assert json.loads(out.stdout) == {"injectSteps": [{"systemMessage": {"systemMessage": "[接续] 上次聊到猫"}}]}
+    start = [c[1] for c in ob.calls if c[0] == "session-start"][-1]
+    assert start["session_id"] == "ag1" and start["cwd"] == "/w" and start["client"] == "antigravity"
+
+
+def test_antigravity_probe_records_shape_not_content(tmp_path, ob):
+    _settings, hooks_dir = _install(tmp_path, "antigravity", ob.url)
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(json.dumps({"type": "USER_INPUT", "content": {"text": "我的秘密是阿树"}}, ensure_ascii=False)
+                          + "\n" + json.dumps({"type": "PLANNER_RESPONSE", "text": "好的"}, ensure_ascii=False) + "\n")
+    n = len(ob.calls)
+    out = _run(hooks_dir, tmp_path, ["--client", "antigravity", "probe", "Stop"], {
+        "conversationId": "ag2", "transcriptPath": str(transcript), "terminationReason": "NO_TOOL_CALL"})
+    assert json.loads(out.stdout) == {} and len(ob.calls) == n  # 探针不连 OB
+    probe = (hooks_dir / "ob_agy_probe.json").read_text(encoding="utf-8")
+    assert "阿树" not in probe and "好的" not in probe and "ag2" not in probe
+    entry = json.loads(probe)[-1]
+    assert entry["event"] == "Stop" and entry["transcript"]["lines"] == 2
+    assert entry["transcript"]["paths"]["content.text"] == ["str"]
+    assert entry["transcript"]["enum_values"]["type"] == ["PLANNER_RESPONSE", "USER_INPUT"]

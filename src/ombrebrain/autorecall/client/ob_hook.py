@@ -15,6 +15,8 @@
 
     python3 ob_hook.py --client codex prompt    # Codex CLI：事件名同 Claude Code，提问的 id 叫 turn_id
     python3 ob_hook.py --client gemini prompt   # 旧版 Gemini CLI：BeforeAgent 提问，AfterAgent 的 prompt_response 是回复
+    python3 ob_hook.py --client antigravity session-start   # Antigravity（agy），实验：只做开窗接续
+    python3 ob_hook.py --client antigravity probe Stop      # agy 结构探针：只记字段名 / 类型，不记内容
 
 环境变量（也可以写进同目录的 ob_hook.env，一行一个 KEY=VALUE；环境里已有的优先）：
     OB_URL         Ombre Brain 地址，默认 http://127.0.0.1:18001
@@ -51,7 +53,8 @@ _ENDPOINT = {"pre-compact": "session-end"}  # 压缩前抢救和关窗补存是�
 _EVENT_NAMES = {"session-start": "SessionStart", "prompt": "UserPromptSubmit"}
 # 各客户端注入上下文时回填的事件名；没列出的同 Claude Code。
 _CLIENT_EVENT_NAMES = {"gemini": {"session-start": "SessionStart", "prompt": "BeforeAgent"}}
-_CLIENTS = frozenset({"claude", "codex", "gemini"})
+_CLIENTS = frozenset({"claude", "codex", "gemini", "antigravity"})
+_PROBE_ENUM_KEYS = frozenset({"type", "role", "kind", "source", "stepType", "status", "event", "author"})
 _MAX_BACKFILL = 1000
 _NO_WAIT = frozenset({"stop", "session-end", "pre-compact"})
 _HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
@@ -270,6 +273,84 @@ def _backfill_user_messages(transcript_path: str) -> list:
     return messages[-_MAX_BACKFILL:]
 
 
+def _shape(value, prefix: str, paths: dict, enums: dict, depth: int = 0) -> None:
+    """记下 JSON 的结构：路径 → 类型；只有 type / role 这类枚举字段才记值（截 40 字），正文一律不记。"""
+    if depth > 6:
+        return
+    if isinstance(value, dict):
+        for key, inner in value.items():
+            path = f"{prefix}.{key}" if prefix else str(key)
+            paths.setdefault(path, set()).add(type(inner).__name__)
+            if key in _PROBE_ENUM_KEYS and isinstance(inner, str) and len(enums.setdefault(path, set())) < 20:
+                enums[path].add(inner[:40])
+            _shape(inner, path, paths, enums, depth + 1)
+    elif isinstance(value, list):
+        for inner in value[:50]:
+            _shape(inner, f"{prefix}[]", paths, enums, depth + 1)
+
+
+def _antigravity_probe(event: str, data: dict) -> None:
+    """Antigravity 结构探针：钩子输入和记录文件长什么样。结果追加到 ob_agy_probe.json，供用户贴进 issue。"""
+    paths: dict = {}
+    enums: dict = {}
+    _shape(data, "", paths, enums)
+    entry = {"event": event, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z"),
+             "payload": {k: sorted(v) for k, v in paths.items()}, "transcript": None}
+    transcript = str(data.get("transcriptPath") or "")
+    if transcript:
+        t_paths: dict = {}
+        t_enums: dict = {}
+        lines = 0
+        try:
+            with open(transcript, encoding="utf-8") as handle:
+                for line in handle:
+                    lines += 1
+                    try:
+                        _shape(json.loads(line), "", t_paths, t_enums)
+                    except ValueError:
+                        t_paths.setdefault("<不是 JSON 的行>", set()).add("str")
+            entry["transcript"] = {"lines": lines, "paths": {k: sorted(v) for k, v in t_paths.items()},
+                                   "enum_values": {k: sorted(v) for k, v in t_enums.items()}}
+        except OSError as exc:
+            entry["transcript"] = {"error": type(exc).__name__}
+    path = _state_dir() / "ob_agy_probe.json"
+    try:
+        old = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        old = []
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps((old + [entry])[-10:], ensure_ascii=False, indent=1), encoding="utf-8")
+
+
+def _antigravity(mode: str, event: str = "") -> int:
+    """Antigravity（agy）的钩子输入是 camelCase、不带用户原话和回复正文（只给记录文件路径）。
+    目前只做两件事：SessionStart 注入接续 / dream；其他事件跑结构探针。输出必须是 JSON。"""
+    out: dict = {}
+    try:
+        data = json.load(sys.stdin)
+        if mode == "probe":
+            _antigravity_probe(event or str(data.get("hookEventName") or ""), data)
+        elif mode == "session-start" and os.environ.get("OB_HOOK_TOKEN") and data.get("conversationId"):
+            workspaces = data.get("workspacePaths") or [""]
+            payload = {"session_id": str(data["conversationId"])[:200], "source": "startup",
+                       "cwd": str(workspaces[0] or ""), "client": "antigravity"}
+            pending = _pending_errors()
+            if pending:
+                payload["client_errors"] = pending
+            result = _send("session-start", payload, _TIMEOUTS["session-start"])
+            if pending:
+                _clear_pending()
+            context = result.get("context") if isinstance(result, dict) else ""
+            if context:
+                out = {"injectSteps": [{"systemMessage": {"systemMessage": context}}]}
+    except urllib.error.HTTPError as exc:
+        report_error(mode, f"OB 返回 {exc.code}")
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        report_error(mode, f"{type(exc).__name__}: {exc}")
+    print(json.dumps(out, ensure_ascii=False))
+    return 0
+
+
 def main() -> int:
     _load_env_file()
     if len(sys.argv) > 2 and sys.argv[1] == "--deliver":
@@ -281,6 +362,8 @@ def main() -> int:
     if client not in _CLIENTS:
         return 0
     mode = args[0] if args else ""
+    if client == "antigravity":
+        return _antigravity(mode, args[1] if len(args) > 1 else "")
     if mode not in _TIMEOUTS or not os.environ.get("OB_HOOK_TOKEN"):
         return 0
     try:

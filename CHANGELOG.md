@@ -59,6 +59,10 @@
     - **按客户端分开关与分开体检**：请求带 `client` 字段报自己是谁；Dashboard「接入的客户端」每家一行——开关、各事件最后到达时间、
       一键安装命令。关掉的那家只记到达、返回 disabled，不存不注入；新配置 `autorecall.clients`（默认全开）。
       本机面板实测：关掉 Codex 后写进 config.yaml，Codex 的请求不入库，Claude Code 照常。
+    - **Antigravity CLI（agy）实验性支持**：`install.py --client antigravity`，写进 `~/.gemini/config/hooks.json` 的命名钩子 `ombre-brain`。
+      照 agy 1.3.5 内置的钩子文档：SessionStart 用 `injectSteps` 注入接续 / dream；钩子输入不带原话和回复，存原文暂未实现。
+      PreInvocation / Stop 跑结构探针（只记字段名、类型和枚举值，不记内容）供用户贴进 issue。
+      **未实测**：开发者账号在本机和 129（均在美国）都过不了 agy 的资格检查。
 
 ### 性能 / Performance
 
