@@ -52,7 +52,7 @@
     - Codex CLI / Gemini CLI（旧版 `gemini` 命令；接替它的 Antigravity `agy` 钩子格式不同，另行适配）：`install.py --client codex|gemini`，挂开窗 / 提问 / 存回复三个钩子；地址和 token 写在钩子旁的 `ob_hook.env`（0600）。
       Codex 装完要在 `/hooks` 里信任一次。本机按官方文档的输入字段跑通了安装、钩子和 `--check`；两家 CLI 本体尚未真机验证。
     - **OpenAI 兼容记忆网关** `ob_gateway.py`（单文件、标准库）：能填 base_url 的聊天软件 / 自制前端指向它即可；流式边转发边拼全文，结束后存；
-      API key 原样透传不落盘；监听非本机地址必须设网关密钥。本机用官方 openai SDK（流式 / 非流式）+ 真 OB 实测：唤醒召回、原文入库、换窗接续都通。
+      API key 原样透传不落盘；监听非本机地址必须设网关密钥；上游没给 [DONE] / finish_reason 就断开的回复不存。本机用官方 openai SDK（流式 / 非流式）+ 真 OB 实测：唤醒召回、原文入库、换窗接续都通。
     - **Open WebUI Filter** `deploy/openwebui/ob_filter.py`：inlet = 提问，outlet = 存回复；跳过标题 / 标签等后台任务；多用户各自一个作用域。
       本机 Open WebUI v0.12.0（Docker）界面与 API 实测通过；实测中发现并修掉一处 inlet / outlet 会话 id 对不上。
     - SDK `ob_client.py` 连本机 OB 时绕过系统代理（与钩子一致）。

@@ -172,8 +172,8 @@
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_gateway.py",
-      "sha256": "fb4a8e13fb8ba5175160b8f15c081851927f8eac8c9873d922d3a44494ad5a80",
-      "size": 16944
+      "sha256": "1229e95502d339b15c643cec901c7f5c6709a3f7772686d56e97a5474f925ed9",
+      "size": 17515
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_hook.py",

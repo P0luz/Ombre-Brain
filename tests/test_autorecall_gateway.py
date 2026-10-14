@@ -243,3 +243,44 @@ def test_helpers():
     assert ob_gateway.inject([{"role": "user", "content": "u"}], "M")[0] == {"role": "system", "content": "M"}
     assert ob_gateway._sse_delta(b"data: [DONE]") is None
     assert ob_gateway._sse_delta(b": ping") == ""
+
+
+def test_stream_end_detection():
+    assert ob_gateway._sse_done(b"data: [DONE]")
+    assert ob_gateway._sse_done(b'data: {"choices":[{"delta":{},"finish_reason":"stop"}]}')
+    assert not ob_gateway._sse_done(b'data: {"choices":[{"delta":{"content":"a"},"finish_reason":null}]}')
+    assert not ob_gateway._sse_done(b'data: {"choices":[],"usage":{"total_tokens":3}}')
+    assert not ob_gateway._sse_done(b": ping")
+
+
+def test_truncated_stream_is_not_stored():
+    """上游没发 [DONE] 也没有 finish_reason 就断开：转发照常，但不当完整回复存。"""
+    ob = FakeOB()
+
+    class Cut(BaseHTTPRequestHandler):
+        protocol_version = "HTTP/1.1"
+
+        def log_message(self, *a):
+            pass
+
+        def do_POST(self):
+            self.rfile.read(int(self.headers["Content-Length"]))
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.send_header("Connection", "close")
+            self.end_headers()
+            self.wfile.write(b'data: {"choices":[{"delta":{"content":"\\u534a"}}]}\n\n')
+            self.close_connection = True
+
+    up, up_url = _serve(Cut)
+    gw = ob_gateway.Gateway(up_url + "/v1", ob_gateway.OB(ob.url, "tok", "s"))
+    server, url = _serve(ob_gateway.make_handler(gw))
+    try:
+        status, text = _post(url + "/v1/chat/completions", {"model": "m", "stream": True,
+                                                           "messages": [{"role": "user", "content": "嗨"}]})
+        assert status == 200 and "data:" in text
+        time.sleep(0.5)
+        assert "stop" not in ob.names()
+    finally:
+        for s in (ob.server, up, server):
+            s.shutdown()

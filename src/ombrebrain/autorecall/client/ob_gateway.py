@@ -210,6 +210,19 @@ def _sse_delta(line: bytes) -> str | None:
         return ""
 
 
+def _sse_done(line: bytes) -> bool:
+    """这一行是否说明回复正常结束：收到 [DONE]，或某个 choice 带了 finish_reason。"""
+    if not line.startswith(b"data:"):
+        return False
+    data = line[5:].strip()
+    if data == b"[DONE]":
+        return True
+    try:
+        return any(isinstance(c, dict) and c.get("finish_reason") for c in (json.loads(data).get("choices") or []))
+    except (ValueError, AttributeError, TypeError):
+        return False
+
+
 def make_handler(gw: Gateway):
     class Handler(BaseHTTPRequestHandler):
         protocol_version = "HTTP/1.1"
@@ -308,15 +321,15 @@ def make_handler(gw: Gateway):
                 for line in upstream:
                     self.wfile.write(b"%x\r\n%s\r\n" % (len(line), line))
                     self.wfile.flush()
-                    delta = _sse_delta(line.strip())
-                    if delta is None:
-                        finished = True
-                    elif delta:
+                    stripped = line.strip()
+                    delta = _sse_delta(stripped)
+                    if delta:
                         pieces.append(delta)
+                    finished = finished or _sse_done(stripped)
                 self.wfile.write(b"0\r\n\r\n")
-                finished = True
             except (BrokenPipeError, ConnectionResetError):
-                pass  # 客户端中途断开（点了停止）：已生成的部分不算完整回复，不存
+                finished = False  # 客户端中途断开（点了停止）：已生成的部分不算完整回复，不存
+            # 上游没给 [DONE] / finish_reason 就断了：同样不算完整回复。
             if finished:
                 gw.remember(turn, "".join(pieces))
 
