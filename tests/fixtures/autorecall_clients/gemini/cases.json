@@ -1,0 +1,97 @@
+{
+  "client": "gemini",
+  "sources": [
+    "google-gemini/gemini-cli @ 42c51822084a docs/hooks/reference.md：公共字段 session_id / transcript_path / cwd / hook_event_name / timestamp；SessionStart.source、BeforeAgent.prompt、AfterAgent.prompt / prompt_response / stop_hook_active（文档只有字段说明，没有完整示例）",
+    "packages/core/src/hooks/types.ts：BeforeAgent 输出 hookEventName 'BeforeAgent'"
+  ],
+  "cases": [
+    {
+      "name": "SessionStart",
+      "argv": [
+        "--client",
+        "gemini",
+        "session-start"
+      ],
+      "stdin": {
+        "session_id": "g-1",
+        "transcript_path": "/t.json",
+        "cwd": "/w",
+        "hook_event_name": "SessionStart",
+        "timestamp": "2026-10-14T00:00:00Z",
+        "source": "startup"
+      },
+      "expect_post": {
+        "path": "session-start",
+        "fields": {
+          "session_id": "g-1",
+          "source": "startup",
+          "client": "gemini"
+        }
+      },
+      "expect_stdout": {
+        "hookSpecificOutput": {
+          "hookEventName": "SessionStart",
+          "additionalContext": "[接续] 上次聊到猫"
+        }
+      }
+    },
+    {
+      "name": "BeforeAgent",
+      "argv": [
+        "--client",
+        "gemini",
+        "prompt"
+      ],
+      "stdin": {
+        "session_id": "g-1",
+        "transcript_path": "/t.json",
+        "cwd": "/w",
+        "hook_event_name": "BeforeAgent",
+        "timestamp": "2026-10-14T00:00:01Z",
+        "prompt": "你还记得我的猫吗"
+      },
+      "expect_post": {
+        "path": "prompt",
+        "fields": {
+          "prompt": "你还记得我的猫吗",
+          "client": "gemini"
+        }
+      },
+      "expect_stdout": {
+        "hookSpecificOutput": {
+          "hookEventName": "BeforeAgent",
+          "additionalContext": "[记忆] 猫叫阿树"
+        }
+      }
+    },
+    {
+      "name": "AfterAgent",
+      "argv": [
+        "--client",
+        "gemini",
+        "stop"
+      ],
+      "stdin": {
+        "session_id": "g-1",
+        "transcript_path": "/t.json",
+        "cwd": "/w",
+        "hook_event_name": "AfterAgent",
+        "timestamp": "2026-10-14T00:00:05Z",
+        "prompt": "你还记得我的猫吗",
+        "prompt_response": "记得，是橘猫阿树",
+        "stop_hook_active": false
+      },
+      "expect_post": {
+        "path": "stop",
+        "fields": {
+          "client": "gemini"
+        },
+        "message": {
+          "role": "assistant",
+          "text": "记得，是橘猫阿树"
+        }
+      },
+      "expect_stdout": null
+    }
+  ]
+}

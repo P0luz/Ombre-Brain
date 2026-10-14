@@ -1,0 +1,137 @@
+{
+  "client": "claude",
+  "sources": [
+    "Claude Code 官方钩子文档 https://code.claude.com/docs/en/hooks （2026-10-14 取）：SessionStart / UserPromptSubmit / Stop 的 stdin 示例原样照抄",
+    "真机：Claude Code 2.1.295 上四个钩子到达 OB（2026-10-14，见 CHANGELOG 4.0.0）"
+  ],
+  "cases": [
+    {
+      "name": "SessionStart 官方示例（resume）",
+      "argv": [
+        "session-start"
+      ],
+      "stdin": {
+        "session_id": "abc123",
+        "transcript_path": "/Users/.../.claude/projects/.../00893aaf-19fa-41d2-8238-13269b9b3ca0.jsonl",
+        "cwd": "/Users/...",
+        "hook_event_name": "SessionStart",
+        "source": "resume",
+        "model": "claude-opus-5",
+        "seconds_since_last_response": 5400,
+        "context_tokens": 182340,
+        "prompt_cache_likely_expired": true,
+        "estimated_cache_write_usd": 1.1396
+      },
+      "expect_post": {
+        "path": "session-start",
+        "fields": {
+          "session_id": "abc123",
+          "source": "resume",
+          "cwd": "/Users/...",
+          "client": "claude"
+        }
+      },
+      "expect_stdout": {
+        "hookSpecificOutput": {
+          "hookEventName": "SessionStart",
+          "additionalContext": "[接续] 上次聊到猫"
+        }
+      }
+    },
+    {
+      "name": "UserPromptSubmit 官方示例",
+      "argv": [
+        "prompt"
+      ],
+      "stdin": {
+        "session_id": "abc123",
+        "transcript_path": "/Users/.../.claude/projects/.../00893aaf-19fa-41d2-8238-13269b9b3ca0.jsonl",
+        "cwd": "/Users/...",
+        "permission_mode": "default",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "Write a function to calculate the factorial of a number"
+      },
+      "expect_post": {
+        "path": "prompt",
+        "fields": {
+          "session_id": "abc123",
+          "prompt": "Write a function to calculate the factorial of a number",
+          "cwd": "/Users/...",
+          "client": "claude"
+        }
+      },
+      "expect_stdout": null
+    },
+    {
+      "name": "UserPromptSubmit 官方示例改成带唤醒词（检查注入格式）",
+      "argv": [
+        "prompt"
+      ],
+      "stdin": {
+        "session_id": "abc123",
+        "transcript_path": "/x.jsonl",
+        "cwd": "/Users/...",
+        "permission_mode": "default",
+        "hook_event_name": "UserPromptSubmit",
+        "prompt": "你还记得我的猫吗",
+        "prompt_id": "p-1"
+      },
+      "expect_post": {
+        "path": "prompt",
+        "fields": {
+          "prompt_id": "p-1"
+        }
+      },
+      "expect_stdout": {
+        "hookSpecificOutput": {
+          "hookEventName": "UserPromptSubmit",
+          "additionalContext": "[记忆] 猫叫阿树"
+        }
+      }
+    },
+    {
+      "name": "Stop 官方示例",
+      "argv": [
+        "stop"
+      ],
+      "stdin": {
+        "session_id": "abc123",
+        "transcript_path": "~/.claude/projects/.../00893aaf-19fa-41d2-8238-13269b9b3ca0.jsonl",
+        "cwd": "/Users/...",
+        "permission_mode": "default",
+        "hook_event_name": "Stop",
+        "stop_hook_active": true,
+        "last_assistant_message": "I've completed the refactoring. Here's a summary...",
+        "background_tasks": [
+          {
+            "id": "task-001",
+            "type": "shell",
+            "status": "running",
+            "description": "tail logs",
+            "command": "tail -f /var/log/syslog"
+          }
+        ],
+        "session_crons": [
+          {
+            "id": "cron-001",
+            "schedule": "0 9 * * 1-5",
+            "recurring": true,
+            "prompt": "check the build"
+          }
+        ]
+      },
+      "expect_post": {
+        "path": "stop",
+        "fields": {
+          "session_id": "abc123",
+          "client": "claude"
+        },
+        "message": {
+          "role": "assistant",
+          "text": "I've completed the refactoring. Here's a summary..."
+        }
+      },
+      "expect_stdout": null
+    }
+  ]
+}

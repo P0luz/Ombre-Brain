@@ -64,6 +64,10 @@
       原文从 agy 的记录文件 `transcript.jsonl` 读（USER_INPUT / 最终 PLANNER_RESPONSE），格式参照两个能用的开源项目
       （lidge-ai/cli-jaw、heyxiaoc/not-fade-away）。PreInvocation 只在一轮的第一次调用时召回；Stop 只存正常结束的轮次。
       另有结构探针（只记字段名、类型和枚举值，不记内容），用户排查时贴进 issue。
+    - **支持矩阵 + 客户端契约测试**：`deploy/clients/README.md` 写清每家验证到哪一档（真机 / 官方 schema / 官方文档 / 开源实现）。
+      各家真实钩子输入样例存进 `tests/fixtures/autorecall_clients/`（Claude Code 官方文档示例原样、Codex 官方 JSON schema 原样等，
+      每份标明来源），`test_autorecall_client_contracts.py` 拿它们真跑 ob_hook，Codex 的输入输出还按官方 schema 校验；
+      改坏一处字段映射会立刻变红（已做反向检查）。
       **未实测**：开发者账号在本机和 129（均在美国）都过不了 agy 的资格检查。
 
 ### 性能 / Performance

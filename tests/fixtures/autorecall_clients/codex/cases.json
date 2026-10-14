@@ -1,0 +1,131 @@
+{
+  "client": "codex",
+  "sources": [
+    "openai/codex @ 95273b84fbff 的 codex-rs/hooks/schema/generated/*.schema.json（Apache-2.0，原样存在 schema/）",
+    "第二来源：thedotmack/claude-mem src/cli/adapters/codex.ts 读 last_assistant_message / turn_id"
+  ],
+  "cases": [
+    {
+      "name": "SessionStart（按 schema 必填字段）",
+      "argv": [
+        "--client",
+        "codex",
+        "session-start"
+      ],
+      "schema": "session-start.command.input",
+      "output_schema": "session-start.command.output",
+      "stdin": {
+        "session_id": "019a-codex",
+        "transcript_path": null,
+        "cwd": "/w",
+        "hook_event_name": "SessionStart",
+        "model": "gpt-5.5-codex",
+        "permission_mode": "default",
+        "source": "startup"
+      },
+      "expect_post": {
+        "path": "session-start",
+        "fields": {
+          "session_id": "019a-codex",
+          "source": "startup",
+          "cwd": "/w",
+          "client": "codex"
+        }
+      },
+      "expect_stdout": {
+        "hookSpecificOutput": {
+          "hookEventName": "SessionStart",
+          "additionalContext": "[接续] 上次聊到猫"
+        }
+      }
+    },
+    {
+      "name": "UserPromptSubmit（按 schema 必填字段）",
+      "argv": [
+        "--client",
+        "codex",
+        "prompt"
+      ],
+      "schema": "user-prompt-submit.command.input",
+      "output_schema": "user-prompt-submit.command.output",
+      "stdin": {
+        "session_id": "019a-codex",
+        "transcript_path": null,
+        "cwd": "/w",
+        "hook_event_name": "UserPromptSubmit",
+        "model": "gpt-5.5-codex",
+        "permission_mode": "default",
+        "prompt": "你还记得我的猫吗",
+        "turn_id": "turn-7"
+      },
+      "expect_post": {
+        "path": "prompt",
+        "fields": {
+          "prompt": "你还记得我的猫吗",
+          "prompt_id": "turn-7",
+          "client": "codex"
+        }
+      },
+      "expect_stdout": {
+        "hookSpecificOutput": {
+          "hookEventName": "UserPromptSubmit",
+          "additionalContext": "[记忆] 猫叫阿树"
+        }
+      }
+    },
+    {
+      "name": "Stop（按 schema 必填字段）",
+      "argv": [
+        "--client",
+        "codex",
+        "stop"
+      ],
+      "schema": "stop.command.input",
+      "stdin": {
+        "session_id": "019a-codex",
+        "transcript_path": null,
+        "cwd": "/w",
+        "hook_event_name": "Stop",
+        "model": "gpt-5.5-codex",
+        "permission_mode": "default",
+        "stop_hook_active": false,
+        "last_assistant_message": "记得，是橘猫阿树",
+        "turn_id": "turn-7"
+      },
+      "expect_post": {
+        "path": "stop",
+        "fields": {
+          "client": "codex"
+        },
+        "message": {
+          "role": "assistant",
+          "text": "记得，是橘猫阿树",
+          "key_prefix": "a:turn-7:"
+        }
+      },
+      "expect_stdout": null
+    },
+    {
+      "name": "Stop 的 last_assistant_message 为 null（schema 允许）",
+      "argv": [
+        "--client",
+        "codex",
+        "stop"
+      ],
+      "schema": "stop.command.input",
+      "stdin": {
+        "session_id": "019a-codex",
+        "transcript_path": null,
+        "cwd": "/w",
+        "hook_event_name": "Stop",
+        "model": "gpt-5.5-codex",
+        "permission_mode": "default",
+        "stop_hook_active": false,
+        "last_assistant_message": null,
+        "turn_id": "turn-8"
+      },
+      "expect_post": null,
+      "expect_stdout": null
+    }
+  ]
+}

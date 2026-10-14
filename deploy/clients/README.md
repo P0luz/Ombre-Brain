@@ -10,6 +10,24 @@
 - 用 Open WebUI → Filter（第 3 节），或者网关。
 - 自己写代码 → SDK（第 4 节）。
 
+## 支持矩阵：每家验证到什么程度
+
+「验证」分四档，从强到弱：**真机**（在这个客户端上实际跑通存取）> **官方 schema / 源码**（按它仓库里的定义逐字段核对）>
+**官方文档**（按文档示例或字段说明）> **开源实现**（照别的能用的项目）。每家的真实输入样例都存在
+`tests/fixtures/autorecall_clients/<客户端>/`，`tests/test_autorecall_client_contracts.py` 每次测试都拿它们把钩子真跑一遍；
+客户端改版后把新样例放进去，哪里对不上测试会直接红。
+
+- **Claude Code**：真机（2.1.295，四个钩子到达、存取正常）＋官方文档示例。
+- **记忆网关（OpenAI 兼容）**：真机（官方 openai Python SDK 流式 / 非流式 ＋ 真 OB）。具体聊天软件（Cherry Studio 等）没有逐个测。
+- **Open WebUI**：真机（v0.12.0，Docker，界面与 API 两条路径）。
+- **Codex CLI**：官方 schema（openai/codex @ 95273b84fbff，输入和输出都按 schema 校验）＋开源实现（claude-mem）。没有上真机。
+- **旧版 Gemini CLI**：官方文档字段说明（gemini-cli @ 42c51822084a）＋开源实现（claude-mem 早期版本）。没有上真机。
+- **Antigravity CLI（agy）**：官方内置文档（agy 1.3.5）＋两个开源实现（cli-jaw、not-fade-away）读记录文件的格式。
+  **没有上真机**——开发者账号过不了 agy 的资格检查。
+- **自制前端（SDK）**：单元测试；协议见 docs/AUTORECALL_PROTOCOL.md。
+
+你在某个客户端上用通了（或者没通），欢迎到 [GitHub issue](https://github.com/P0luz/Ombre-Brain/issues) 说一声，附上客户端版本，我们把它升到「真机」。
+
 ## 1. 命令行客户端：钩子
 
 | 客户端 | 一键安装 | 挂了哪些事件 |
