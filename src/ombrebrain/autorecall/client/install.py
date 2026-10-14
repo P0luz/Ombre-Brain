@@ -17,6 +17,8 @@
 4. 连一下 OB，告诉你 token 对不对、开关开没开。
 
 重复运行是安全的（同样的条目只保留一份）。卸载：加 --uninstall。
+自检：加 --check——按 settings.json 里登记的命令把四个钩子真跑一遍，再去 OB 确认每个都到了。
+Claude Code 升级后、或者觉得「好像没在存」时跑一下。
 token 不放进命令行参数也行：不给 --token 时会在终端里隐藏输入。
 """
 
@@ -29,6 +31,7 @@ import sys
 import tempfile
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 from pathlib import Path
 
@@ -49,8 +52,20 @@ def _say(message: str) -> None:
     print(message, flush=True)
 
 
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _open(request, timeout: float):
+    """本机地址绕过系统代理（macOS 上 urllib 会把 127.0.0.1 也交给代理）；远端照常。"""
+    target = request if isinstance(request, str) else request.full_url
+    host = urllib.parse.urlsplit(target).hostname or ""
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return _DIRECT.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
 def _fetch(url: str, timeout: float = 15) -> bytes:
-    with urllib.request.urlopen(url, timeout=timeout) as response:
+    with _open(url, timeout) as response:
         return response.read()
 
 
@@ -160,7 +175,7 @@ def check_connection(url: str, token: str) -> str:
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request, timeout=10) as response:
+        with _open(request, 10) as response:
             body = json.loads(response.read().decode() or "{}")
     except urllib.error.HTTPError as exc:
         if exc.code == 401:
@@ -173,6 +188,99 @@ def check_connection(url: str, token: str) -> str:
     return "ok"
 
 
+def run_check(settings_path: Path) -> int:
+    """按 settings.json 里登记的真实命令跑一遍四个钩子，再去 OB 确认都到了。"""
+    import datetime as _dt
+    import subprocess
+    import uuid
+
+    try:
+        settings = _load_settings(settings_path)
+    except RuntimeError as exc:
+        _say(f"✗ {exc}")
+        return 1
+    env = {**os.environ, **{k: str(v) for k, v in (settings.get("env") or {}).items() if k in _ENV_KEYS}}
+    url = env.get("OB_URL", "").rstrip("/")
+    token = env.get("OB_HOOK_TOKEN", "")
+    if not url or not token:
+        _say("✗ 找不到 OB_URL / OB_HOOK_TOKEN（settings.json 的 env 里没有，当前 shell 里也没有）")
+        return 1
+    status = check_connection(url, token)
+    if status != "ok":
+        _say(f"✗ {status}")
+        return 1
+    commands = {}
+    for event, (mode, _extra) in _EVENTS.items():
+        for group in (settings.get("hooks") or {}).get(event) or []:
+            for hook in (group or {}).get("hooks") or []:
+                if _MARKER in str((hook or {}).get("command", "")):
+                    commands[mode] = hook["command"]
+    session = f"ob-check-{uuid.uuid4().hex[:12]}"
+    started = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=2)
+    payloads = {
+        "session-start": {"source": "startup"},
+        "prompt": {"prompt": "自检", "prompt_id": session},
+        "stop": {"prompt_id": session, "last_assistant_message": "自检"},
+        "session-end": {"transcript_path": ""},
+    }
+    for mode, extra in payloads.items():
+        command = commands.get(mode)
+        if not command:
+            continue
+        data = json.dumps({"session_id": session, "cwd": os.getcwd(), **extra})
+        try:
+            subprocess.run(command, shell=True, input=data, text=True, env=env, timeout=60,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except subprocess.TimeoutExpired:
+            pass
+    # session-end 没有可补存的原文时钩子不会发请求，这里替它补一个直连探针，只验证链路。
+    if "session-end" in commands:
+        request = urllib.request.Request(
+            f"{url}/autorecall/session-end",
+            data=json.dumps({"session_id": session, "messages": []}).encode(),
+            headers={"Content-Type": "application/json", "X-Ombre-Hook-Token": token}, method="POST")
+        try:
+            _open(request, 10).read()
+        except Exception:
+            pass
+    seen: dict = {}
+    for _ in range(20):  # stop 是交给后台发的，等它一会儿
+        time.sleep(0.5)
+        request = urllib.request.Request(f"{url}/autorecall/status", data=b"{}",
+                                         headers={"Content-Type": "application/json", "X-Ombre-Hook-Token": token},
+                                         method="POST")
+        try:
+            seen = json.loads(_open(request, 10).read().decode() or "{}").get("seen") or {}
+        except Exception:
+            seen = {}
+        fresh = {m for m, at in seen.items()
+                 if _dt.datetime.fromisoformat(str(at).replace("Z", "+00:00")) >= started}
+        if all(m in fresh for m in commands):
+            break
+    names = {"session-start": "开窗 SessionStart", "prompt": "提问 UserPromptSubmit",
+             "stop": "存回复 Stop", "session-end": "关窗 SessionEnd"}
+    ok = True
+    for mode, label in names.items():
+        if mode not in commands:
+            ok = False
+            _say(f"✗ {label}：settings.json 里没挂这个钩子——重新运行安装即可")
+        elif mode in fresh:
+            _say(f"✓ {label}：已到达 OB")
+        else:
+            ok = False
+            _say(f"✗ {label}：命令跑了，但 OB 没收到")
+    if not ok:
+        log = Path(env.get("OB_RELAY_STATE") or Path.home() / ".claude" / "hooks" / ".x").parent / "ob_hook.log"
+        if log.exists():
+            _say("· ob_hook.log 最后几行：")
+            for line in log.read_text(encoding="utf-8").splitlines()[-5:]:
+                _say(f"    {line}")
+        _say("· 另外确认：装完后重开了 Claude Code 窗口；项目里的 .claude/settings.json 没有 disableAllHooks。")
+        return 1
+    _say("✓ 四个钩子都通。注意：这只证明命令能跑通；Claude Code 是否真的加载了这些钩子，以重开窗口后面板上的「最后到达」为准。")
+    return 0
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(description="给 Claude Code 装上 Ombre Brain 自动召回钩子")
     parser.add_argument("--url", help="Ombre Brain 地址，例如 http://127.0.0.1:18001")
@@ -181,9 +289,12 @@ def main(argv=None) -> int:
     parser.add_argument("--hooks-dir", default=str(Path.home() / ".claude" / "hooks"))
     parser.add_argument("--no-env", action="store_true", help="不把地址和 token 写进 settings.json")
     parser.add_argument("--uninstall", action="store_true", help="卸载")
+    parser.add_argument("--check", action="store_true", help="自检：把四个钩子真跑一遍，确认 OB 都收到了")
     args = parser.parse_args(argv)
 
     settings_path = Path(args.settings).expanduser()
+    if args.check:
+        return run_check(settings_path)
     hook_path = Path(args.hooks_dir).expanduser() / _MARKER
 
     try:
@@ -196,7 +307,8 @@ def main(argv=None) -> int:
         if settings_path.exists():
             shutil.copy2(settings_path, settings_path.with_name(f"settings.json.bak-{int(time.time())}"))
             _write_atomic(settings_path, unmerge_settings(settings))
-        for leftover in (hook_path, hook_path.with_name("ob_relay.py"), hook_path.with_name(".ob_relay.json")):
+        for leftover in (hook_path, hook_path.with_name("ob_relay.py"), hook_path.with_name(".ob_relay.json"),
+                         hook_path.with_name("install.py"), hook_path.with_name(".ob_hook_errors.json")):
             if leftover.exists():
                 leftover.unlink()
         _say("✓ 已卸载：settings.json 里的 Ombre Brain 钩子和 env 已去掉（原文件已备份），ob_hook.py 已删除。")
@@ -222,6 +334,8 @@ def main(argv=None) -> int:
         sources = {
             hook_path: _client_source(url, _MARKER, b"def main()"),
             hook_path.with_name("ob_relay.py"): _client_source(url, "ob_relay.py", b"def serve("),
+            # 自己也留一份，以后 `python3 ~/.claude/hooks/install.py --check` 就能离线自检。
+            hook_path.with_name("install.py"): _client_source(url, "install.py", b"def run_check("),
         }
     except (urllib.error.URLError, OSError, RuntimeError) as exc:
         _say(f"✗ 拿不到钩子脚本：{exc}")
@@ -239,7 +353,7 @@ def main(argv=None) -> int:
         shutil.copy2(settings_path, backup)
         _say(f"· 原 settings.json 已备份到 {backup}")
     _write_atomic(settings_path, merge_settings(settings, hook_path, url, token, not args.no_env))
-    _say(f"✓ 钩子脚本：{hook_path}")
+    _say(f"✓ 钩子脚本：{hook_path}（自检：python3 {hook_path.with_name('install.py')} --check）")
     _say(f"✓ 已合并进 {settings_path}（SessionStart / UserPromptSubmit / Stop / SessionEnd）")
     if args.no_env:
         _say(f"· 记得在启动 Claude Code 的 shell 里设置：export OB_URL={url} OB_HOOK_TOKEN=…")

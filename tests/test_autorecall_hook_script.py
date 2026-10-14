@@ -4,6 +4,7 @@ import json
 import os
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -12,6 +13,8 @@ from pathlib import Path
 import pytest
 
 SCRIPT = Path(__file__).resolve().parents[1] / "src" / "ombrebrain" / "autorecall" / "client" / "ob_hook.py"
+# 日志 / 待补报 / 中继状态一律写进临时目录，绝不碰真实的 ~/.claude/hooks。
+_STATE_DIR = Path(tempfile.mkdtemp(prefix="ob-hook-test-"))
 
 
 class _Recorder(BaseHTTPRequestHandler):
@@ -52,7 +55,8 @@ def _wait_calls(n=1, timeout=10):
 
 
 def _run(mode, payload, url, token="tok", extra_env=None):
-    env = {"OB_URL": url, "PATH": "/usr/bin:/bin", "OB_RELAY": "0", **(extra_env or {})}
+    env = {"OB_URL": url, "PATH": "/usr/bin:/bin", "OB_RELAY": "0",
+           "OB_RELAY_STATE": str(_STATE_DIR / "relay.json"), **(extra_env or {})}
     if token:
         env["OB_HOOK_TOKEN"] = token
     proc = subprocess.run(
@@ -139,7 +143,8 @@ def test_unreachable_server_is_silent():
 
 def test_garbage_stdin_is_silent(server):
     proc = subprocess.run([sys.executable, str(SCRIPT), "prompt"], input="{not json", capture_output=True,
-                          text=True, env={"OB_HOOK_TOKEN": "t", "OB_URL": server, "OB_RELAY": "0"}, timeout=30)
+                          text=True, env={"OB_HOOK_TOKEN": "t", "OB_URL": server, "OB_RELAY": "0",
+                                          "OB_RELAY_STATE": str(_STATE_DIR / "relay.json")}, timeout=30)
     assert proc.returncode == 0 and proc.stdout == ""
 
 
@@ -199,3 +204,68 @@ def test_relay_spawns_then_serves_both_modes(server, tmp_path):
             os.kill(relay["pid"], 15)
         except OSError:
             pass
+
+
+# ---------------- 报错不再悄悄：本地日志 + 下次补报 ----------------
+
+def test_errors_are_logged_then_reported_and_cleared(server, tmp_path):
+    env = {"OB_RELAY_STATE": str(tmp_path / "relay.json")}
+    code, _ = _run("prompt", {"session_id": "s", "prompt": "还记得吗"}, "http://127.0.0.1:9", extra_env=env)
+    assert code == 0
+    log = (tmp_path / "ob_hook.log").read_text(encoding="utf-8")
+    assert "[prompt]" in log and "连不上 OB" in log
+    assert json.loads((tmp_path / ".ob_hook_errors.json").read_text(encoding="utf-8"))
+    # 下一次连上：带着之前的错误一起报，报完清空
+    _run("prompt", {"session_id": "s", "prompt": "你好"}, server, extra_env=env)
+    [call] = _wait_calls()
+    assert call[2]["client_errors"][0]["where"] == "prompt"
+    assert not (tmp_path / ".ob_hook_errors.json").exists()
+
+
+def test_401_is_reported_as_token_problem(tmp_path):
+    class Deny(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.send_response(401)
+            self.end_headers()
+
+        def log_message(self, *a):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), Deny)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    try:
+        _run("prompt", {"session_id": "s", "prompt": "x"}, f"http://127.0.0.1:{httpd.server_address[1]}",
+             extra_env={"OB_RELAY_STATE": str(tmp_path / "relay.json")})
+        assert "token" in (tmp_path / "ob_hook.log").read_text(encoding="utf-8")
+    finally:
+        httpd.shutdown()
+
+
+def test_relay_upstream_error_does_not_spawn_second_relay(tmp_path):
+    """中继活着、只是连不上 OB（502）：直连一次即可，不能再拉一个中继（会留下孤儿进程）。"""
+    class Relay502(BaseHTTPRequestHandler):
+        def do_POST(self):
+            self.rfile.read(int(self.headers.get("content-length", 0)))
+            self.send_response(502)
+            self.send_header("content-length", "2")
+            self.end_headers()
+            self.wfile.write(b"{}")
+
+        def log_message(self, *a):
+            pass
+
+    httpd = HTTPServer(("127.0.0.1", 0), Relay502)
+    threading.Thread(target=httpd.serve_forever, daemon=True).start()
+    import hashlib
+    url, token = "http://127.0.0.1:9", "tok"
+    state = tmp_path / "relay.json"
+    state.write_text(json.dumps({"port": httpd.server_address[1], "secret": "s", "pid": 1,
+                                 "fp": hashlib.sha256(f"{url}\x1f{token}".encode()).hexdigest()[:16]}))
+    try:
+        code, _ = _run("prompt", {"session_id": "s", "prompt": "x"}, url,
+                       extra_env={"OB_RELAY": "1", "OB_RELAY_STATE": str(state)})
+        assert code == 0
+        assert not (tmp_path / "relay.spawn").exists()
+        assert json.loads(state.read_text())["port"] == httpd.server_address[1]
+    finally:
+        httpd.shutdown()

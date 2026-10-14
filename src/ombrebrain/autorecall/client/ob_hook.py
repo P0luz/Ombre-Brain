@@ -16,6 +16,9 @@
     OB_RELAY       设为 0 时不用本地中继，每次直连
     OB_HOOK_DEBUG  设为 1 时把错误打到 stderr
 
+出错不打扰对话，但不再「悄悄」：错误写进 ~/.claude/hooks/ob_hook.log（超过 200KB 轮转一份），
+同时暂存，下一次能连上 OB 时顺带报上去，Dashboard「自动召回」卡片会标红显示。
+
 提速：优先走同目录 ob_relay.py 拉起的本地中继（常驻、与 OB 保持长连接）。
 要等结果的（开窗、发问）经中继转发；不用等的（存回复、关窗补存）交给中继就返回。
 中继不在时：这次直连（不用等的就丢给一个脱离的子进程去发），同时把中继拉起来给下一次用。
@@ -44,9 +47,68 @@ _NO_WAIT = frozenset({"stop", "session-end"})
 _HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 
 
+_LOG_LIMIT = 200 * 1024
+_PENDING_LIMIT = 20
+
+
 def _debug(message: str) -> None:
     if os.environ.get("OB_HOOK_DEBUG") == "1":
         print(f"[ob_hook] {message}", file=sys.stderr)
+
+
+def _state_dir() -> Path:
+    custom = os.environ.get("OB_RELAY_STATE")
+    return Path(custom).parent if custom else Path.home() / ".claude" / "hooks"
+
+
+def report_error(where: str, message: str) -> None:
+    """记本地日志 + 暂存待补报。任何一步失败都忽略：报错本身不能再出错。"""
+    _debug(f"{where}: {message}")
+    now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+    try:
+        directory = _state_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        log = directory / "ob_hook.log"
+        if log.exists() and log.stat().st_size > _LOG_LIMIT:
+            os.replace(log, directory / "ob_hook.log.1")
+        with open(log, "a", encoding="utf-8") as handle:
+            handle.write(f"{now} [{where}] {message}\n")
+        pending_path = directory / ".ob_hook_errors.json"
+        try:
+            pending = json.loads(pending_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pending = []
+        pending = (pending + [{"at": now, "where": where, "message": message[:300]}])[-_PENDING_LIMIT:]
+        pending_path.write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
+    except Exception:
+        pass
+
+
+def _pending_errors() -> list:
+    try:
+        data = json.loads((_state_dir() / ".ob_hook_errors.json").read_text(encoding="utf-8"))
+        return data if isinstance(data, list) else []
+    except (OSError, ValueError):
+        return []
+
+
+def _clear_pending() -> None:
+    try:
+        (_state_dir() / ".ob_hook_errors.json").unlink()
+    except OSError:
+        pass
+
+
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _open(request, timeout: float):
+    """本机地址（OB 在本机 / 本地中继）绕过系统代理——macOS 上 urllib 会读系统代理，
+    实测连发往 127.0.0.1 的请求都被代理接走（返回 503）。远端地址照常走系统代理。"""
+    host = urllib.request.urlparse(request.full_url).hostname or ""
+    if host in ("127.0.0.1", "localhost", "::1"):
+        return _DIRECT.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
 
 
 def _post(path: str, payload: dict, timeout: float) -> dict:
@@ -60,7 +122,7 @@ def _post(path: str, payload: dict, timeout: float) -> dict:
         },
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _open(request, timeout) as response:
         return json.loads(response.read().decode("utf-8") or "{}")
 
 
@@ -115,7 +177,7 @@ def _via_relay(state: dict, path: str, payload: dict, wait: bool, timeout: float
         headers={"Content-Type": "application/json", "X-Relay-Secret": str(state.get("secret") or "")},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=timeout) as response:
+    with _open(request, timeout) as response:
         if response.status == 202:
             return {}
         return json.loads(response.read().decode("utf-8") or "{}")
@@ -124,15 +186,20 @@ def _via_relay(state: dict, path: str, payload: dict, wait: bool, timeout: float
 def _send(path: str, payload: dict, timeout: float) -> dict:
     wait = path not in _NO_WAIT
     state = _relay_state()
+    relay_alive = False
     if state:
         try:
             return _via_relay(state, path, payload, wait, timeout if wait else 2)
         except urllib.error.HTTPError as exc:
             if exc.code not in (403, 404, 502, 503):
                 raise
+            # 502/503 是中继连不上 OB 或队列满——中继本身是好的，这次直连就行，不要再拉一个；
+            # 403/404 说明状态文件指向的不是这一个中继了，才需要重拉。
+            relay_alive = exc.code in (502, 503)
         except (urllib.error.URLError, OSError):
             pass  # 中继不在了：往下直连，并重新拉起
-    _spawn_relay()
+    if not relay_alive:
+        _spawn_relay()
     if not wait:
         _detach([str(Path(__file__).resolve()), "--deliver", path],
                 json.dumps(payload, ensure_ascii=False).encode("utf-8"))
@@ -146,7 +213,7 @@ def _deliver(path: str) -> int:
         payload = json.loads(sys.stdin.read() or "{}")
         _post(path, payload, _TIMEOUTS.get(path, 20))
     except Exception as exc:
-        _debug(f"deliver {path} failed: {exc}")
+        report_error(path, f"后台发送失败：{type(exc).__name__}: {exc}")
     return 0
 
 
@@ -224,11 +291,19 @@ def main() -> int:
             return 0
         payload = {"session_id": session_id, "messages": messages, "cwd": cwd}
 
+    pending = _pending_errors() if mode not in _NO_WAIT else []
+    if pending:
+        payload["client_errors"] = pending
     try:
         result = _send(mode, payload, _TIMEOUTS[mode])
-    except (urllib.error.URLError, OSError, ValueError) as exc:
-        _debug(f"{mode} failed: {exc}")
+    except urllib.error.HTTPError as exc:
+        report_error(mode, f"OB 返回 {exc.code}" + ("（token 不对？）" if exc.code == 401 else ""))
         return 0
+    except (urllib.error.URLError, OSError, ValueError) as exc:
+        report_error(mode, f"连不上 OB：{type(exc).__name__}: {exc}")
+        return 0
+    if pending:
+        _clear_pending()
 
     context = result.get("context") if isinstance(result, dict) else ""
     if context and mode in _EVENT_NAMES:
@@ -242,5 +317,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as exc:  # 兜底：钩子绝不能让对话报错
-        _debug(f"unexpected: {exc!r}")
+        report_error("hook", f"意外错误：{exc!r}")
         sys.exit(0)

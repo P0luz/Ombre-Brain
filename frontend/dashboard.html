@@ -2676,6 +2676,7 @@
       <div class="config-row"><label>向量检索</label><input type="checkbox" id="cfg-ar-vector" style="width:auto;flex:none;accent-color:var(--accent);cursor:pointer;" /></div>
       <div style="margin-top:10px;"><button class="btn-primary" onclick="saveAutorecallSettings()" title="保存 / Save" style="padding:0 14px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="check"></i> 保存 Save</button></div>
       <div id="autorecall-setting-msg" role="status" aria-live="polite" style="min-height:16px;margin-top:8px;font-size:12px;color:var(--text-dim);"></div>
+      <div id="autorecall-health" style="margin-top:10px;font-size:12px;line-height:1.7;"></div>
     </div>
 
     <!-- ① 我 -->
@@ -4703,6 +4704,7 @@ async function loadAutorecallSetting() {
     var data = await readJsonSafe(response);
     if (!response.ok) throw new Error(data.error || '加载失败');
     renderAutorecallSetting(data, '', false);
+    renderAutorecallHealth(data);
   } catch (error) {
     renderAutorecallSetting(null, '加载失败', true);
   }
@@ -4725,12 +4727,50 @@ async function postAutorecallSetting(payload) {
     var data = await readJsonSafe(response);
     if (!response.ok) throw new Error(data.error || '保存失败');
     renderAutorecallSetting(data, '', false);
+    renderAutorecallHealth(data);
   } catch (error) {
     await loadAutorecallSetting();
     renderAutorecallSetting(null, error && error.message ? error.message : '保存失败', true);
   } finally {
     _autorecallBusy = false;
   }
+}
+
+function autorecallAgo(iso) {
+  if (!iso) return '从没到过';
+  var sec = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
+  if (sec < 90) return '刚刚';
+  if (sec < 5400) return Math.round(sec / 60) + ' 分钟前';
+  if (sec < 172800) return Math.round(sec / 3600) + ' 小时前';
+  return Math.round(sec / 86400) + ' 天前';
+}
+
+function renderAutorecallHealth(data) {
+  var box = document.getElementById('autorecall-health');
+  if (!box) return;
+  var h = (data && data.health) || {};
+  if (!data || !data.enabled) { box.innerHTML = ''; return; }
+  var seen = h.seen || {};
+  var rows = [['session-start', '开窗'], ['prompt', '提问'], ['stop', '存回复'], ['session-end', '关窗']].map(function (e) {
+    var missing = !seen[e[0]];
+    return '<span style="margin-right:14px;color:' + (missing ? 'var(--negative)' : 'var(--text-dim)') + ';">'
+      + esc(e[1]) + '：' + esc(autorecallAgo(seen[e[0]])) + '</span>';
+  }).join('');
+  var html = '<div style="color:var(--text-dim);">钩子最后到达　' + rows + '</div>';
+  (h.warnings || []).forEach(function (w) {
+    html += '<div role="alert" style="margin-top:6px;padding:6px 10px;border-radius:8px;color:var(--negative);'
+      + 'border:1px solid var(--negative);">⚠ ' + esc(w) + '</div>';
+  });
+  if ((h.errors || []).length) {
+    html += '<details style="margin-top:6px;"><summary style="cursor:pointer;color:var(--text-dim);">最近的钩子报错（'
+      + h.errors.length + '）</summary>' + h.errors.map(function (e) {
+        return '<div style="color:var(--text-dim);">' + esc(String(e.at || '').replace('T', ' ').slice(0, 16))
+          + '　[' + esc(e.where || '') + '] ' + esc(e.message || '') + '</div>';
+      }).join('') + '</details>';
+  }
+  html += '<div style="margin-top:4px;color:var(--text-light);font-size:11px;">觉得没在存？在装 Claude Code 的电脑上运行 '
+    + '<code>python3 ~/.claude/hooks/install.py --check</code>（或重新跑一键安装命令加 <code>--check</code>）。</div>';
+  box.innerHTML = html;
 }
 
 function autorecallInstallCommand() {

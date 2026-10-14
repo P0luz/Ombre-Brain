@@ -17,10 +17,12 @@ class _OB(BaseHTTPRequestHandler):
     reply = (200, {})
     hook_source = (CLIENT / "ob_hook.py").read_bytes()
     relay_source = (CLIENT / "ob_relay.py").read_bytes()
+    install_source = (CLIENT / "install.py").read_bytes()
 
     def do_GET(self):
         files = {"/autorecall/client/ob_hook.py": type(self).hook_source,
-                 "/autorecall/client/ob_relay.py": type(self).relay_source}
+                 "/autorecall/client/ob_relay.py": type(self).relay_source,
+                 "/autorecall/client/install.py": type(self).install_source}
         if self.path in files:
             self.send_response(200)
             self.end_headers()

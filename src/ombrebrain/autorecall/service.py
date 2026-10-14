@@ -35,7 +35,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
@@ -50,6 +50,16 @@ _SURFACE_POLICY = SurfacePolicyVM.default()
 _HIDDEN_TYPES = frozenset({"feel", "plan", "letter", "archived", "permanent", "self", "i"})
 _I_CANDIDATE_TAG = "__i_candidate__"
 _NAMES_TTL_SECONDS = 60.0
+_STOP_LAG = timedelta(minutes=30)
+_ERROR_FRESH = timedelta(hours=24)
+
+
+def _parse_utc(raw: str) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except ValueError:
+        return datetime.min.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
 _RRF_K = 60
 _POOL = 20
 _EXCERPT_CHARS = 800
@@ -268,6 +278,51 @@ class AutoRecallService:
         body = " ".join(str(bucket.get("content") or "").split())
         head = f"- 记忆「{name}」{('（' + created + '）') if created else ''}[bucket_id={bucket.get('id')}]："
         return head + _clip(body, max(40, min(_EXCERPT_CHARS, limit - len(head))))
+
+    # ---------------- 体检 ----------------
+
+    def hook_health(self, now: datetime | None = None) -> dict[str, Any]:
+        """四个钩子各自最后一次到达的时间，以及据此推出的告警。
+
+        钩子出错时为了不卡对话会静默退出，失效是悄悄的——这里把「悄悄」变成面板上看得见的红字。
+        """
+        try:
+            seen = self.store.seen()
+            errors = self.store.recent_errors()
+        except Exception as exc:
+            return {"seen": {}, "warnings": [f"读不到钩子状态：{type(exc).__name__}"], "errors": []}
+        now = now or datetime.now(timezone.utc)
+
+        def age(event: str) -> timedelta | None:
+            raw = seen.get(event)
+            if not raw:
+                return None
+            try:
+                return now - datetime.fromisoformat(raw)
+            except ValueError:
+                return None
+
+        warnings: list[str] = []
+        if self.settings["enabled"]:
+            ages = {e: age(e) for e in ("session-start", "prompt", "stop", "session-end")}
+            if all(v is None for v in ages.values()):
+                warnings.append("还没收到任何钩子：装好钩子后要重开 Claude Code 窗口；仍然没有就运行 install.py --check。")
+            else:
+                prompt_age, stop_age = ages["prompt"], ages["stop"]
+                # 最近一次提问已过去一阵、其后却没有任何「存回复」：那一轮若早已结束，就是 Stop 没触发。
+                if prompt_age is not None and prompt_age > _STOP_LAG and (stop_age is None or stop_age > prompt_age):
+                    minutes = int(prompt_age.total_seconds() // 60)
+                    warnings.append(
+                        f"最近一次提问在 {minutes} 分钟前，之后没收到「存回复」（Stop）：如果那一轮早就结束了，"
+                        "说明 Stop 钩子没触发，回复没存上。"
+                    )
+                if prompt_age is not None and ages["session-start"] is None:
+                    warnings.append("提问在到，但「开窗」（SessionStart）从没到过：接续和 dream 不会注入。")
+                if stop_age is not None and prompt_age is None:
+                    warnings.append("「存回复」在到，但「提问」（UserPromptSubmit）从没到过：原话没存、唤醒召回不会触发。")
+            if errors and now - _parse_utc(errors[-1]["at"]) < _ERROR_FRESH:
+                warnings.append(f"最近 24 小时有钩子报错，最新一条：{errors[-1]['message']}")
+        return {"seen": seen, "warnings": warnings, "errors": list(reversed(errors[-5:]))}
 
     # ---------------- 钩子 ----------------
 

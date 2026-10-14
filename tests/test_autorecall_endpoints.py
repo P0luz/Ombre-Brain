@@ -75,7 +75,7 @@ def _json(response):
 @pytest.mark.asyncio
 async def test_routes_registered(monkeypatch, tmp_path):
     routes, _ = _routes(monkeypatch, tmp_path)
-    assert set(routes) == {"session-start", "prompt", "stop", "session-end"}
+    assert set(routes) == {"session-start", "prompt", "stop", "session-end", "status"}
 
 
 @pytest.mark.asyncio

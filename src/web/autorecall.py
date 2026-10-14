@@ -11,6 +11,10 @@ web/autorecall.py — Claude Code 自动召回的四个钩子端点
 - POST /autorecall/prompt         {session_id, prompt, prompt_id} → {"context": str}  存用户原文 + hold 提醒 + 唤醒召回
 - POST /autorecall/stop           {session_id, messages:[...]}   → {"added", "links"} 存这一轮助手回复
 - POST /autorecall/session-end    {session_id, messages:[...]}   → {"added", "links"} 关窗时整段补存
+- POST /autorecall/status                                        → {"enabled", "seen"}  给 install.py --check 用
+
+体检：每个请求先记「这个钩子到过」；请求可以顺带 client_errors（钩子之前没报上来的错误）。
+session_id 以 ob-check- 开头的是自检请求：只记到达，不存任何东西。
 
 messages 每项 {"key": 消息 uuid, "role": "user"|"assistant", "text": str}。
 
@@ -184,7 +188,35 @@ def _settings_payload() -> dict:
     token_set = bool(str(_hook_setting("token", "") or "").strip()) or bool(
         os.environ.get("OMBRE_HOOK_TOKEN", "").strip()
     )
-    return {**settings, "store": counts, "hook_token_configured": token_set}
+    try:
+        health = service.hook_health() if service is not None else {"seen": {}, "warnings": [], "errors": []}
+    except Exception:
+        health = {"seen": {}, "warnings": ["读不到钩子状态"], "errors": []}
+    return {**settings, "store": counts, "hook_token_configured": token_set, "health": health}
+
+
+_CHECK_PREFIX = "ob-check-"
+
+
+async def _note_arrival(service, name: str, body: dict) -> None:
+    try:
+        await asyncio.to_thread(service.store.mark_seen, name)
+        raw = body.get("client_errors")
+        if isinstance(raw, list) and raw:
+            errors = [
+                {"at": e.get("at"), "where": f"client:{str(e.get('where') or '')[:20]}", "message": e.get("message")}
+                for e in raw[:20] if isinstance(e, dict)
+            ]
+            await asyncio.to_thread(service.store.add_errors, errors)
+    except Exception as exc:
+        logger.warning("autorecall arrival note failed: %s", type(exc).__name__)
+
+
+async def _note_server_error(service, name: str, message: str) -> None:
+    try:
+        await asyncio.to_thread(service.store.add_errors, [{"where": f"server:{name}", "message": message}])
+    except Exception:
+        pass
 
 
 def register(mcp) -> None:
@@ -250,18 +282,36 @@ def register(mcp) -> None:
             body = await _body(request)
         except (ValueError, UnicodeDecodeError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=_NO_STORE)
+        # 体检：先记「这个钩子到过」，再收客户端补报的错误。都不能影响这一轮。
+        await _note_arrival(service, name, body)
+        if body["session_id"].startswith(_CHECK_PREFIX):
+            return JSONResponse({"check": "ok", "event": name}, headers=_NO_STORE)
         try:
             result = await asyncio.wait_for(handler(service, body), timeout=_TIMEOUTS[name])
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=_NO_STORE)
         except asyncio.TimeoutError:
             logger.warning("autorecall %s exceeded %ss", name, _TIMEOUTS[name])
+            await _note_server_error(service, name, f"处理超时（>{_TIMEOUTS[name]:.0f}s）")
             return JSONResponse({"error": "timeout"}, status_code=504, headers={**_NO_STORE, "Retry-After": "10"})
         except Exception as exc:
             # 钩子失败只记日志、返回空：不能让记忆出错卡住用户的对话。
             logger.warning("autorecall %s failed: %s", name, type(exc).__name__)
+            await _note_server_error(service, name, f"服务端处理失败：{type(exc).__name__}")
             return JSONResponse({"error": "failed"}, status_code=500, headers=_NO_STORE)
         return JSONResponse(result, headers=_NO_STORE)
+
+    @mcp.custom_route("/autorecall/status", methods=["POST"])
+    async def hook_status(request):
+        """给 install.py --check 用：开关状态 + 各钩子最后到达时间。hook token 鉴权。"""
+        rejected = _reject(request)
+        if rejected is not None:
+            return rejected
+        service = getattr(sh, "autorecall_service", None)
+        if service is None:
+            return JSONResponse({"enabled": False, "seen": {}}, headers=_NO_STORE)
+        health = await asyncio.to_thread(service.hook_health)
+        return JSONResponse({"enabled": service.settings["enabled"], "seen": health["seen"]}, headers=_NO_STORE)
 
     def _cwd(body) -> str:
         return str(body.get("cwd") or "")[:1000]

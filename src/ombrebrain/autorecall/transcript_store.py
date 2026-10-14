@@ -285,6 +285,66 @@ class TranscriptStore:
             finally:
                 connection.close()
 
+    # ---------------- 钩子体检：最后到达时间、最近报错 ----------------
+
+    def mark_seen(self, event: str) -> None:
+        """记下某个钩子事件最后一次到达的时间（UTC）。面板据此判断哪一环断了。"""
+        with self._lock:
+            connection = self._connect(create=True)
+            try:
+                connection.execute(
+                    "INSERT INTO module_state VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (f"seen:{event}", _now()),
+                )
+            finally:
+                connection.close()
+
+    def seen(self) -> dict[str, str]:
+        rows = self._read("SELECT key, value FROM module_state WHERE key LIKE 'seen:%'")
+        return {row["key"][5:]: row["value"] for row in rows}
+
+    def add_errors(self, errors: list[dict], keep: int = 20) -> None:
+        """追加钩子报错（客户端补报的、服务端自己的），只留最近 ``keep`` 条。"""
+        if not errors:
+            return
+        import json as _json
+
+        with self._lock:
+            connection = self._connect(create=True)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute("SELECT value FROM module_state WHERE key = 'errors'").fetchone()
+                try:
+                    current = _json.loads(row["value"]) if row else []
+                except ValueError:
+                    current = []
+                for item in errors:
+                    current.append({
+                        "at": _utc(item.get("at"), _now()),
+                        "where": str(item.get("where") or "")[:40],
+                        "message": str(item.get("message") or "")[:300],
+                    })
+                current = sorted(current, key=lambda e: e["at"])[-keep:]
+                connection.execute(
+                    "INSERT INTO module_state VALUES ('errors', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    (_json.dumps(current, ensure_ascii=False),),
+                )
+                connection.execute("COMMIT")
+            except sqlite3.Error as exc:
+                connection.execute("ROLLBACK")
+                raise TranscriptStoreError("error log write failed") from exc
+            finally:
+                connection.close()
+
+    def recent_errors(self) -> list[dict]:
+        import json as _json
+
+        rows = self._read("SELECT value FROM module_state WHERE key = 'errors'")
+        try:
+            return _json.loads(rows[0]["value"]) if rows else []
+        except ValueError:
+            return []
+
     def link(self, links: list[tuple[str, str, float]]) -> int:
         """写连线 (turn_id, bucket_id, score)；同一对再连一次只更新分数。"""
         if not links:

@@ -39,6 +39,24 @@ def fingerprint(url: str, token: str) -> str:
     return hashlib.sha256(f"{url}\x1f{token}".encode()).hexdigest()[:16]
 
 
+def _proxy_for(scheme: str, host: str):
+    """系统 / 环境代理（含 macOS 网络设置）；被 no_proxy 排除的主机返回 None。"""
+    import urllib.request
+
+    try:
+        if urllib.request.proxy_bypass(host):
+            return None
+        url = urllib.request.getproxies().get(scheme) or urllib.request.getproxies().get("https")
+    except Exception:
+        return None
+    if not url:
+        return None
+    parsed = urllib.parse.urlsplit(url if "://" in url else f"http://{url}")
+    if not parsed.hostname:
+        return None
+    return parsed.hostname, parsed.port or 8080
+
+
 class Upstream:
     """到 OB 的一条长连接；断了就重连一次。多个请求排队用同一条连接。"""
 
@@ -53,7 +71,15 @@ class Upstream:
         self.conn = None
 
     def _connect(self):
+        """远端 OB 时尊重系统 / 环境代理（国内连远端常要代理）：经代理 CONNECT 建隧道，长连接照样保持。
+        本机地址不走代理。http.client 自己不认代理，所以这里显式处理。"""
         cls = http.client.HTTPSConnection if self.https else http.client.HTTPConnection
+        local = self.host in ("127.0.0.1", "localhost", "::1")
+        proxy = None if local else _proxy_for("https" if self.https else "http", self.host)
+        if proxy:
+            conn = cls(proxy[0], proxy[1], timeout=UPSTREAM_TIMEOUT)
+            conn.set_tunnel(self.host, self.port)
+            return conn
         return cls(self.host, self.port, timeout=UPSTREAM_TIMEOUT)
 
     def post(self, path: str, body: bytes) -> tuple[int, bytes]:
@@ -82,6 +108,24 @@ class Upstream:
         raise OSError("unreachable")
 
 
+def _report(where: str, message: str) -> None:
+    """和 ob_hook.report_error 同一个待补报文件：下一次钩子连上 OB 时报给面板。"""
+    try:
+        directory = state_path().parent
+        pending_path = directory / ".ob_hook_errors.json"
+        try:
+            pending = json.loads(pending_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pending = []
+        now = time.strftime("%Y-%m-%dT%H:%M:%S%z")
+        pending = (pending + [{"at": now, "where": f"relay:{where}", "message": message[:300]}])[-20:]
+        pending_path.write_text(json.dumps(pending, ensure_ascii=False), encoding="utf-8")
+        with open(directory / "ob_hook.log", "a", encoding="utf-8") as handle:
+            handle.write(f"{now} [relay:{where}] {message}\n")
+    except Exception:
+        pass
+
+
 def serve(url: str, token: str) -> None:
     secret = secrets.token_hex(16)
     upstream = Upstream(url, token)
@@ -91,14 +135,18 @@ def serve(url: str, token: str) -> None:
     def worker() -> None:
         while True:
             path, body = backlog.get()
+            last = ""
             for delay in (0, 2, 10):
                 time.sleep(delay)
                 try:
                     status, _ = upstream.post(path, body)
                     if status < 500:
                         break
-                except Exception:
-                    continue
+                    last = f"OB 返回 {status}"
+                except Exception as exc:
+                    last = f"{type(exc).__name__}: {exc}"
+            else:
+                _report(path, f"中继后台发送三次都失败：{last}")
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):
