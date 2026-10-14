@@ -140,6 +140,56 @@ def _open(request, timeout: float):
 # ---- 断线不丢：发不出去的「存回复 / 关窗补存」先落盘，连上后补发 ----
 # 照 claude-mem 的做法：先落盘再投递。这两类请求都带去重键，补发几次都不会存重。
 
+# ---- 断连提示：连续连不上 OB 时，给用户（不是模型）看一条提示 ----
+# systemMessage 只显示给人看、不进模型上下文：Claude Code / Codex（官方 schema）/ Gemini 都支持。agy 没有，不提示。
+
+_NOTICE_CLIENTS = frozenset({"claude", "codex", "gemini"})
+
+
+def _fails_path() -> Path:
+    return _state_dir() / ".ob_hook_fails.json"
+
+
+def _note_failure() -> int:
+    try:
+        count = int(json.loads(_fails_path().read_text(encoding="utf-8")).get("count", 0)) + 1
+    except (OSError, ValueError, AttributeError):
+        count = 1
+    try:
+        _fails_path().parent.mkdir(parents=True, exist_ok=True)
+        _fails_path().write_text(json.dumps({"count": count, "at": time.strftime("%Y-%m-%dT%H:%M:%S%z")}),
+                                 encoding="utf-8")
+    except OSError:
+        pass
+    return count
+
+
+def _note_ok() -> None:
+    try:
+        _fails_path().unlink()
+    except OSError:
+        pass
+
+
+def _disconnect_notice(count: int) -> str:
+    """第 3 次连续失败提示一次，之后每 10 次提示一次，免得刷屏。"""
+    if count != 3 and not (count > 3 and count % 10 == 0):
+        return ""
+    pending = spool_count()
+    tail = f"有 {pending} 条回复已暂存，连上后自动补发。" if pending else "连上后自动恢复。"
+    return (f"Ombre Brain 连续 {count} 次连不上，这几轮没有存原文、也不会带记忆。{tail}"
+            f"详情见 {_state_dir() / 'ob_hook.log'}")
+
+
+def _script_hash() -> str:
+    """本脚本内容的摘要（统一换行后）：OB 拿它和自带的那份比，不一样就在面板上提示「钩子脚本过期」。"""
+    try:
+        raw = Path(__file__).read_bytes().replace(b"\r\n", b"\n")
+        return hashlib.sha1(raw).hexdigest()[:12]
+    except OSError:
+        return ""
+
+
 def _spool_dir() -> Path:
     return _state_dir() / "spool"
 
@@ -230,7 +280,8 @@ def _flush_spool() -> int:
 
 
 def _after_success() -> None:
-    """刚刚确实连上了 OB：待发目录里有东西就交给后台补发，不拖慢这一次。"""
+    """刚刚确实连上了 OB：清掉连续失败计数；待发目录里有东西就交给后台补发，不拖慢这一次。"""
+    _note_ok()
     if spool_count():
         try:
             _detach([str(Path(__file__).resolve()), "--flush"])
@@ -347,6 +398,7 @@ def _deliver(path: str) -> int:
             report_error(path, f"后台发送被拒：OB 返回 {exc.code}")
     except (urllib.error.URLError, OSError) as exc:
         spool_put(path, raw.encode("utf-8"))
+        _note_failure()
         report_error(path, f"连不上 OB，已暂存，连上后补发：{type(exc).__name__}: {exc}")
     except Exception as exc:
         report_error(path, f"后台发送失败：{type(exc).__name__}: {exc}")
@@ -496,7 +548,7 @@ def _antigravity(mode: str, event: str = "") -> int:
         data = json.load(sys.stdin)
         conv = str(data.get("conversationId") or "")[:200]
         workspaces = data.get("workspacePaths") or [""]
-        base = {"session_id": conv, "cwd": str(workspaces[0] or ""), "client": "antigravity"}
+        base = {"session_id": conv, "cwd": str(workspaces[0] or ""), "client": "antigravity", "script": _script_hash()}
         payload = None
         if mode == "probe":
             _antigravity_probe(event or str(data.get("hookEventName") or ""), data)
@@ -601,6 +653,7 @@ def main() -> int:
         payload = {"session_id": session_id, "messages": messages, "cwd": cwd, "event": mode}
 
     payload["client"] = client  # 面板上各家单独的开关和到达时间靠这个区分
+    payload["script"] = _script_hash()
     pending = _pending_errors() if mode not in _NO_WAIT else []
     if pending:
         payload["client_errors"] = pending
@@ -611,6 +664,9 @@ def main() -> int:
         return 0
     except (urllib.error.URLError, OSError, ValueError) as exc:
         report_error(mode, f"连不上 OB：{type(exc).__name__}: {exc}")
+        notice = _disconnect_notice(_note_failure()) if mode not in _NO_WAIT else ""
+        if notice and client in _NOTICE_CLIENTS:
+            print(json.dumps({"systemMessage": notice}, ensure_ascii=False))
         return 0
     if pending:
         _clear_pending()

@@ -72,6 +72,8 @@ def test_prompt_posts_and_emits_additional_context(server):
     assert code == 0
     path, token, body = _Recorder.calls[0]
     assert path == "/autorecall/prompt" and token == "tok"
+    script = body.pop("script")  # 钩子脚本自身的内容摘要，OB 用它判断脚本是否过期
+    assert len(script) == 12 and int(script, 16) >= 0
     assert body == {"session_id": "s", "prompt": "还记得火锅吗", "prompt_id": "p1", "cwd": "/w", "client": "claude"}
     assert json.loads(out) == {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit", "additionalContext": "记忆：周五吃了火锅"}}
@@ -81,7 +83,9 @@ def test_session_start_and_empty_context_prints_nothing(server):
     _Recorder.reply = {"context": ""}
     code, out = _run("session-start", {"session_id": "s", "source": "compact"}, server)
     assert code == 0 and out == ""
-    assert _Recorder.calls[0][2] == {"session_id": "s", "source": "compact", "cwd": "", "client": "claude"}
+    body = dict(_Recorder.calls[0][2])
+    assert len(body.pop("script")) == 12
+    assert body == {"session_id": "s", "source": "compact", "cwd": "", "client": "claude"}
 
 
 def test_stop_sends_last_assistant_message(server):

@@ -241,3 +241,25 @@ def test_clients_setting_validation_merges(monkeypatch):
     for bad in ({"clients": {"nope": True}}, {"clients": {"codex": "yes"}}, {"clients": []}):
         with pytest.raises(ValueError):
             autorecall._validate_settings(bad)
+
+
+@pytest.mark.asyncio
+async def test_stale_hook_script_warns(monkeypatch, tmp_path):
+    """钩子带上自己脚本的摘要；和 OB 自带的不一样就在面板上提示重跑安装，一样就不提示。"""
+    from ombrebrain.autorecall.service import bundled_hook_hash
+
+    bundled = bundled_hook_hash()
+    assert len(bundled) == 12
+    svc = _svc(tmp_path)
+    routes = _routes(monkeypatch, svc)
+    await routes[("POST", "/autorecall/prompt")](_Req({"session_id": "s", "prompt": "嗨", "script": bundled}))
+    health = svc.hook_health()
+    assert health["scripts"] == {"claude": bundled}
+    assert not any("钩子脚本" in w for w in health["warnings"])
+    assert not any(k.startswith("script@") for k in health["clients"]["claude"])
+    await routes[("POST", "/autorecall/prompt")](_Req({"session_id": "s", "prompt": "嗨", "client": "codex",
+                                                       "script": "0123456789ab"}))
+    warnings = svc.hook_health()["warnings"]
+    assert any("Codex CLI 用的钩子脚本和 OB 自带的不一样" in w for w in warnings)
+    await routes[("POST", "/autorecall/prompt")](_Req({"session_id": "s", "prompt": "嗨", "script": "../../x"}))
+    assert set(svc.hook_health()["scripts"]) == {"claude", "codex"}  # 不是 12 位十六进制的不记

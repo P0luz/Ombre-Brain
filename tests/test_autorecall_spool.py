@@ -108,3 +108,32 @@ def test_successful_prompt_triggers_background_flush(tmp_path):
         assert _wait(lambda: _spool(tmp_path) == [], 5)
     finally:
         ob.server.shutdown()
+
+
+def test_disconnect_notice_after_three_failures_then_resets(tmp_path):
+    down = f"http://127.0.0.1:{_free_port()}"
+    outs = []
+    for _ in range(4):
+        result = subprocess.run([sys.executable, str(_HOOK), "--client", "codex", "prompt"],
+                                input=json.dumps({"session_id": "s", "prompt": "嗨", "turn_id": "t"}),
+                                capture_output=True, text=True, env=_env(tmp_path, down), timeout=30)
+        outs.append(result.stdout.strip())
+    assert outs[0] == outs[1] == outs[3] == ""  # 只在第 3 次提示，不刷屏
+    notice = json.loads(outs[2])
+    assert list(notice) == ["systemMessage"] and "连续 3 次连不上" in notice["systemMessage"]
+    ob = FakeOB()
+    try:
+        subprocess.run([sys.executable, str(_HOOK), "prompt"], input=json.dumps({"session_id": "s", "prompt": "嗨"}),
+                       capture_output=True, text=True, env=_env(tmp_path, ob.url), timeout=30)
+        assert not (tmp_path / "hooks" / ".ob_hook_fails.json").exists()  # 连上就清零
+    finally:
+        ob.server.shutdown()
+
+
+def test_antigravity_gets_no_notice(tmp_path):
+    down = f"http://127.0.0.1:{_free_port()}"
+    for _ in range(3):
+        result = subprocess.run([sys.executable, str(_HOOK), "--client", "antigravity", "session-start"],
+                                input=json.dumps({"conversationId": "c"}), capture_output=True, text=True,
+                                env=_env(tmp_path, down), timeout=30)
+    assert json.loads(result.stdout) == {}  # agy 不认 systemMessage，只输出合法的空结果

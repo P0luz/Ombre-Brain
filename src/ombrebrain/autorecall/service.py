@@ -30,6 +30,7 @@ dont_surface 不出；self / I（含候选）/ anchor 不出——自我认知�
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import re
@@ -37,6 +38,7 @@ import time
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
@@ -94,6 +96,19 @@ def _bounded(value: Any, default: float, low: float, high: float) -> float:
 
 # 接入自动召回的客户端。请求体里的 client 字段报自己是谁；没报的是 4.0.0 早期的 Claude Code 钩子。
 CLIENTS = ("claude", "codex", "gemini", "antigravity", "gateway", "openwebui", "sdk")
+
+
+_CLIENT_LABELS = {"claude": "Claude Code", "codex": "Codex CLI", "gemini": "Gemini CLI", "antigravity": "Antigravity CLI"}
+_SCRIPT_FRESH = timedelta(days=7)
+
+
+def bundled_hook_hash() -> str:
+    """OB 自带的 ob_hook.py 的内容摘要，算法和钩子自报的 _script_hash 一致（统一换行后 sha1 前 12 位）。"""
+    try:
+        raw = (Path(__file__).resolve().parent / "client" / "ob_hook.py").read_bytes().replace(b"\r\n", b"\n")
+    except OSError:
+        return ""
+    return hashlib.sha1(raw).hexdigest()[:12]
 
 
 def normalize_client(raw: Any) -> str:
@@ -319,11 +334,17 @@ class AutoRecallService:
             except ValueError:
                 return None
 
-        # 按客户端分开的到达时间：键是「客户端/事件」。
+        # 按客户端分开的到达时间：键是「客户端/事件」；「客户端/script@摘要」是钩子脚本版本，单独拿出来。
         clients: dict[str, dict[str, str]] = {}
+        scripts: dict[str, tuple[str, str]] = {}
         for key, at in seen.items():
             name, sep, event = key.partition("/")
-            if sep:
+            if not sep:
+                continue
+            if event.startswith("script@"):
+                if name not in scripts or at > scripts[name][1]:
+                    scripts[name] = (event[len("script@"):], at)
+            else:
                 clients.setdefault(name, {})[event] = at
         seen = {k: v for k, v in seen.items() if "/" not in k}
 
@@ -345,9 +366,20 @@ class AutoRecallService:
                     warnings.append("提问在到，但「开窗」（SessionStart）从没到过：接续和 dream 不会注入。")
                 if stop_age is not None and prompt_age is None:
                     warnings.append("「存回复」在到，但「提问」（UserPromptSubmit）从没到过：原话没存、唤醒召回不会触发。")
+            bundled = bundled_hook_hash()
+            for name, (digest, at) in sorted(scripts.items()):
+                try:
+                    recent = now - datetime.fromisoformat(at) < _SCRIPT_FRESH
+                except ValueError:
+                    recent = False
+                if bundled and digest != bundled and recent:
+                    warnings.append(
+                        f"{_CLIENT_LABELS.get(name, name)} 用的钩子脚本和 OB 自带的不一样（装的 {digest}，自带 {bundled}），"
+                        "多半是 OB 升级后没更新：重跑一键安装命令即可。")
             if errors and now - _parse_utc(errors[-1]["at"]) < _ERROR_FRESH:
                 warnings.append(f"最近 24 小时有钩子报错，最新一条：{errors[-1]['message']}")
-        return {"seen": seen, "clients": clients, "warnings": warnings, "errors": list(reversed(errors[-5:]))}
+        return {"seen": seen, "clients": clients, "scripts": {k: v[0] for k, v in scripts.items()},
+                "warnings": warnings, "errors": list(reversed(errors[-5:]))}
 
     # ---------------- 钩子 ----------------
 

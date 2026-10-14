@@ -215,6 +215,10 @@ async def _note_arrival(service, name: str, body: dict, client: str = "claude") 
     try:
         await asyncio.to_thread(service.store.mark_seen, event)
         await asyncio.to_thread(service.store.mark_seen, f"{client}/{event}")
+        script = str(body.get("script") or "")
+        if len(script) == 12 and all(c in "0123456789abcdef" for c in script):
+            # 钩子脚本的内容摘要：体检拿它和 OB 自带的那份比，不一样就提示「重跑一键安装」
+            await asyncio.to_thread(service.store.mark_seen, f"{client}/script@{script}")
         raw = body.get("client_errors")
         if isinstance(raw, list) and raw:
             errors = [

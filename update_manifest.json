@@ -177,8 +177,8 @@
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_hook.py",
-      "sha256": "6195a7c805f31ad3e3efad01d15b92910434999ad46ec284b5ade7e116116111",
-      "size": 28230
+      "sha256": "bae9d9d933d1a57b17a749ea43d05471eebf91962f90cd07bb8d5ed870d71cbf",
+      "size": 30404
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_relay.py",
@@ -197,8 +197,8 @@
     },
     {
       "path": "src/ombrebrain/autorecall/service.py",
-      "sha256": "29051d3b3628cb293ba07160a6715bbea7ce1f488091b03f7c48859e3cce56bd",
-      "size": 24939
+      "sha256": "a1ae008864e0c0e45d7eb6ed37680ebb0a00a24b99987dd07a51bfc49b9c6f56",
+      "size": 26534
     },
     {
       "path": "src/ombrebrain/autorecall/transcript_store.py",
@@ -867,8 +867,8 @@
     },
     {
       "path": "src/web/autorecall.py",
-      "sha256": "f70de79933fb91fa4172bd92d652cdfe0df256875b84bb19a767352f4810e80a",
-      "size": 16517
+      "sha256": "717bf3f80f88b8231d30c5685e7fcef90062fb42e8acd0803f08b8ac48961a12",
+      "size": 16860
     },
     {
       "path": "src/web/buckets.py",
