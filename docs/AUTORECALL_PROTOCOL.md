@@ -6,9 +6,12 @@ Ombre Brain 的自动召回不绑定任何客户端。Claude Code 的钩子只�
 现成客户端：
 - Python：`src/ombrebrain/autorecall/client/ob_client.py`（只用标准库）
 - JavaScript：`src/ombrebrain/autorecall/client/ob_client.mjs`（浏览器 / Node 18+）
-- Claude Code：`src/ombrebrain/autorecall/client/ob_hook.py` + 一键安装（见 deploy/claude-code-hooks/README.md）
+- Claude Code / Codex CLI / Gemini CLI：`ob_hook.py` + 一键安装（`install.py --client claude|codex|gemini`）
+- 能填 base_url 的聊天软件：OpenAI 兼容记忆网关 `ob_gateway.py`
+- Open WebUI：`deploy/openwebui/ob_filter.py`
 
-两个 SDK 也可以直接从你的 OB 下载：`GET <OB地址>/autorecall/client/ob_client.py`、`…/ob_client.mjs`。
+各客户端怎么接见 [deploy/clients/README.md](../deploy/clients/README.md)。
+以上脚本都可以直接从你的 OB 下载：`GET <OB地址>/autorecall/client/{ob_client.py, ob_client.mjs, ob_gateway.py, install.py, ob_hook.py}`。
 
 ## 前提
 

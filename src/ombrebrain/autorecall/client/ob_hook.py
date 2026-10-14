@@ -11,7 +11,12 @@
     python3 ob_hook.py session-end     # SessionEnd：尽力补存用户原文
     python3 ob_hook.py pre-compact     # PreCompact：压缩前同样补存一遍，压缩后的开窗接续拿得到完整原文
 
-环境变量：
+其他客户端（字段对照见 deploy/clients/README.md，install.py --client 会替你挂好）：
+
+    python3 ob_hook.py --client codex prompt    # Codex CLI：事件名同 Claude Code，提问的 id 叫 turn_id
+    python3 ob_hook.py --client gemini prompt   # Gemini / Antigravity CLI：BeforeAgent 提问，AfterAgent 的 prompt_response 是回复
+
+环境变量（也可以写进同目录的 ob_hook.env，一行一个 KEY=VALUE；环境里已有的优先）：
     OB_URL         Ombre Brain 地址，默认 http://127.0.0.1:18001
     OB_HOOK_TOKEN  与服务端 OMBRE_HOOK_TOKEN / hooks.token 相同；没设就什么都不做
     OB_RELAY       设为 0 时不用本地中继，每次直连
@@ -44,6 +49,9 @@ import urllib.request
 _TIMEOUTS = {"session-start": 40, "prompt": 12, "stop": 25, "session-end": 8, "pre-compact": 8}
 _ENDPOINT = {"pre-compact": "session-end"}  # 压缩前抢救和关窗补存是同一件事
 _EVENT_NAMES = {"session-start": "SessionStart", "prompt": "UserPromptSubmit"}
+# 各客户端注入上下文时回填的事件名；没列出的同 Claude Code。
+_CLIENT_EVENT_NAMES = {"gemini": {"session-start": "SessionStart", "prompt": "BeforeAgent"}}
+_CLIENTS = frozenset({"claude", "codex", "gemini"})
 _MAX_BACKFILL = 1000
 _NO_WAIT = frozenset({"stop", "session-end", "pre-compact"})
 _HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
@@ -51,6 +59,18 @@ _HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd
 
 _LOG_LIMIT = 200 * 1024
 _PENDING_LIMIT = 20
+
+
+def _load_env_file() -> None:
+    """Codex / Gemini 的钩子配置里没有 env 段，install.py 把地址和 token 写进同目录的 ob_hook.env（0600）。"""
+    try:
+        lines = (_HERE / "ob_hook.env").read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return
+    for line in lines:
+        key, sep, value = line.strip().partition("=")
+        if sep and key and not key.startswith("#"):
+            os.environ.setdefault(key.strip(), value.strip())
 
 
 def _debug(message: str) -> None:
@@ -251,9 +271,16 @@ def _backfill_user_messages(transcript_path: str) -> list:
 
 
 def main() -> int:
+    _load_env_file()
     if len(sys.argv) > 2 and sys.argv[1] == "--deliver":
         return _deliver(sys.argv[2]) if os.environ.get("OB_HOOK_TOKEN") else 0
-    mode = sys.argv[1] if len(sys.argv) > 1 else ""
+    args = sys.argv[1:]
+    client = "claude"
+    if len(args) >= 2 and args[0] == "--client":
+        client, args = args[1], args[2:]
+    if client not in _CLIENTS:
+        return 0
+    mode = args[0] if args else ""
     if mode not in _TIMEOUTS or not os.environ.get("OB_HOOK_TOKEN"):
         return 0
     try:
@@ -263,7 +290,8 @@ def main() -> int:
     session_id = str(data.get("session_id") or "")
     if not session_id:
         return 0
-    prompt_id = str(data.get("prompt_id") or "")
+    # Codex 管一轮叫 turn_id；Gemini 没有每轮 id。
+    prompt_id = str(data.get("prompt_id") or data.get("turn_id") or "")
     cwd = str(data.get("cwd") or "")
     # 子代理里的事件、定时唤醒 / SDK 发起的「提问」都不是用户本人说的话，不存也不召回。
     if data.get("agent_id") and mode in ("prompt", "stop"):
@@ -278,7 +306,7 @@ def main() -> int:
         payload = {"session_id": session_id, "prompt": data.get("prompt") or "",
                    "prompt_id": prompt_id or f"rand-{uuid.uuid4().hex}", "cwd": cwd}
     elif mode == "stop":
-        text = data.get("last_assistant_message") or ""
+        text = data.get("last_assistant_message") or data.get("prompt_response") or ""
         if not text.strip():
             return 0
         # 同一个 prompt 可能停不止一次（Stop 钩子让它续写），带上内容摘要区分。
@@ -288,6 +316,8 @@ def main() -> int:
             {"key": key, "role": "assistant", "text": text},
         ]}
     else:
+        if client != "claude":
+            return 0  # 补存要读记录文件，只认得 Claude Code 的格式
         messages = _backfill_user_messages(str(data.get("transcript_path") or ""))
         if not messages:
             return 0
@@ -308,9 +338,10 @@ def main() -> int:
         _clear_pending()
 
     context = result.get("context") if isinstance(result, dict) else ""
-    if context and mode in _EVENT_NAMES:
+    names = _CLIENT_EVENT_NAMES.get(client, _EVENT_NAMES)
+    if context and mode in names:
         print(json.dumps({
-            "hookSpecificOutput": {"hookEventName": _EVENT_NAMES[mode], "additionalContext": context},
+            "hookSpecificOutput": {"hookEventName": names[mode], "additionalContext": context},
         }, ensure_ascii=False))
     return 0
 

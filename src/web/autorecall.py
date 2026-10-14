@@ -143,7 +143,7 @@ def _messages(body: dict) -> list[dict]:
 
 
 _CLIENT_DIR = Path(__file__).resolve().parent.parent / "ombrebrain" / "autorecall" / "client"
-_CLIENT_FILES = frozenset({"install.py", "ob_hook.py", "ob_relay.py", "ob_client.py", "ob_client.mjs"})
+_CLIENT_FILES = frozenset({"install.py", "ob_hook.py", "ob_relay.py", "ob_client.py", "ob_client.mjs", "ob_gateway.py"})
 
 _BOOL_KEYS = ("enabled", "dream_on_start", "wake_on_names", "vector")
 _INT_KEYS = {"reminder_every": (0, 500), "restore_rounds": (0, 50), "agree_top": (0, 20)}

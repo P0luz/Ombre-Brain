@@ -20,6 +20,16 @@ import urllib.request
 import uuid
 
 
+_DIRECT = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
+
+def _open(request, timeout: float):
+    """本机地址绕过系统代理（macOS 上 urllib 会把 127.0.0.1 也交给系统代理，实测 503）。"""
+    if (urllib.request.urlparse(request.full_url).hostname or "") in ("127.0.0.1", "localhost", "::1"):
+        return _DIRECT.open(request, timeout=timeout)
+    return urllib.request.urlopen(request, timeout=timeout)
+
+
 class OBClient:
     def __init__(self, base_url: str, token: str, scope: str = "", timeout: float = 12.0) -> None:
         self.base_url = base_url.rstrip("/")
@@ -36,7 +46,7 @@ class OBClient:
             method="POST",
         )
         try:
-            with urllib.request.urlopen(request, timeout=timeout or self.timeout) as response:
+            with _open(request, timeout or self.timeout) as response:
                 self.last_error = ""
                 return json.loads(response.read().decode("utf-8") or "{}")
         except (urllib.error.URLError, OSError, ValueError) as exc:
