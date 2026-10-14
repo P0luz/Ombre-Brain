@@ -55,6 +55,7 @@ from ombrebrain.storage.backup_archive import (
     BackupArchiveError,
     MIGRATE_MAX_SOURCE_BYTES,
     extract_backup_archive_file,
+    is_internal_vault_path,
     validate_sqlite_bytes,
     validate_sqlite_file,
 )
@@ -919,8 +920,14 @@ class MigrateEngine:
         # 4) 遍历 bucket markdown 文件。任何损坏项都会让整个恢复预检失败，
         # 避免界面显示“成功”但实际静默漏掉记忆。
         seen_ids: set[str] = set()
+        skipped_internal = 0
         for arc_path in sorted(names):
             if not arc_path.startswith("buckets/") or not arc_path.endswith(".md"):
+                continue
+            # 3.8.0 之前的官方导出会带上 buckets/_app/** 运行时文档；它们不是记忆，
+            # 跳过而不是按记忆桶校验，旧备份才能原样导回（#131）。
+            if is_internal_vault_path(arc_path.removeprefix("buckets/")):
+                skipped_internal += 1
                 continue
             try:
                 content_limit = self._bucket_content_limit()
@@ -975,6 +982,8 @@ class MigrateEngine:
                 raise
             except Exception as e:
                 raise BackupArchiveError(f"bucket markdown 无法解析: {arc_path}: {e}") from e
+        if skipped_internal:
+            logger.info(f"[migrate] 跳过 {skipped_internal} 个 vault 内部文件（buckets/_*，不是记忆）")
 
         missing_sources = sorted(referenced_sources - set(source_members))
         integrity_warning = str(package["integrity_warning"] or "")

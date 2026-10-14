@@ -186,6 +186,17 @@ def validate_sqlite_bytes(db_bytes: bytes) -> None:
             pass
 
 
+def is_internal_vault_path(relative: str) -> bool:
+    """vault 内以 ``_`` 开头的顶层目录不是记忆（与 vault_health 同一条规则）。
+
+    ``_app/`` 是播种进来的代码树（含 docs/ 的大 .md），``_app/_prev/`` 是它的回滚副本，
+    ``_sources/`` 走自己的 sources/ 通道。把它们当记忆导出，导入时会按记忆桶的
+    读取上限被拒（INTERNALS.md 160557 > 133120 bytes），同名副本还会撞重复 id（#131）。
+    """
+    parts = PurePosixPath(relative).parts
+    return bool(parts) and parts[0].startswith("_")
+
+
 def _collect_markdown(buckets_dir: str) -> dict[str, bytes]:
     base = Path(buckets_dir).resolve()
     if not base.is_dir():
@@ -193,6 +204,8 @@ def _collect_markdown(buckets_dir: str) -> dict[str, bytes]:
 
     files: dict[str, bytes] = {}
     for path in sorted(base.rglob("*.md")):
+        if is_internal_vault_path(path.relative_to(base).as_posix()):
+            continue
         resolved = path.resolve()
         if not resolved.is_file() or not resolved.is_relative_to(base):
             raise BackupArchiveError(f"拒绝导出指向记忆目录外的文件: {path}")
@@ -483,6 +496,8 @@ def build_export_archive_file(
             allowZip64=True,
         ) as archive:
             for path in sorted(base.rglob("*.md")):
+                if is_internal_vault_path(path.relative_to(base).as_posix()):
+                    continue
                 if path.is_symlink():
                     raise BackupArchiveError(f"拒绝导出符号链接文件: {path}")
                 try:
