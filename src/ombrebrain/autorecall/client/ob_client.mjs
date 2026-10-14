@@ -14,11 +14,12 @@
 // 对外的前端请让自己的后端去调 OB。
 
 export class OBClient {
-  constructor(baseUrl, { token, scope = "", timeoutMs = 12000 } = {}) {
+  constructor(baseUrl, { token, scope = "", timeoutMs = 12000, client = "sdk" } = {}) {
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.token = token;
     this.scope = scope; // 对应协议里的 cwd：「上一段对话」只在同一个 scope 里找
     this.timeoutMs = timeoutMs;
+    this.client = client; // 面板上按客户端分开关；自制前端都算 sdk
     this.lastError = "";
   }
 
@@ -29,7 +30,7 @@ export class OBClient {
       const res = await fetch(`${this.baseUrl}/autorecall/${path}`, {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Ombre-Hook-Token": this.token },
-        body: JSON.stringify({ ...payload, cwd: this.scope }),
+        body: JSON.stringify({ ...payload, cwd: this.scope, client: this.client }),
         signal: controller.signal,
       });
       if (!res.ok) throw new Error(`OB 返回 ${res.status}`);

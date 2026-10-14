@@ -31,17 +31,19 @@ def _open(request, timeout: float):
 
 
 class OBClient:
-    def __init__(self, base_url: str, token: str, scope: str = "", timeout: float = 12.0) -> None:
+    def __init__(self, base_url: str, token: str, scope: str = "", timeout: float = 12.0,
+                 client: str = "sdk") -> None:
         self.base_url = base_url.rstrip("/")
         self.token = token
         self.scope = scope  # 对应协议里的 cwd：「上一段对话」只在同一个 scope 里找
         self.timeout = timeout
+        self.client = client  # 面板上按客户端分开关；自制前端都算 sdk
         self.last_error = ""
 
     def _post(self, path: str, payload: dict, timeout: float | None = None) -> dict:
         request = urllib.request.Request(
             f"{self.base_url}/autorecall/{path}",
-            data=json.dumps({**payload, "cwd": self.scope}, ensure_ascii=False).encode("utf-8"),
+            data=json.dumps({**payload, "cwd": self.scope, "client": self.client}, ensure_ascii=False).encode("utf-8"),
             headers={"Content-Type": "application/json", "X-Ombre-Hook-Token": self.token},
             method="POST",
         )

@@ -14,7 +14,7 @@
 其他客户端（字段对照见 deploy/clients/README.md，install.py --client 会替你挂好）：
 
     python3 ob_hook.py --client codex prompt    # Codex CLI：事件名同 Claude Code，提问的 id 叫 turn_id
-    python3 ob_hook.py --client gemini prompt   # Gemini / Antigravity CLI：BeforeAgent 提问，AfterAgent 的 prompt_response 是回复
+    python3 ob_hook.py --client gemini prompt   # 旧版 Gemini CLI：BeforeAgent 提问，AfterAgent 的 prompt_response 是回复
 
 环境变量（也可以写进同目录的 ob_hook.env，一行一个 KEY=VALUE；环境里已有的优先）：
     OB_URL         Ombre Brain 地址，默认 http://127.0.0.1:18001
@@ -323,6 +323,7 @@ def main() -> int:
             return 0
         payload = {"session_id": session_id, "messages": messages, "cwd": cwd, "event": mode}
 
+    payload["client"] = client  # 面板上各家单独的开关和到达时间靠这个区分
     pending = _pending_errors() if mode not in _NO_WAIT else []
     if pending:
         payload["client_errors"] = pending

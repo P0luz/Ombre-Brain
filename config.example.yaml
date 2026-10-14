@@ -100,6 +100,14 @@ autorecall:
   wake_words: [记得, 上次, 之前, 那次, 那天, 想起, 以前, 当时, 来着]
   agree_top: 2               # 反向门：字面和向量两路前 N 名有同一条才注入；0 = 关
   vector: true               # 向量检索（不通时这一轮不注入）
+  clients:                   # 各客户端单独的开关（面板上可改）；关掉的那家只记到达时间，不存不注入
+    claude: true             # Claude Code 钩子（早期没报名字的钩子也算这家）
+    codex: true              # Codex CLI 钩子
+    gemini: true             # 旧版 Gemini CLI 钩子
+    antigravity: true        # Antigravity CLI（agy）
+    gateway: true            # OpenAI 兼容记忆网关 ob_gateway.py
+    openwebui: true          # Open WebUI Filter
+    sdk: true                # 自制前端（ob_client.py / .mjs），以及报了不认识名字的
 
 # --- Bucket storage path / 记忆桶存储路径 ---
 # Point this to your Obsidian vault subdirectory, or any local folder

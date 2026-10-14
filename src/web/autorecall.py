@@ -48,10 +48,10 @@ from starlette.responses import JSONResponse, PlainTextResponse
 from . import _shared as sh
 
 try:
-    from ombrebrain.autorecall import autorecall_config
+    from ombrebrain.autorecall import CLIENTS, autorecall_config, normalize_client
     from utils import atomic_update_config_yaml  # type: ignore
 except ImportError:  # pragma: no cover
-    from ..ombrebrain.autorecall import autorecall_config  # type: ignore
+    from ..ombrebrain.autorecall import CLIENTS, autorecall_config, normalize_client  # type: ignore
     from ..utils import atomic_update_config_yaml  # type: ignore
 from .hooks import _header_value, _hook_setting, _is_hook_request_authorized, _truthy, _valid_hook_token
 
@@ -150,7 +150,7 @@ _INT_KEYS = {"reminder_every": (0, 500), "restore_rounds": (0, 50), "agree_top":
 
 
 def _validate_settings(body: dict) -> dict:
-    unknown = set(body) - set(_BOOL_KEYS) - set(_INT_KEYS) - {"wake_words"}
+    unknown = set(body) - set(_BOOL_KEYS) - set(_INT_KEYS) - {"wake_words", "clients"}
     if unknown:
         raise ValueError(f"不支持的字段：{', '.join(sorted(unknown))}")
     out: dict = {}
@@ -175,6 +175,13 @@ def _validate_settings(body: dict) -> dict:
         if len(cleaned) > 100 or any(len(w) > 20 for w in cleaned):
             raise ValueError("唤醒词最多 100 个，每个不超过 20 字")
         out["wake_words"] = cleaned
+    if "clients" in body:
+        raw = body["clients"]
+        if not isinstance(raw, dict) or not all(k in CLIENTS and isinstance(v, bool) for k, v in raw.items()):
+            raise ValueError(f"clients 必须是 {{客户端: true/false}}，客户端只能是 {', '.join(CLIENTS)}")
+        # 只改传来的那几家，其余保持原样（config.yaml 里整段写回）。
+        current = autorecall_config(getattr(sh, "config", None))["clients"]
+        out["clients"] = {**current, **raw}
     return out
 
 
@@ -201,12 +208,13 @@ _CHECK_PREFIX = "ob-check-"
 _EVENT_ALIASES = {"session-end": {"pre-compact"}}  # 共用端点、但要分开记到达的事件
 
 
-async def _note_arrival(service, name: str, body: dict) -> None:
+async def _note_arrival(service, name: str, body: dict, client: str = "claude") -> None:
     event = str(body.get("event") or "")
     if event not in _EVENT_ALIASES.get(name, ()):
         event = name
     try:
         await asyncio.to_thread(service.store.mark_seen, event)
+        await asyncio.to_thread(service.store.mark_seen, f"{client}/{event}")
         raw = body.get("client_errors")
         if isinstance(raw, list) and raw:
             errors = [
@@ -289,8 +297,11 @@ def register(mcp) -> None:
             body = await _body(request)
         except (ValueError, UnicodeDecodeError) as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=_NO_STORE)
-        # 体检：先记「这个钩子到过」，再收客户端补报的错误。都不能影响这一轮。
-        await _note_arrival(service, name, body)
+        # 体检：先记「这个钩子到过」（总的 + 按客户端），再收客户端补报的错误。都不能影响这一轮。
+        client = normalize_client(body.get("client"))
+        await _note_arrival(service, name, body, client)
+        if not service.settings["clients"].get(client, True):
+            return JSONResponse({"disabled": True, "client": client}, headers=_NO_STORE)
         if body["session_id"].startswith(_CHECK_PREFIX):
             return JSONResponse({"check": "ok", "event": name}, headers=_NO_STORE)
         try:

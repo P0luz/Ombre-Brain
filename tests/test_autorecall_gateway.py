@@ -153,7 +153,7 @@ def test_new_chat_injects_start_and_recall_and_stores_reply(stack):
     stop = [c for c in ob.calls if c[0] == "stop"][0][1]
     assert stop["messages"][0]["text"] == "收到" and stop["cwd"] == "前端A"
     assert ob.names()[:2] == ["session-start", "prompt"]
-    assert all(c[2] == "tok" for c in ob.calls)
+    assert all(c[2] == "tok" and c[1]["client"] == "gateway" for c in ob.calls)
 
 
 def test_stream_is_relayed_and_full_text_stored(stack):

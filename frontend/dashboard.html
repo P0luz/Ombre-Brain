@@ -2639,11 +2639,11 @@
       <div id="you-setting-msg" role="status" aria-live="polite" style="min-height:16px;margin-top:8px;font-size:12px;color:var(--text-dim);"></div>
     </div>
 
-    <!-- Claude Code 自动召回：只给 Claude Code 的钩子用，其他客户端不受影响。 -->
+    <!-- 自动召回：Claude Code / Codex / Gemini 钩子、记忆网关、Open WebUI、自制前端共用，每家单独开关。 -->
     <div class="config-section" id="sec-autorecall" data-sgroup="basics">
-      <h3>自动召回 <span class="sec-en">Claude Code</span></h3>
+      <h3>自动召回 <span class="sec-en">Auto-recall</span></h3>
       <p id="autorecall-description" style="font-size:12px;color:var(--text-dim);line-height:1.7;margin:4px 0 12px;">
-        <span style="display:block;">仅 Claude Code 可用，需要装 deploy/claude-code-hooks 里的钩子。</span>
+        <span style="display:block;">要在客户端那边装钩子或接上网关，见下方「接入的客户端」；没装的客户端不受影响。</span>
         <span style="display:block;">开新窗口或压缩后接上上一段对话的最后几轮原文，当天第一次开窗附一次 dream。</span>
         <span style="display:block;">说到「记得 / 上次 / 之前」或 Them 名册里的人名时，注入最相关的一条记忆；两路检索不一致就不注入。</span>
         <span style="display:block;">每隔若干轮提醒正在聊天的模型考虑用 hold 存档。原文只存在这个记忆库里。</span>
@@ -2656,14 +2656,9 @@
           onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleAutorecallSetting(this);}"></span>
         <input type="checkbox" id="autorecall-enabled" style="display:none" aria-hidden="true">
       </div>
-      <div style="margin:10px 0 6px;font-size:12px;color:var(--text-dim);line-height:1.7;">
-        <strong>一键安装</strong>：在装了 Claude Code 的电脑终端里运行下面这行，按提示输入 hook token 即可（会先备份 ~/.claude/settings.json，只增改自己的钩子）。
-      </div>
-      <div style="display:flex;gap:8px;align-items:center;">
-        <code id="autorecall-install-cmd" style="flex:1;min-width:0;overflow-x:auto;white-space:nowrap;font-size:12px;padding:8px 10px;border-radius:8px;background:var(--bg-input, rgba(0,0,0,.05));"></code>
-        <button class="btn-secondary" onclick="copyAutorecallInstall()" title="复制 / Copy" style="padding:6px 10px;font-size:12px;flex:none;">复制</button>
-      </div>
-      <div style="margin:4px 0 10px;font-size:11px;color:var(--text-light);">Windows：先 <code>curl -o install.py</code> 下载同一个地址，再 <code>python install.py --url …</code>。卸载：加 <code>--uninstall</code>。</div>
+      <div style="margin:14px 0 4px;font-size:13px;font-weight:600;">接入的客户端</div>
+      <div style="margin-bottom:6px;font-size:11px;color:var(--text-light);line-height:1.6;">每家单独开关：关掉的那家发来的请求只记到达时间，不存、不注入。总开关关着时全部不生效。各家装法详见仓库 deploy/clients/README.md。</div>
+      <div id="autorecall-clients" style="margin-bottom:12px;"></div>
       <div class="config-row"><label>唤醒词</label><input type="text" id="cfg-ar-wake" placeholder="记得,上次,之前" maxlength="2000" /></div>
       <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">逗号分隔。Them 名册里的人名会自动算进来；宠物名、事物名等加在这里</div>
       <div class="config-row"><label>名册人名唤醒</label><input type="checkbox" id="cfg-ar-names" style="width:auto;flex:none;accent-color:var(--accent);cursor:pointer;" /></div>
@@ -4696,8 +4691,6 @@ function renderAutorecallSetting(data, message, isError) {
 }
 
 async function loadAutorecallSetting() {
-  var cmd = document.getElementById('autorecall-install-cmd');
-  if (cmd) cmd.textContent = autorecallInstallCommand();
   try {
     var response = await authFetch('/api/settings/autorecall');
     if (!response) return;
@@ -4745,18 +4738,93 @@ function autorecallAgo(iso) {
   return Math.round(sec / 86400) + ' 天前';
 }
 
+// 各客户端：名字、装法、该有哪些事件。命令里的 {O} 换成当前面板地址。
+var AUTORECALL_CLIENTS = [
+  {id: 'claude', name: 'Claude Code', events: ['session-start', 'prompt', 'stop', 'session-end'],
+   cmd: 'curl -fsSL {O}/autorecall/client/install.py | python3 - --url {O}',
+   note: 'Windows：先 curl -o install.py 下载同一地址，再 python install.py --url …；卸载加 --uninstall；自检加 --check。'},
+  {id: 'codex', name: 'Codex CLI', events: ['session-start', 'prompt', 'stop'],
+   cmd: 'curl -fsSL {O}/autorecall/client/install.py | python3 - --url {O} --client codex',
+   note: '装完打开 codex 输入 /hooks，把 ob_hook.py 的几条逐个信任一次，否则不会执行。'},
+  {id: 'gemini', name: 'Gemini CLI（旧版 gemini 命令）', events: ['session-start', 'prompt', 'stop'],
+   cmd: 'curl -fsSL {O}/autorecall/client/install.py | python3 - --url {O} --client gemini',
+   note: '接替它的 Antigravity（agy）钩子格式不同，见下一项。'},
+  {id: 'antigravity', name: 'Antigravity CLI（agy）', events: ['session-start', 'prompt', 'stop'],
+   cmd: '', note: '适配中。'},
+  {id: 'gateway', name: '记忆网关（DeepSeek / GPT / Gemini API、Cherry Studio、ChatBox 等）', events: ['session-start', 'prompt', 'stop'],
+   cmd: 'curl -fsSLO {O}/autorecall/client/ob_gateway.py && OB_HOOK_TOKEN=你的token python3 ob_gateway.py --upstream https://api.deepseek.com/v1 --ob {O}',
+   note: '然后把聊天软件的 API 地址改成 http://127.0.0.1:18080/v1，API key 照填模型商的。'},
+  {id: 'openwebui', name: 'Open WebUI', events: ['session-start', 'prompt', 'stop'],
+   cmd: '', note: '管理员面板 → Functions → +，贴入仓库里的 deploy/openwebui/ob_filter.py，设为 Global，在 Valves 里填 OB 地址和 token。'},
+  {id: 'sdk', name: '自制前端（SDK）', events: ['session-start', 'prompt', 'stop'],
+   cmd: 'curl -fsSLO {O}/autorecall/client/ob_client.py', note: 'JavaScript 版把文件名换成 ob_client.mjs。用法见文件开头。'},
+];
+var AUTORECALL_EVENT_NAMES = {'session-start': '开窗', 'prompt': '提问', 'stop': '存回复', 'session-end': '关窗'};
+
+function autorecallClientCommand(c) {
+  return (c.cmd || '').split('{O}').join(window.location.origin);
+}
+
+function renderAutorecallClients(data) {
+  var box = document.getElementById('autorecall-clients');
+  if (!box || !data) return;
+  var switches = data.clients || {};
+  var arrived = (data.health && data.health.clients) || {};
+  box.innerHTML = AUTORECALL_CLIENTS.map(function (c) {
+    var on = switches[c.id] !== false;
+    var seen = arrived[c.id] || {};
+    var any = c.events.some(function (e) { return seen[e]; });
+    var status;
+    if (!any) {
+      status = '<span style="color:var(--text-light);">还没收到过</span>';
+    } else {
+      status = c.events.map(function (e) {
+        return '<span style="margin-right:10px;color:' + (seen[e] ? 'var(--text-dim)' : 'var(--negative)') + ';">'
+          + esc(AUTORECALL_EVENT_NAMES[e]) + '：' + esc(autorecallAgo(seen[e])) + '</span>';
+      }).join('');
+      // 提问之后过了十分钟还没有「存回复」：多半是回复那一环没接上。
+      var p = seen['prompt'] && new Date(seen['prompt']).getTime();
+      var r = seen['stop'] && new Date(seen['stop']).getTime();
+      if (p && (!r || r < p) && Date.now() - p > 600000) {
+        status += '<span style="color:var(--negative);">提问后没收到存回复</span>';
+      }
+      if (!on) status += '<span style="color:var(--text-light);">（已关：收到也不处理）</span>';
+    }
+    var cmd = autorecallClientCommand(c);
+    return '<div style="padding:8px 0;border-top:1px solid var(--border, rgba(0,0,0,.08));">'
+      + '<label style="display:flex;align-items:center;gap:8px;cursor:pointer;font-size:13px;">'
+      + '<input type="checkbox" ' + (on ? 'checked ' : '') + 'style="width:auto;flex:none;accent-color:var(--accent);" '
+      + 'onchange="toggleAutorecallClient(\'' + c.id + '\', this.checked)"> ' + esc(c.name) + '</label>'
+      + '<div style="margin:2px 0 0 24px;font-size:12px;">' + status + '</div>'
+      + (cmd ? '<div style="display:flex;gap:8px;align-items:center;margin:4px 0 0 24px;">'
+        + '<code style="flex:1;min-width:0;overflow-x:auto;white-space:nowrap;font-size:11px;padding:6px 8px;border-radius:8px;background:var(--bg-input, rgba(0,0,0,.05));">'
+        + esc(cmd) + '</code><button class="btn-secondary" onclick="copyAutorecallClient(\'' + c.id + '\')" '
+        + 'title="复制 / Copy" style="padding:4px 8px;font-size:12px;flex:none;">复制</button></div>' : '')
+      + (c.note ? '<div style="margin:2px 0 0 24px;font-size:11px;color:var(--text-light);">' + esc(c.note) + '</div>' : '')
+      + '</div>';
+  }).join('');
+}
+
+function toggleAutorecallClient(id, on) {
+  var change = {};
+  change[id] = !!on;
+  postAutorecallSetting({clients: change});
+}
+
+function copyAutorecallClient(id) {
+  var c = AUTORECALL_CLIENTS.filter(function (x) { return x.id === id; })[0];
+  if (!c) return;
+  try { navigator.clipboard.writeText(autorecallClientCommand(c)); renderAutorecallSetting(null, '已复制', false); }
+  catch (e) { renderAutorecallSetting(null, '复制失败，请手动选中复制', true); }
+}
+
 function renderAutorecallHealth(data) {
+  renderAutorecallClients(data);
   var box = document.getElementById('autorecall-health');
   if (!box) return;
   var h = (data && data.health) || {};
   if (!data || !data.enabled) { box.innerHTML = ''; return; }
-  var seen = h.seen || {};
-  var rows = [['session-start', '开窗'], ['prompt', '提问'], ['stop', '存回复'], ['session-end', '关窗']].map(function (e) {
-    var missing = !seen[e[0]];
-    return '<span style="margin-right:14px;color:' + (missing ? 'var(--negative)' : 'var(--text-dim)') + ';">'
-      + esc(e[1]) + '：' + esc(autorecallAgo(seen[e[0]])) + '</span>';
-  }).join('');
-  var html = '<div style="color:var(--text-dim);">钩子最后到达　' + rows + '</div>';
+  var html = '';
   (h.warnings || []).forEach(function (w) {
     html += '<div role="alert" style="margin-top:6px;padding:6px 10px;border-radius:8px;color:var(--negative);'
       + 'border:1px solid var(--negative);">⚠ ' + esc(w) + '</div>';
@@ -4768,20 +4836,9 @@ function renderAutorecallHealth(data) {
           + '　[' + esc(e.where || '') + '] ' + esc(e.message || '') + '</div>';
       }).join('') + '</details>';
   }
-  html += '<div style="margin-top:4px;color:var(--text-light);font-size:11px;">觉得没在存？在装 Claude Code 的电脑上运行 '
-    + '<code>python3 ~/.claude/hooks/install.py --check</code>（或重新跑一键安装命令加 <code>--check</code>）。</div>';
+  html += '<div style="margin-top:4px;color:var(--text-light);font-size:11px;">觉得没在存？装钩子的客户端可以自检：重新跑一键安装命令加 '
+    + '<code>--check</code>（Codex / Gemini 再加 <code>--client codex</code> / <code>--client gemini</code>）。</div>';
   box.innerHTML = html;
-}
-
-function autorecallInstallCommand() {
-  var origin = window.location.origin;
-  return 'curl -fsSL ' + origin + '/autorecall/client/install.py | python3 - --url ' + origin;
-}
-
-function copyAutorecallInstall() {
-  var text = autorecallInstallCommand();
-  try { navigator.clipboard.writeText(text); renderAutorecallSetting(null, '已复制安装命令', false); }
-  catch (e) { renderAutorecallSetting(null, '复制失败，请手动选中复制', true); }
 }
 
 function toggleAutorecallSetting(control) {

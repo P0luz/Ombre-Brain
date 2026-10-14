@@ -66,7 +66,7 @@ class Filter:
             return {}
         url = f"{self.valves.ob_url.rstrip('/')}/autorecall/{path}"
         request = urllib.request.Request(
-            url, data=json.dumps(payload, ensure_ascii=False).encode("utf-8"), method="POST",
+            url, data=json.dumps({**payload, "client": "openwebui"}, ensure_ascii=False).encode("utf-8"), method="POST",
             headers={"Content-Type": "application/json", "X-Ombre-Hook-Token": self.valves.hook_token})
         host = urllib.request.urlparse(url).hostname or ""
         opener = _DIRECT.open if host in ("127.0.0.1", "localhost", "::1") else urllib.request.urlopen

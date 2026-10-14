@@ -76,7 +76,7 @@ def test_gemini_before_and_after_agent(tmp_path, ob):
         "prompt_response": "记得，是阿树", "stop_hook_active": False})
     assert _wait(lambda: "stop" in ob.names(), 10)
     stop = [c[1] for c in ob.calls if c[0] == "stop"][0]
-    assert stop["messages"][0]["text"] == "记得，是阿树" and stop["cwd"] == "/w"
+    assert stop["messages"][0]["text"] == "记得，是阿树" and stop["cwd"] == "/w" and stop["client"] == "gemini"
 
 
 def test_codex_turn_id_and_no_transcript_backfill(tmp_path, ob):
@@ -86,7 +86,8 @@ def test_codex_turn_id_and_no_transcript_backfill(tmp_path, ob):
     assert json.loads(out.stdout)["hookSpecificOutput"]["hookEventName"] == "SessionStart"
     _run(hooks_dir, tmp_path, ["--client", "codex", "prompt"], {
         "session_id": "c1", "cwd": "/w", "turn_id": "t7", "prompt": "嗨", "hook_event_name": "UserPromptSubmit"})
-    assert [c for c in ob.calls if c[0] == "prompt"][0][1]["prompt_id"] == "t7"
+    prompt = [c for c in ob.calls if c[0] == "prompt"][0][1]
+    assert prompt["prompt_id"] == "t7" and prompt["client"] == "codex"
     _run(hooks_dir, tmp_path, ["--client", "codex", "stop"], {
         "session_id": "c1", "cwd": "/w", "turn_id": "t7", "last_assistant_message": "你好",
         "stop_hook_active": False})

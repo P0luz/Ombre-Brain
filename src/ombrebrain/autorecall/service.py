@@ -92,6 +92,17 @@ def _bounded(value: Any, default: float, low: float, high: float) -> float:
     return max(low, min(high, number))
 
 
+# 接入自动召回的客户端。请求体里的 client 字段报自己是谁；没报的是 4.0.0 早期的 Claude Code 钩子。
+CLIENTS = ("claude", "codex", "gemini", "antigravity", "gateway", "openwebui", "sdk")
+
+
+def normalize_client(raw: Any) -> str:
+    name = str(raw or "").strip().lower()
+    if not name:
+        return "claude"
+    return name if name in CLIENTS else "sdk"
+
+
 def autorecall_config(config: dict | None) -> dict[str, Any]:
     raw = ((config or {}).get("autorecall") or {}) if isinstance(config, dict) else {}
     words = raw.get("wake_words")
@@ -99,7 +110,10 @@ def autorecall_config(config: dict | None) -> dict[str, Any]:
         words = [w.strip() for w in words.replace("，", ",").split(",")]
     if not isinstance(words, (list, tuple)):
         words = list(DEFAULT_WAKE_WORDS)
+    raw_clients = raw.get("clients") if isinstance(raw.get("clients"), dict) else {}
     return {
+        # 各客户端单独的开关，默认都开；总开关 enabled 关着时全部不生效。
+        "clients": {name: _truthy(raw_clients.get(name, True)) for name in CLIENTS},
         "enabled": _truthy(raw.get("enabled", False)),
         "reminder_every": int(_bounded(raw.get("reminder_every"), 30, 0, 500)),
         "restore_rounds": int(_bounded(raw.get("restore_rounds"), 10, 0, 50)),
@@ -305,6 +319,14 @@ class AutoRecallService:
             except ValueError:
                 return None
 
+        # 按客户端分开的到达时间：键是「客户端/事件」。
+        clients: dict[str, dict[str, str]] = {}
+        for key, at in seen.items():
+            name, sep, event = key.partition("/")
+            if sep:
+                clients.setdefault(name, {})[event] = at
+        seen = {k: v for k, v in seen.items() if "/" not in k}
+
         warnings: list[str] = []
         if self.settings["enabled"]:
             ages = {e: age(e) for e in ("session-start", "prompt", "stop", "session-end")}
@@ -325,7 +347,7 @@ class AutoRecallService:
                     warnings.append("「存回复」在到，但「提问」（UserPromptSubmit）从没到过：原话没存、唤醒召回不会触发。")
             if errors and now - _parse_utc(errors[-1]["at"]) < _ERROR_FRESH:
                 warnings.append(f"最近 24 小时有钩子报错，最新一条：{errors[-1]['message']}")
-        return {"seen": seen, "warnings": warnings, "errors": list(reversed(errors[-5:]))}
+        return {"seen": seen, "clients": clients, "warnings": warnings, "errors": list(reversed(errors[-5:]))}
 
     # ---------------- 钩子 ----------------
 

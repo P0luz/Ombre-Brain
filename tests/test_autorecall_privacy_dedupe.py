@@ -81,5 +81,7 @@ async def test_pre_compact_recorded_separately(monkeypatch, tmp_path):
     svc = AutoRecallService(_Buckets([]), str(tmp_path), {"autorecall": {"enabled": True}})
     await autorecall._note_arrival(svc, "session-end", {"event": "pre-compact"})
     await autorecall._note_arrival(svc, "session-end", {"event": "bogus"})
-    assert set(svc.store.seen()) == {"pre-compact", "session-end"}
-    assert json.dumps(svc.hook_health()["seen"])
+    health = svc.hook_health()
+    assert set(health["seen"]) == {"pre-compact", "session-end"}
+    assert set(health["clients"]["claude"]) == {"pre-compact", "session-end"}
+    assert json.dumps(health["seen"])

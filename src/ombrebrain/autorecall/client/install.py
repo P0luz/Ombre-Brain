@@ -18,7 +18,7 @@
 
 重复运行是安全的（同样的条目只保留一份）。卸载：加 --uninstall。
 其他客户端：加 --client codex（~/.codex/hooks.json，装完要在 Codex 里 /hooks 信任一次）
-或 --client gemini（~/.gemini/settings.json，Gemini / Antigravity CLI）。这两家的配置里没有 env 段，
+或 --client gemini（~/.gemini/settings.json，旧版 Gemini CLI；Antigravity 的 agy 不认这些事件）。这两家的配置里没有 env 段，
 地址和 token 写进钩子旁边的 ob_hook.env（权限 0600）。
 自检：加 --check——按 settings.json 里登记的命令把四个钩子真跑一遍，再去 OB 确认每个都到了。
 Claude Code 升级后、或者觉得「好像没在存」时跑一下。

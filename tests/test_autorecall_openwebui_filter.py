@@ -39,6 +39,7 @@ def test_inlet_injects_and_outlet_stores(setup):
     system = out["messages"][0]["content"]
     assert system.startswith("sys") and "[接续]" in system and "[记忆] 猫叫阿树" in system
     assert ob.calls[0][1]["cwd"] == "open-webui:u1" and ob.calls[0][1]["session_id"] == "owui-c1"
+    assert ob.calls[0][1]["client"] == "openwebui"
 
     async def outlet():
         await f.outlet({"messages": [{"role": "user", "content": "你还记得吗"},

@@ -121,7 +121,7 @@ class OB:
             return {}
         request = urllib.request.Request(
             f"{self.url}/autorecall/{path}",
-            data=json.dumps({**payload, "cwd": self.scope}, ensure_ascii=False).encode("utf-8"),
+            data=json.dumps({**payload, "cwd": self.scope, "client": "gateway"}, ensure_ascii=False).encode("utf-8"),
             headers={"Content-Type": "application/json", "X-Ombre-Hook-Token": self.token},
             method="POST",
         )

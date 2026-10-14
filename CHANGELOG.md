@@ -49,13 +49,16 @@
     - PreCompact 钩子：压缩前把本会话原文补存完整（复用 session-end，幂等）。重跑一键安装即可加上。
   - **与客户端无关的接入协议** `docs/AUTORECALL_PROTOCOL.md`，以及给自制前端用的最小 SDK：`ob_client.py`（标准库）、`ob_client.mjs`（浏览器 / Node 18+），可从 OB 直接下载。
   - **其他客户端**（接法汇总在 `deploy/clients/README.md`）：
-    - Codex CLI / Gemini（Antigravity）CLI：`install.py --client codex|gemini`，挂开窗 / 提问 / 存回复三个钩子；地址和 token 写在钩子旁的 `ob_hook.env`（0600）。
+    - Codex CLI / Gemini CLI（旧版 `gemini` 命令；接替它的 Antigravity `agy` 钩子格式不同，另行适配）：`install.py --client codex|gemini`，挂开窗 / 提问 / 存回复三个钩子；地址和 token 写在钩子旁的 `ob_hook.env`（0600）。
       Codex 装完要在 `/hooks` 里信任一次。本机按官方文档的输入字段跑通了安装、钩子和 `--check`；两家 CLI 本体尚未真机验证。
     - **OpenAI 兼容记忆网关** `ob_gateway.py`（单文件、标准库）：能填 base_url 的聊天软件 / 自制前端指向它即可；流式边转发边拼全文，结束后存；
       API key 原样透传不落盘；监听非本机地址必须设网关密钥。本机用官方 openai SDK（流式 / 非流式）+ 真 OB 实测：唤醒召回、原文入库、换窗接续都通。
     - **Open WebUI Filter** `deploy/openwebui/ob_filter.py`：inlet = 提问，outlet = 存回复；跳过标题 / 标签等后台任务；多用户各自一个作用域。
       本机 Open WebUI v0.12.0（Docker）界面与 API 实测通过；实测中发现并修掉一处 inlet / outlet 会话 id 对不上。
     - SDK `ob_client.py` 连本机 OB 时绕过系统代理（与钩子一致）。
+    - **按客户端分开关与分开体检**：请求带 `client` 字段报自己是谁；Dashboard「接入的客户端」每家一行——开关、各事件最后到达时间、
+      一键安装命令。关掉的那家只记到达、返回 disabled，不存不注入；新配置 `autorecall.clients`（默认全开）。
+      本机面板实测：关掉 Codex 后写进 config.yaml，Codex 的请求不入库，Claude Code 照常。
 
 ### 性能 / Performance
 

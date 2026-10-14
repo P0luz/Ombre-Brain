@@ -210,3 +210,34 @@ def test_install_then_check_passes_and_detects_missing_stop(tmp_path):
         assert bad.returncode == 1 and "存回复 Stop：settings.json 里没挂" in bad.stdout
     finally:
         httpd.shutdown()
+
+
+
+@pytest.mark.asyncio
+async def test_client_switch_blocks_only_that_client(monkeypatch, tmp_path):
+    """面板上关掉某一家：那一家的请求只记到达、返回 disabled，不存不注入；别家照常。"""
+    from ombrebrain.autorecall import normalize_client
+
+    assert normalize_client(None) == "claude" and normalize_client("Codex") == "codex"
+    assert normalize_client("whatever") == "sdk"
+    svc = AutoRecallService(_Buckets(), str(tmp_path), {"autorecall": {"enabled": True, "clients": {"codex": False}}})
+    assert svc.settings["clients"]["codex"] is False and svc.settings["clients"]["claude"] is True
+    routes = _routes(monkeypatch, svc)
+    blocked = await routes[("POST", "/autorecall/prompt")](_Req({"session_id": "s1", "client": "codex", "prompt": "嗨"}))
+    assert json.loads(blocked.body) == {"disabled": True, "client": "codex"}
+    assert not svc.store.session_turns("s1")
+    ok = await routes[("POST", "/autorecall/prompt")](_Req({"session_id": "s2", "prompt": "嗨"}))
+    assert ok.status_code == 200 and "disabled" not in json.loads(ok.body)
+    assert svc.store.session_turns("s2")
+    health = svc.hook_health()
+    assert "prompt" in health["clients"]["codex"] and "prompt" in health["clients"]["claude"]
+    assert not any("/" in key for key in health["seen"])
+
+
+def test_clients_setting_validation_merges(monkeypatch):
+    monkeypatch.setattr(autorecall.sh, "config", {"autorecall": {"clients": {"gemini": False}}}, raising=False)
+    out = autorecall._validate_settings({"clients": {"codex": False}})
+    assert out["clients"]["codex"] is False and out["clients"]["gemini"] is False and out["clients"]["claude"] is True
+    for bad in ({"clients": {"nope": True}}, {"clients": {"codex": "yes"}}, {"clients": []}):
+        with pytest.raises(ValueError):
+            autorecall._validate_settings(bad)

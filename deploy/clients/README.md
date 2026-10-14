@@ -16,7 +16,7 @@
 |---|---|---|
 | Claude Code | `curl -fsSL <OB地址>/autorecall/client/install.py \| python3 - --url <OB地址>` | 开窗、提问、存回复、关窗、压缩前 |
 | Codex CLI | 同上，末尾加 `--client codex` | SessionStart、UserPromptSubmit、Stop |
-| Gemini / Antigravity CLI | 同上，末尾加 `--client gemini` | SessionStart、BeforeAgent、AfterAgent |
+| Gemini CLI（旧版 `gemini` 命令） | 同上，末尾加 `--client gemini` | SessionStart、BeforeAgent、AfterAgent |
 
 - Codex：装完要打开 codex 输入 `/hooks`，把 ob_hook.py 的几条逐个**信任**一次，否则不会执行（Codex 的安全设计，改过的钩子也要重新信任）。
 - Codex / Gemini 的配置里没有 env 段，OB 地址和 token 写在钩子旁边的 `ob_hook.env`（只有自己可读）。
