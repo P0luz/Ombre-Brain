@@ -25,6 +25,8 @@ import zipfile
 from starlette.requests import Request
 from starlette.responses import Response
 
+from ombrebrain.storage.backup_archive import is_internal_vault_path
+
 from . import _shared as sh
 
 logger = sh.logger
@@ -200,7 +202,8 @@ def _should_back_up_before_import(relative_path: str) -> bool:
     """
     normalized = relative_path.replace(os.sep, "/")
     if normalized.endswith(".md"):
-        return True
+        # _app/ 等内部目录导入不会写（is_internal_vault_path，#131 同类），不用备份。
+        return not is_internal_vault_path(normalized)
     if normalized.startswith("_sources/"):
         return True
     # SQLite 的 -wal / -shm 必须跟主库一起备份：只还原主库而丢掉 WAL，

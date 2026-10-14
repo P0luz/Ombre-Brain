@@ -26,6 +26,7 @@ from typing import Any
 
 import httpx
 
+from ombrebrain.storage.backup_archive import is_internal_vault_path
 from ombrebrain.storage.source_store import (
     HARD_MAX_SOURCE_BYTES,
     SOURCE_REF_RE,
@@ -155,7 +156,8 @@ def _is_source_relative_path(relative_path: str) -> bool:
 def _is_backup_relative_path(relative_path: str) -> bool:
     normalized = str(relative_path).replace("\\", "/")
     return (
-        normalized.endswith(".md")
+        # _app/ 等内部目录的 .md 不是记忆：恢复时写回会用备份那一版覆盖运行时文档（#131 同类）
+        (normalized.endswith(".md") and not is_internal_vault_path(normalized))
         or _is_source_relative_path(normalized)
         or normalized in _MODULE_SNAPSHOT_PATHS
     )
@@ -196,7 +198,9 @@ def _iter_backup_paths(root_dir: str) -> Iterator[str]:
                     continue
                 if entry.is_file(follow_symlinks=False):
                     if entry.name.endswith(".md"):
-                        yield entry.path
+                        relative = os.path.relpath(entry.path, root_dir).replace("\\", "/")
+                        if not is_internal_vault_path(relative):
+                            yield entry.path
                     elif entry.name.endswith(".source"):
                         relative = os.path.relpath(entry.path, root_dir).replace("\\", "/")
                         if relative.startswith("_sources/"):

@@ -42,6 +42,7 @@ from .. import _runtime as rt
 from .._common import check_content_size, check_metadata_size
 from ..plan.core import is_letter_bucket
 from errors import safe_error_detail
+from ombrebrain.storage.backup_archive import is_internal_vault_path
 
 _VALID_ASPECTS = {"nature", "values", "patterns", "limits", "becoming", "uncertainty", "stance"}
 
@@ -220,8 +221,12 @@ def _find_same_content(content: str):
     if not want:
         return None
     try:
-        for f in _P(rt.bucket_mgr.base_dir).rglob("*.md"):
+        base = _P(rt.bucket_mgr.base_dir)
+        for f in base.rglob("*.md"):
             if "archive" in f.parts:
+                continue
+            # _app/ 等内部目录不是记忆，每写一条候选都去解析一遍纯属白耗（#131 同类）。
+            if is_internal_vault_path(f.relative_to(base).as_posix()):
                 continue
             try:
                 post = _fm.load(str(f))
