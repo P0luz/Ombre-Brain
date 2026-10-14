@@ -192,13 +192,13 @@
     },
     {
       "path": "src/ombrebrain/autorecall/privacy.py",
-      "sha256": "6655667be0f45d2c11be9c54b8d057d0899c278e991eb99f3f5fe9702b0ef6fd",
-      "size": 1638
+      "sha256": "71636f419acd15de4effd153e09192ea2c31486e36aacd50cf80189b50fe3b11",
+      "size": 2016
     },
     {
       "path": "src/ombrebrain/autorecall/service.py",
-      "sha256": "a1ae008864e0c0e45d7eb6ed37680ebb0a00a24b99987dd07a51bfc49b9c6f56",
-      "size": 26534
+      "sha256": "7d5418041c6bdc645df37b39b9f9d8cf449132dfb46f4177822cb76595925e15",
+      "size": 27310
     },
     {
       "path": "src/ombrebrain/autorecall/transcript_store.py",

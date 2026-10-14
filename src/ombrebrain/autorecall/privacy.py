@@ -1,6 +1,8 @@
 """原文入库前的隐私过滤：原文库存的是全量对话，比摘要式记忆更容易把密钥带进去。
 
 - ``<private>…</private>`` 里的内容整段不入库，换成 ``[private]``（照 claude-mem 的约定）；
+- OB 自己注入的 ``<ombre-brain-context>…</ombre-brain-context>`` 整段剥掉：助手复述了注入内容时，
+  不让它进原文库、下次又被注入回来（防回声，照 claude-mem 剥自家标签的做法）；
 - 常见凭据格式替换成 ``[REDACTED]``：各家 API key、GitHub token、AWS key、JWT、PEM 私钥、
   ``Bearer …``，以及 ``password=…`` / ``api_key: …`` 这类赋值。
 
@@ -13,6 +15,7 @@ from __future__ import annotations
 import re
 
 _PRIVATE = re.compile(r"<private>.*?(?:</private>|$)", re.IGNORECASE | re.DOTALL)
+_OWN_CONTEXT = re.compile(r"<ombre-brain-context>.*?(?:</ombre-brain-context>|$)", re.IGNORECASE | re.DOTALL)
 _PATTERNS = [
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----.*?(?:-----END [A-Z ]*PRIVATE KEY-----|$)", re.DOTALL),
     re.compile(r"\bsk-(?:ant-|proj-)?[A-Za-z0-9_\-]{20,}"),
@@ -29,7 +32,8 @@ _ASSIGNMENT = re.compile(
 
 
 def redact(text: str) -> str:
-    out = _PRIVATE.sub("[private]", str(text or ""))
+    out = _OWN_CONTEXT.sub("", str(text or ""))
+    out = _PRIVATE.sub("[private]", out)
     for pattern in _PATTERNS:
         out = pattern.sub("[REDACTED]", out)
     return _ASSIGNMENT.sub(lambda m: f"{m.group(1)}{m.group(2)}[REDACTED]", out)

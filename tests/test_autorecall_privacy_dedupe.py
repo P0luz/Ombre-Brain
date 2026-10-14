@@ -1,5 +1,6 @@
 """入库隐私过滤、会话内不重复注入、PreCompact 单独记到达。"""
 
+import asyncio
 import json
 
 import pytest
@@ -85,3 +86,23 @@ async def test_pre_compact_recorded_separately(monkeypatch, tmp_path):
     assert set(health["seen"]) == {"pre-compact", "session-end"}
     assert set(health["clients"]["claude"]) == {"pre-compact", "session-end"}
     assert json.dumps(health["seen"])
+
+
+def test_injected_context_is_wrapped_and_never_stored(tmp_path):
+    """防回声：注入内容有闭合标签；助手复述了它，入库前整段剥掉，下次不会被当成原文再注入。"""
+    from ombrebrain.autorecall.privacy import redact
+    from ombrebrain.autorecall.service import CONTEXT_CLOSE, CONTEXT_OPEN, _units, _wrap
+
+    wrapped = _wrap("[Ombre Brain · 接续] 以下是……\n用户：嗨", 9000)
+    assert wrapped.startswith(CONTEXT_OPEN + "\n") and wrapped.endswith("\n" + CONTEXT_CLOSE)
+    assert _wrap("", 9000) == ""
+    assert _units(_wrap("长" * 20000, 9000)) <= 9000  # 标签也算在上限里
+    echo = f"好的。{wrapped}\n我接着说。"
+    assert redact(echo) == "好的。\n我接着说。"
+    assert redact(f"前面{CONTEXT_OPEN}\n复述到一半被截断") == "前面"  # 没有收尾标签也剥到末尾
+
+    svc = AutoRecallService(_Buckets([]), str(tmp_path), {"autorecall": {"enabled": True}})
+    asyncio.run(svc.on_stop("s1", [{"key": "a:1", "role": "assistant", "text": wrapped},
+                                   {"key": "a:2", "role": "assistant", "text": echo}], ""))
+    texts = [t["text"] for t in svc.store.session_turns("s1")]
+    assert texts == ["好的。\n我接着说。"]  # 只剩复述的那条整条没进库
