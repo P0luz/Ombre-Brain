@@ -49,7 +49,7 @@ async def env(bucket_mgr, monkeypatch, tmp_path):
 @pytest.mark.asyncio
 async def test_concurrent_identical_holds_still_make_one_bucket(env):
     manager, mgr = env
-    content = "今天下午和万世聊了很久，说到他一直想做的那件事。"
+    content = "今天下午和阿树聊了很久，说到他一直想做的那件事。"
 
     await asyncio.gather(
         *[manager.get_tool("hold").run({"content": content}) for _ in range(15)]

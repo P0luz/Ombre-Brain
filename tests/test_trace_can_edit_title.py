@@ -149,7 +149,7 @@ async def test_对方锁着的信改不动标题(环境):
         bucket_type="letter",
         lock_type="permanent",
         locked_by="user",
-        writer_name="poluz",
+        writer_name="sam",
     )
 
     with pytest.raises(ToolInputError, match="尚未向你开放"):
@@ -166,7 +166,7 @@ async def test_自己锁的信自己能改标题(环境):
     管理器, _ = 环境
     await letter_write(
         author="ai", content="我自己锁的信。", title="我的信题",
-        lock_type="permanent", ai_name="小影", user_name="poluz",
+        lock_type="permanent", ai_name="小影", user_name="sam",
     )
     信 = next(
         b for b in await 管理器.list_all()

@@ -53,7 +53,7 @@ def _enabled(tmp_path):
         bucket_id = f"memory-{index}"
         manager.buckets[bucket_id] = {
             "id": bucket_id,
-            "content": f"第 {index} 次，Zoey 讲话都是直奔结论。",
+            "content": f"第 {index} 次，Quinn 讲话都是直奔结论。",
             "metadata": {"type": "dynamic"},
         }
     return service
@@ -66,7 +66,7 @@ async def _write(service, **overrides):
         "aspect": "communication_preference",
         "concept_key": "talk_style",
         "concept_value": "blunt",
-        "names": ["Zoey"],
+        "names": ["Quinn"],
     }
     payload.update(overrides)
     return await service.write(**payload)
@@ -194,7 +194,7 @@ async def test_met_myself_stays_private(tmp_path):
 @pytest.mark.asyncio
 async def test_human_registered_person_is_heard_from_user_and_visible(tmp_path):
     service = _enabled(tmp_path)
-    service.add_person(["Iris"])
+    service.add_person(["Robin"])
 
     person = [p for p in service.store.list_persons(service.status().scope)][0]
     assert person.origin == ORIGIN_HUMAN
@@ -211,7 +211,7 @@ async def test_roster_carries_known_via_so_the_dashboard_can_group_by_it(tmp_pat
     """
     service = _enabled(tmp_path)
     await _write(service, known_via=KNOWN_VIA_HEARD_FROM_USER)
-    service.add_person(["Iris"])
+    service.add_person(["Robin"])
 
     roster = {row["names"][0]: row for row in service.list_people()}
 
@@ -220,9 +220,9 @@ async def test_roster_carries_known_via_so_the_dashboard_can_group_by_it(tmp_pat
     # 标了「听你说的」，正文就该出这个接口——那些话本来就是人类说的。
     assert "claims" in 模型登记的
 
-    assert roster["Iris"]["known_via"] == KNOWN_VIA_HEARD_FROM_USER
-    assert roster["Iris"]["origin"] == ORIGIN_HUMAN
-    assert "claims" in roster["Iris"]
+    assert roster["Robin"]["known_via"] == KNOWN_VIA_HEARD_FROM_USER
+    assert roster["Robin"]["origin"] == ORIGIN_HUMAN
+    assert "claims" in roster["Robin"]
 
 
 def _age_receipts(service, claim):

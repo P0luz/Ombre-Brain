@@ -40,7 +40,7 @@ def _enabled(tmp_path):
         bucket_id = f"memory-{index}"
         manager.buckets[bucket_id] = {
             "id": bucket_id,
-            "content": f"第 {index} 次她提到希望被叫做 Lin。",
+            "content": f"第 {index} 次她提到希望被叫做 Nova。",
             "metadata": {"type": "dynamic"},
         }
     return service
@@ -48,11 +48,11 @@ def _enabled(tmp_path):
 
 async def _write(service):
     return await service.write(
-        content="她希望日常被称呼为 Lin",
+        content="她希望日常被称呼为 Nova",
         bucket_ids=["memory-1", "memory-2"],
         aspect="preferred_address",
         concept_key="preferred_address",
-        concept_value="lin",
+        concept_value="nova",
         basis="explicit_statement",
         explicit=True,
         long_term=True,
@@ -87,7 +87,7 @@ async def test_default_recall_carries_no_ids(tmp_path):
 
     output = await service.recall()
 
-    assert "她希望日常被称呼为 Lin" in output
+    assert "她希望日常被称呼为 Nova" in output
     assert claim.id not in output
 
 
@@ -110,7 +110,7 @@ async def test_an_exposed_id_can_actually_be_withdrawn(tmp_path):
     claim_id = output.split("[id=")[1].split("]")[0]
     await service.delete(claim_id)
 
-    assert "她希望日常被称呼为 Lin" not in await service.recall()
+    assert "她希望日常被称呼为 Nova" not in await service.recall()
 
 
 @pytest.mark.asyncio
@@ -120,4 +120,4 @@ async def test_with_ids_still_returns_the_content(tmp_path):
 
     output = await service.recall(with_ids=True)
 
-    assert "她希望日常被称呼为 Lin" in output
+    assert "她希望日常被称呼为 Nova" in output

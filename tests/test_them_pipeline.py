@@ -82,7 +82,7 @@ def _enabled(tmp_path, *, buckets=2, **config):
     for index in range(1, buckets + 1):
         bucket_id = f"memory-{index}"
         manager.buckets[bucket_id] = _bucket(
-            bucket_id, f"第 {index} 次，Zoey 讲话都是直奔结论。"
+            bucket_id, f"第 {index} 次，Quinn 讲话都是直奔结论。"
         )
     return service, manager
 
@@ -94,7 +94,7 @@ def _write(service, **overrides):
         "aspect": "communication_preference",
         "concept_key": "talk_style",
         "concept_value": "blunt",
-        "names": ["Zoey"],
+        "names": ["Quinn"],
     }
     payload.update(overrides)
     return service.write(**payload)
@@ -165,7 +165,7 @@ class TestGates:
         """
         service, _ = _enabled(tmp_path)
         await _write(service)
-        输出 = await service.recall(query="Zoey")
+        输出 = await service.recall(query="Quinn")
         assert "关于**别人**的长期认识" not in 输出  # them 块的块头没出现
         assert '"them"' not in 输出
 
@@ -174,7 +174,7 @@ class TestGates:
         """breath / dream 那条路一个字都不该有：浮现是想起了什么，不是待办。"""
         service, _ = _enabled(tmp_path)
         await _write(service)
-        assert await service.surface(query="Zoey") == ""
+        assert await service.surface(query="Quinn") == ""
 
 
 class TestPendingDigest:
@@ -191,11 +191,11 @@ class TestPendingDigest:
     @pytest.mark.asyncio
     async def test_显式读回时给出欠账与重申用的键(self, tmp_path):
         service, _ = _enabled(tmp_path)
-        输出 = await service.recall(query="Zoey")
+        输出 = await service.recall(query="Quinn")
         assert "还没算数" not in 输出  # 还没写，自然没有欠账
 
         await _write(service)
-        输出 = await service.recall(query="Zoey")
+        输出 = await service.recall(query="Quinn")
         assert "还没算数" in 输出
         assert "talk_style=blunt" in 输出  # 重申要用的两个键
         assert "还差 2 个不同的日子" in 输出
@@ -224,7 +224,7 @@ class TestPendingDigest:
         for _ in range(REQUIRED_CONFIRMATIONS - 1):
             claim = _age_receipts(service, claim)
             claim, _ = await _write(service)
-        输出 = await service.recall(query="Zoey")
+        输出 = await service.recall(query="Quinn")
         assert "还没算数" not in 输出
         assert "直奔结论" in 输出  # 已经作为认识出现了
 
@@ -240,7 +240,7 @@ class TestPendingDigest:
 class TestNameInBucket:
     """poluz 2026-08-20：每个依据桶的正文里都必须出现这个人的名字。
 
-    要论证关于 Zoey 的事，每一条依据都该提到 Zoey——否则「关于这个人的认识」
+    要论证关于 Quinn 的事，每一条依据都该提到 Quinn——否则「关于这个人的认识」
     和「碰巧同时发生的别的事」就没有区别，凑出两个出处也太容易了。
     """
 
@@ -263,20 +263,20 @@ class TestNameInBucket:
     async def test_昵称命中也算(self, tmp_path):
         service, manager = _enabled(tmp_path)
         manager.buckets["memory-2"] = _bucket("memory-2", "小 Z 又一次直接给了结论。")
-        claim, _ = await _write(service, names=["Zoey", "小 Z"])
+        claim, _ = await _write(service, names=["Quinn", "小 Z"])
         assert claim.independent_support_count == 2
 
     @pytest.mark.asyncio
     async def test_大小写不影响命中(self, tmp_path):
         service, manager = _enabled(tmp_path)
-        manager.buckets["memory-2"] = _bucket("memory-2", "ZOEY said it again.")
+        manager.buckets["memory-2"] = _bucket("memory-2", "QUINN said it again.")
         claim, _ = await _write(service)
         assert claim.independent_support_count == 2
 
     @pytest.mark.asyncio
     async def test_双链里的名字也算(self, tmp_path):
         service, manager = _enabled(tmp_path)
-        manager.buckets["memory-2"] = _bucket("memory-2", "和 [[Zoey]] 又聊了一次。")
+        manager.buckets["memory-2"] = _bucket("memory-2", "和 [[Quinn]] 又聊了一次。")
         claim, _ = await _write(service)
         assert claim.independent_support_count == 2
 
@@ -300,14 +300,14 @@ class TestRenameByHuman:
         service, _ = _enabled(tmp_path)
         await TestRecall()._formalized(service)
         scope = service.status().scope
-        person = service.store.find_person_by_name(scope, "Zoey")
-        service.rename_person(person.id, ["Zoey Chen", "小 Z"])
+        person = service.store.find_person_by_name(scope, "Quinn")
+        service.rename_person(person.id, ["Quinn Chen", "小 Z"])
 
-        第一次 = await service.recall(query="Zoey Chen")
+        第一次 = await service.recall(query="Quinn Chen")
         assert "信息变迁" in 第一次
-        assert "Zoey" in 第一次 and "Zoey Chen" in 第一次  # 新旧对照都给
+        assert "Quinn" in 第一次 and "Quinn Chen" in 第一次  # 新旧对照都给
 
-        第二次 = await service.recall(query="Zoey Chen")
+        第二次 = await service.recall(query="Quinn Chen")
         assert "信息变迁" not in 第二次  # 只念一次
 
     @pytest.mark.asyncio
@@ -316,8 +316,8 @@ class TestRenameByHuman:
         service, _ = _enabled(tmp_path)
         await TestRecall()._formalized(service)
         scope = service.status().scope
-        person = service.store.find_person_by_name(scope, "Zoey")
-        service.rename_person(person.id, ["Zoey Chen"])
+        person = service.store.find_person_by_name(scope, "Quinn")
+        service.rename_person(person.id, ["Quinn Chen"])
 
         输出 = await service.recall(query="今天天气不错")
         assert "信息变迁" in 输出
@@ -328,8 +328,8 @@ class TestRenameByHuman:
         service, _ = _enabled(tmp_path)
         await _write(service)
         scope = service.status().scope
-        person = service.store.find_person_by_name(scope, "Zoey")
-        改后 = service.rename_person(person.id, ["Zoey Chen"])
+        person = service.store.find_person_by_name(scope, "Quinn")
+        改后 = service.rename_person(person.id, ["Quinn Chen"])
         assert 改后.activation_count == person.activation_count
         assert 改后.last_active == person.last_active
 
@@ -338,8 +338,8 @@ class TestRenameByHuman:
         service, _ = _enabled(tmp_path)
         claim, _ = await _write(service)
         scope = service.status().scope
-        person = service.store.find_person_by_name(scope, "Zoey")
-        service.rename_person(person.id, ["Zoey Chen"])
+        person = service.store.find_person_by_name(scope, "Quinn")
+        service.rename_person(person.id, ["Quinn Chen"])
         after = service.store.get_claim(scope, claim.id)
         assert after.content == claim.content
 
@@ -357,14 +357,14 @@ class TestRenameByHuman:
         scope = service.status().scope
         阿哲 = service.store.find_person_by_name(scope, "阿哲")
         with pytest.raises(ValueError, match="已经用了其中一个称呼"):
-            service.rename_person(阿哲.id, ["Zoey"])
+            service.rename_person(阿哲.id, ["Quinn"])
 
     @pytest.mark.asyncio
     async def test_不能把称呼清空(self, tmp_path):
         service, _ = _enabled(tmp_path)
         await _write(service)
         scope = service.status().scope
-        person = service.store.find_person_by_name(scope, "Zoey")
+        person = service.store.find_person_by_name(scope, "Quinn")
         with pytest.raises(ValueError, match="至少要留一个称呼"):
             service.rename_person(person.id, [])
 
@@ -427,26 +427,26 @@ class TestPersons:
     @pytest.mark.asyncio
     async def test_昵称命中同一个人(self, tmp_path):
         service, _ = _enabled(tmp_path)
-        claim, _ = await _write(service, names=["Zoey", "小 Z"])
+        claim, _ = await _write(service, names=["Quinn", "小 Z"])
         again, _ = await _write(service, names=["小 Z"])
         assert again.person_id == claim.person_id
 
     @pytest.mark.asyncio
     async def test_新称呼会并进已有的人(self, tmp_path):
         service, _ = _enabled(tmp_path)
-        await _write(service, names=["Zoey"])
-        await _write(service, names=["Zoey", "阿 Z"])
+        await _write(service, names=["Quinn"])
+        await _write(service, names=["Quinn", "阿 Z"])
         scope = service.status().scope
         person = service.store.find_person_by_name(scope, "阿 Z")
         assert person is not None
-        assert set(person.names) == {"Zoey", "阿 Z"}
+        assert set(person.names) == {"Quinn", "阿 Z"}
 
     @pytest.mark.asyncio
     async def test_跨类同名不自动合并(self, tmp_path):
         """「听别人描述一个人」和「自己认识一个人」是两码事。
 
-        人类登记的那个「Zoey」模型一次都没见过，关于她的一切都是转述；
-        模型在别处遇到的「Zoey」是第一手的。按名字字符串把两者并成一个人，
+        人类登记的那个「Quinn」模型一次都没见过，关于她的一切都是转述；
+        模型在别处遇到的「Quinn」是第一手的。按名字字符串把两者并成一个人，
         就是在制造张冠李戴——而且并完之后来源标记还是「听你说的」，
         人类看到会以为那是自己说过的话。
 
@@ -454,7 +454,7 @@ class TestPersons:
         两个人合成了一个。
         """
         service, _ = _enabled(tmp_path)
-        service.add_person(["Zoey"])          # 人类说起过的那个
+        service.add_person(["Quinn"])          # 人类说起过的那个
         with pytest.raises(ValueError, match="同一个人吗"):
             await _write(service)             # 模型自己遇到的那个
 
@@ -466,7 +466,7 @@ class TestPersons:
         自己遇到的人，后面那个人类登记的同名者根本走不到那道闸，会被静默
         并进前者。真机复现出来的名册是：
 
-            model  ['Zoey', '张三']    ← 人类登记的「张三」被并了进来
+            model  ['Quinn', '张三']    ← 人类登记的「张三」被并了进来
             human  ['张三']
 
         两个人共用一个称呼，之后按名字解析命中谁取决于返回顺序——
@@ -474,11 +474,11 @@ class TestPersons:
         """
         service, _ = _enabled(tmp_path)
         人 = service.add_person(["张三"])
-        await _write(service, names=["Zoey"])
+        await _write(service, names=["Quinn"])
         with pytest.raises(ValueError, match="同一个人吗"):
-            await _write(service, names=["Zoey", "张三"])
+            await _write(service, names=["Quinn", "张三"])
         名册 = {p["origin"]: p["names"] for p in service.list_people()}
-        assert 名册["model"] == ["Zoey"], "模型那个人不该被塞进别人的称呼"
+        assert 名册["model"] == ["Quinn"], "模型那个人不该被塞进别人的称呼"
         assert 名册["human"] == ["张三"]
         assert 人.id == [
             p["person_id"] for p in service.list_people() if p["origin"] == "human"
@@ -526,18 +526,18 @@ class TestPersons:
         真要合并，带 person_id 明说。
         """
         service, _ = _enabled(tmp_path)
-        第一个, _ = await _write(service, names=["Zoey"])
+        第一个, _ = await _write(service, names=["Quinn"])
         service.store.put_person(
             service.status().scope, Person.new(["老陈"])
         )
         with pytest.raises(ValueError, match="两个已经存在的人|同一个人吗"):
-            await _write(service, names=["Zoey", "老陈"])
+            await _write(service, names=["Quinn", "老陈"])
 
     @pytest.mark.asyncio
     async def test_认下来就带person_id写(self, tmp_path):
         """挡下来不是不让写，是让模型自己判断。认，就带 id 再来一次。"""
         service, _ = _enabled(tmp_path)
-        人 = service.add_person(["Zoey"])
+        人 = service.add_person(["Quinn"])
         claim, _ = await _write(service, names=[], person_id=人.id)
         assert claim.person_id == 人.id
 
@@ -545,8 +545,8 @@ class TestPersons:
     async def test_同为它自己遇到的人照常并称呼(self, tmp_path):
         """这一档没有混淆风险：两次都是第一手的印象。"""
         service, _ = _enabled(tmp_path)
-        first, _ = await _write(service, names=["Zoey"])
-        again, _ = await _write(service, names=["Zoey", "小 Z"])
+        first, _ = await _write(service, names=["Quinn"])
+        again, _ = await _write(service, names=["Quinn", "小 Z"])
         assert again.person_id == first.person_id
 
     @pytest.mark.asyncio
@@ -568,26 +568,26 @@ class TestRecall:
     async def test_生效之后按姓名读得回(self, tmp_path):
         service, _ = _enabled(tmp_path)
         await self._formalized(service)
-        output = await service.recall(query="今天和 Zoey 聊了聊")
+        output = await service.recall(query="今天和 Quinn 聊了聊")
         assert "直奔结论" in output
-        assert "Zoey" in output
+        assert "Quinn" in output
 
     @pytest.mark.asyncio
     async def test_读回是一条JSON并写明不是用户(self, tmp_path):
         service, _ = _enabled(tmp_path)
         await self._formalized(service)
-        output = await service.recall(query="Zoey")
+        output = await service.recall(query="Quinn")
         assert output.count("```json") == 1
         assert "不是用户本人的信息" in output
         payload = json.loads(output.split("```json")[1].split("```")[0])
-        assert payload["them"][0]["person"] == "Zoey"
+        assert payload["them"][0]["person"] == "Quinn"
 
     @pytest.mark.asyncio
     async def test_自己遇到的人标成第一手(self, tmp_path):
         service, _ = _enabled(tmp_path)
         await self._formalized(service)
         payload = json.loads(
-            (await service.recall(query="Zoey")).split("```json")[1].split("```")[0]
+            (await service.recall(query="Quinn")).split("```json")[1].split("```")[0]
         )
         assert payload["them"][0]["known_via"] == "met_myself"
 
@@ -600,13 +600,13 @@ class TestRecall:
         而后者本该带着一层「可能记岔、也可能是另一个同名的人」的不确定。
         """
         service, _ = _enabled(tmp_path)
-        人 = service.add_person(["Zoey"])
+        人 = service.add_person(["Quinn"])
         claim, _ = await _write(service, names=[], person_id=人.id)
         for _ in range(REQUIRED_CONFIRMATIONS - 1):
             _age_receipts(service, claim)
             claim, _ = await _write(service, names=[], person_id=人.id)
         payload = json.loads(
-            (await service.recall(query="Zoey")).split("```json")[1].split("```")[0]
+            (await service.recall(query="Quinn")).split("```json")[1].split("```")[0]
         )
         assert payload["them"][0]["known_via"] == "heard_from_user"
         assert "never met" in payload["known_via_note"]
@@ -622,9 +622,9 @@ class TestRecall:
         service, _ = _enabled(tmp_path)
         await self._formalized(service)
         scope = service.status().scope
-        before = service.store.find_person_by_name(scope, "Zoey").activation_count
-        await service.recall(query="Zoey")
-        after = service.store.find_person_by_name(scope, "Zoey").activation_count
+        before = service.store.find_person_by_name(scope, "Quinn").activation_count
+        await service.recall(query="Quinn")
+        after = service.store.find_person_by_name(scope, "Quinn").activation_count
         assert after == before + 1
 
 
@@ -663,7 +663,7 @@ class TestSurface:
         await TestRecall()._formalized(service)
         state = service.status()
         service.set_enabled(False, expected_revision=state.state_revision)
-        assert await service.surface(query="Zoey") == ""
+        assert await service.surface(query="Quinn") == ""
 
 
 class TestQuota:
@@ -783,11 +783,11 @@ class TestDelete:
         """
         service, manager = _enabled(tmp_path)
         claim = await TestRecall()._formalized(service)
-        assert "直奔结论" in await service.recall(query="Zoey")
+        assert "直奔结论" in await service.recall(query="Quinn")
 
         del manager.buckets["memory-1"]  # 依据塌到只剩一个
 
-        assert await service.recall(query="Zoey") == ""
+        assert await service.recall(query="Quinn") == ""
         after = service.store.get_claim(service.status().scope, claim.id)
         assert after.lifecycle == "expired"
 
@@ -803,7 +803,7 @@ class TestDelete:
                 service, bucket_ids=["memory-1", "memory-2", "memory-3"]
             )
         del manager.buckets["memory-1"]  # 还剩两个，仍然过门槛
-        assert "直奔结论" in await service.recall(query="Zoey")
+        assert "直奔结论" in await service.recall(query="Quinn")
 
     @pytest.mark.asyncio
     async def test_软删除的桶不再撑得住(self, tmp_path):
@@ -811,7 +811,7 @@ class TestDelete:
         service, manager = _enabled(tmp_path)
         await TestRecall()._formalized(service)
         manager.buckets["memory-1"] = None  # get() 对软删除桶就是返回 None
-        assert await service.recall(query="Zoey") == ""
+        assert await service.recall(query="Quinn") == ""
 
     @pytest.mark.asyncio
     async def test_归档的桶仍然撑得住(self, tmp_path):
@@ -826,7 +826,7 @@ class TestDelete:
         归档了 = dict(manager.buckets["memory-1"])
         归档了["metadata"] = {**归档了["metadata"], "type": "archived"}
         manager.buckets["memory-1"] = 归档了
-        assert "结论" in await service.recall(query="Zoey")
+        assert "结论" in await service.recall(query="Quinn")
 
     @pytest.mark.asyncio
     async def test_归档但带删除墓碑的按删除处理(self, tmp_path):
@@ -834,7 +834,7 @@ class TestDelete:
         service, manager = _enabled(tmp_path)
         await TestRecall()._formalized(service)
         manager.buckets["memory-1"] = None  # get() 对带墓碑的桶就是返回 None
-        assert await service.recall(query="Zoey") == ""
+        assert await service.recall(query="Quinn") == ""
 
     @pytest.mark.asyncio
     async def test_读桶抖动不会误杀(self, tmp_path):
@@ -846,7 +846,7 @@ class TestDelete:
             raise OSError("disk hiccup")
 
         manager.get = 炸
-        assert "直奔结论" in await service.recall(query="Zoey")
+        assert "直奔结论" in await service.recall(query="Quinn")
 
 
 class TestDisabled:
@@ -854,7 +854,7 @@ class TestDisabled:
     async def test_关闭时读写都不通(self, tmp_path):
         service, _ = _service(tmp_path)
         with pytest.raises(ThemStoreError):
-            await service.recall(query="Zoey")
+            await service.recall(query="Quinn")
         with pytest.raises(ThemStoreError):
             await _write(service)
 

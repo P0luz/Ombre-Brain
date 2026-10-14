@@ -199,7 +199,7 @@ class TestPeopleRoutes:
     async def _person(self, service, tmp_path):
         service.set_enabled(True)
         scope = service.status().scope
-        return service.store.put_person(scope, Person.new(["Zoey", "小 Z"]))
+        return service.store.put_person(scope, Person.new(["Quinn", "小 Z"]))
 
     @pytest.mark.asyncio
     async def test_名册只给称呼(self, tmp_path, monkeypatch):
@@ -209,7 +209,7 @@ class TestPeopleRoutes:
         people = json.loads(resp.body)["people"]
         assert len(people) == 1
         assert people[0]["person_id"] == person.id
-        assert people[0]["names"] == ["Zoey", "小 Z"]
+        assert people[0]["names"] == ["Quinn", "小 Z"]
         assert people[0]["origin"] == "model"
         # 模型自己认识的人：名册里不带任何一条认识
         assert "claims" not in people[0]
@@ -221,10 +221,10 @@ class TestPeopleRoutes:
         post = route_mcp.routes[("POST", "/api/them/people")]
 
         ok = await post(JsonRequest({
-            "person_id": person.id, "names": ["Zoey Chen"], "revision": person.revision
+            "person_id": person.id, "names": ["Quinn Chen"], "revision": person.revision
         }))
         assert ok.status_code == 200
-        assert json.loads(ok.body)["names"] == ["Zoey Chen"]
+        assert json.loads(ok.body)["names"] == ["Quinn Chen"]
 
         stale = await post(JsonRequest({
             "person_id": person.id, "names": ["别的"], "revision": person.revision
@@ -238,7 +238,7 @@ class TestPeopleRoutes:
         state = service.status()
         service.set_enabled(False, expected_revision=state.state_revision)
         resp = await route_mcp.routes[("POST", "/api/them/people")](JsonRequest({
-            "person_id": person.id, "names": ["Zoey Chen"], "revision": person.revision
+            "person_id": person.id, "names": ["Quinn Chen"], "revision": person.revision
         }))
         assert resp.status_code == 503
         名册 = await route_mcp.routes[("GET", "/api/them/people")](JsonRequest())

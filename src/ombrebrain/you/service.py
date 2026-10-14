@@ -643,7 +643,7 @@ class YouService:
             正文条数 += 1
         # 按正文条数判空：with_ids 时头部本身就是两行，不能拿行数判断。
         正文 = "\n".join(lines) if 正文条数 else ""
-        # 带了 query 就不附欠账。`recall(query="Lin")` 问的是「我对 Lin 了解
+        # 带了 query 就不附欠账。`recall(query="Nova")` 问的是「我对 Nova 了解
         # 什么」，拿一条还没算数的候选去回答它，正是三日门槛要防的事——标了
         # 「还没算数」也不行，那是答非所问。
         #

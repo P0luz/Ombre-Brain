@@ -22,8 +22,8 @@ def _scope():
 
 _COMMON = dict(
     concept_key="preferred_address",
-    concept_value="Lin",
-    content="他喜欢被叫 Lin。",
+    concept_value="Nova",
+    content="他喜欢被叫 Nova。",
     aspect="preferred_address",
     evidence=(),
 )

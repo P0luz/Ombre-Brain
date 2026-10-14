@@ -678,7 +678,7 @@ delete_id="", max_results=12)`，实现位于 `src/tools/them/core.py:15` 与 `o
 
 **读回是一条 JSON**（`_render`），每个人带 `known_via`（`met_myself` / `heard_from_user`）
 与 `notes`，外加 `attribution_note` / `known_via_note`。用 JSON 而不是散文，是因为这些话说的
-全是**别人**：混在自然语言里返回，容易幻觉的模型会把「Zoey 说话很直接」重述成用户的属性。
+全是**别人**：混在自然语言里返回，容易幻觉的模型会把「Quinn 说话很直接」重述成用户的属性。
 
 **只记这个人本身，不描述任何关系**（`safety.describes_relationship`）。主判据是**人称**
 （`safety.py:58`）：一句只讲这个人的话不需要提到「我」，一旦出现第一人称，主语就不再只是他了。

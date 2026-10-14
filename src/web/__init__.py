@@ -33,6 +33,7 @@ from . import config_api
 from . import onboarding
 from . import them
 from . import you
+from . import autorecall
 
 
 _WEB_MODULES = (
@@ -55,6 +56,7 @@ _WEB_MODULES = (
     ("web.onboarding", onboarding.register),
     ("web.them", them.register),
     ("web.you", you.register),
+    ("web.autorecall", autorecall.register),
 )
 
 

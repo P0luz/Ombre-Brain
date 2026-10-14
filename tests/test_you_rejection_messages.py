@@ -45,18 +45,18 @@ def _enabled(tmp_path):
     for index in (1, 2):
         bucket_id = f"memory-{index}"
         manager.buckets[bucket_id] = _bucket(
-            bucket_id, f"第 {index} 次她提到希望被叫做 Lin。"
+            bucket_id, f"第 {index} 次她提到希望被叫做 Nova。"
         )
     return service
 
 
 async def _write(service, **overrides):
     payload = {
-        "content": "她希望日常被称呼为 Lin",
+        "content": "她希望日常被称呼为 Nova",
         "bucket_ids": ["memory-1", "memory-2"],
         "aspect": "preferred_address",
         "concept_key": "preferred_address",
-        "concept_value": "lin",
+        "concept_value": "nova",
         "basis": "explicit_statement",
         "explicit": True,
         "long_term": True,

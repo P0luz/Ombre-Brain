@@ -33,6 +33,7 @@ import sys
 import logging
 import asyncio
 import time
+from datetime import datetime
 from contextlib import asynccontextmanager
 from typing import Annotated, Optional, Awaitable
 import httpx
@@ -54,11 +55,12 @@ from ombrebrain.storage.embedding_outbox import EmbeddingOutbox
 from ombrebrain.storage.source_store import SourceStore
 from ombrebrain.them import ThemService, ThemStore, ThemToolGate
 from ombrebrain.you import YouService, YouStore, YouToolGate
+from ombrebrain.autorecall import AutoRecallService
 from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
 from ombrebrain.protocol.strict_schema import harden_registered_tools
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
-from utils import get_version, load_config, setup_logging
+from utils import get_tzinfo, get_version, load_config, setup_logging
 
 # --- iter 2.1：MCP 工具实现已按代码路径拆分到 tools/ 子包 ---
 # 本文件只保留 MCP 注册 + 路由（HTTP custom_route）+ 共享辅助。
@@ -258,6 +260,15 @@ them_service = ThemService(
     source_store=source_store,
     config=config,
     logger=logger,
+)
+# Claude Code 自动召回（默认关）。引擎和 dream 都按调用时取，跟得上热替换。
+autorecall_service = AutoRecallService(
+    bucket_mgr,
+    config.get("buckets_dir", "buckets"),
+    config,
+    embedding_engine=lambda: _wsh.embedding_engine,
+    dream_fn=lambda: _t_dream.dispatch(),
+    today_fn=lambda: datetime.now(get_tzinfo()).date().isoformat(),
 )
 # 认识由模型显式写入，没有后台抽取，也就没有可观察的桶变动事件。
 # bucket_mgr 那套 observer 机制已在 3.5.0 删除：3.4.x 拆掉自动派生流水线时
@@ -504,6 +515,7 @@ _wsh.init_runtime(
     github_sync_instance=github_sync_instance,
     you_service=you_service,
     them_service=them_service,
+    autorecall_service=autorecall_service,
     restart_github_auto_task=_restart_github_auto_task,
 )
 # 启动时把磁盘上的会话装回内存（容器重启不踢登录）。鉴权/会话逻辑全在 web/_shared.py，

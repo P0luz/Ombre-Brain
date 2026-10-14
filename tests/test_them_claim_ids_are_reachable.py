@@ -48,7 +48,7 @@ def _enabled(tmp_path):
         bucket_id = f"memory-{index}"
         manager.buckets[bucket_id] = {
             "id": bucket_id,
-            "content": f"第 {index} 次，Zoey 讲话都是直奔结论。",
+            "content": f"第 {index} 次，Quinn 讲话都是直奔结论。",
             "metadata": {"type": "dynamic"},
         }
     return service
@@ -61,7 +61,7 @@ async def _write(service, **overrides):
         "aspect": "communication_preference",
         "concept_key": "talk_style",
         "concept_value": "blunt",
-        "names": ["Zoey"],
+        "names": ["Quinn"],
     }
     payload.update(overrides)
     return await service.write(**payload)

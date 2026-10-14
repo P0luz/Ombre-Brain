@@ -37,6 +37,11 @@ from ombrebrain.them import (
     validate_them_snapshot_bytes,
     validate_them_snapshot_file,
 )
+from ombrebrain.autorecall.transcript_store import (
+    TranscriptStoreError,
+    validate_transcript_snapshot_bytes,
+    validate_transcript_snapshot_file,
+)
 
 
 MANIFEST_NAME = "backup_manifest.json"
@@ -62,6 +67,8 @@ MIGRATE_MAX_SOURCE_BYTES = HARD_MAX_SOURCE_BYTES
 MIGRATE_MAX_EXPORT_META_BYTES = 1 * MIB
 MIGRATE_MAX_EMBEDDINGS_DB_BYTES = 512 * MIB
 MIGRATE_MAX_YOU_DB_BYTES = 128 * MIB
+# Claude Code 自动召回的原文库：逐轮原文会比 you/them 大得多。
+MIGRATE_MAX_AUTORECALL_DB_BYTES = 256 * MIB
 # them 与 you 同一档上限：两边存的是同构的东西，没有理由给一个更宽的口子。
 MIGRATE_MAX_THEM_DB_BYTES = 128 * MIB
 MIGRATE_MIN_FREE_RESERVE_BYTES = 64 * MIB
@@ -101,6 +108,8 @@ def _migration_member_limit(path: str) -> int:
         return MIGRATE_MAX_YOU_DB_BYTES
     if path == "them/them.sqlite3":
         return MIGRATE_MAX_THEM_DB_BYTES
+    if path == "autorecall/transcript.sqlite3":
+        return MIGRATE_MAX_AUTORECALL_DB_BYTES
     if path == "export_meta.json":
         return MIGRATE_MAX_EXPORT_META_BYTES
     parts = PurePosixPath(path).parts
@@ -358,6 +367,8 @@ def build_export_archive(
          validate_you_snapshot_bytes, YouStoreError, "You"),
         ("them/them.sqlite3", ".them", MIGRATE_MAX_THEM_DB_BYTES,
          validate_them_snapshot_bytes, ThemStoreError, "them"),
+        ("autorecall/transcript.sqlite3", ".autorecall", MIGRATE_MAX_AUTORECALL_DB_BYTES,
+         validate_transcript_snapshot_bytes, TranscriptStoreError, "自动召回原文库"),
     ):
         db_path = Path(buckets_dir).resolve() / 目录名 / 相对名.split("/", 1)[1]
         module_bytes = snapshot_sqlite(
@@ -474,6 +485,10 @@ def build_export_archive_file(
     os.close(you_snapshot_fd)
     them_snapshot_fd, them_snapshot_path = tempfile.mkstemp(prefix="ombre-them-", suffix=".db")
     os.close(them_snapshot_fd)
+    autorecall_snapshot_fd, autorecall_snapshot_path = tempfile.mkstemp(
+        prefix="ombre-autorecall-", suffix=".db"
+    )
+    os.close(autorecall_snapshot_fd)
     entries: list[dict[str, Any]] = []
     total_uncompressed = 0
 
@@ -546,6 +561,9 @@ def build_export_archive_file(
                 ("them/them.sqlite3", ".them", them_snapshot_path,
                  MIGRATE_MAX_THEM_DB_BYTES, validate_them_snapshot_file,
                  ThemStoreError, "them"),
+                ("autorecall/transcript.sqlite3", ".autorecall", autorecall_snapshot_path,
+                 MIGRATE_MAX_AUTORECALL_DB_BYTES, validate_transcript_snapshot_file,
+                 TranscriptStoreError, "自动召回原文库"),
             ):
                 db_path = base / 目录名 / 相对名.split("/", 1)[1]
                 if not _snapshot_sqlite_to_file(
@@ -613,7 +631,7 @@ def build_export_archive_file(
             os.unlink(snapshot_path)
         except OSError:
             pass
-        for 暂存 in (you_snapshot_path, them_snapshot_path):
+        for 暂存 in (you_snapshot_path, them_snapshot_path, autorecall_snapshot_path):
             try:
                 os.unlink(暂存)
             except OSError:

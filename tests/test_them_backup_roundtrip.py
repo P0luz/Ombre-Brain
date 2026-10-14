@@ -24,7 +24,7 @@ def _them_with_data(vault):
     store = ThemStore(vault)
     store.set_enabled(True)
     scope = store.get_state().scope
-    store.put_person(scope, Person.new(["Zoey", "小 Z"]))
+    store.put_person(scope, Person.new(["Quinn", "小 Z"]))
     return store
 
 
@@ -71,7 +71,7 @@ class TestArchive:
         vault.mkdir()
         (vault / "dynamic").mkdir()
         (vault / "dynamic" / "m1.md").write_text(
-            "---\nid: m1\ntype: dynamic\n---\n和 Zoey 开会。\n", encoding="utf-8"
+            "---\nid: m1\ntype: dynamic\n---\n和 Quinn 开会。\n", encoding="utf-8"
         )
         _them_with_data(vault)
 
@@ -126,7 +126,7 @@ class TestInMemoryArchive:
         vault.mkdir()
         (vault / "dynamic").mkdir()
         (vault / "dynamic" / "m1.md").write_text(
-            "---\nid: m1\ntype: dynamic\n---\n和 Zoey 开会。\n", encoding="utf-8"
+            "---\nid: m1\ntype: dynamic\n---\n和 Quinn 开会。\n", encoding="utf-8"
         )
         _them_with_data(vault)
         blob, _meta = build_export_archive(

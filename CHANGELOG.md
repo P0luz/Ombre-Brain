@@ -2,6 +2,31 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 4.0.0
+
+> testing 分支。主版本 +1：新增 Claude Code 自动召回整条链路（新的 HTTP 端点、新的模块库、备份格式多一个成员）。
+> 新功能默认关，旧配置不用改；旧备份照常可导入。
+
+### 新增 / Added
+
+- **Claude Code 自动召回**（默认关，Dashboard「设置 → 自动召回」开关；钩子脚本与安装说明见 `deploy/claude-code-hooks/`）：
+  - 开新窗口 / `/clear` / 压缩后：注入上一段对话最后 10 轮原文；当天第一次开窗附一次 dream（一天一次，dream 的见证按不同日期算，不会多刷）。
+  - 每句话：存下原文；每满 30 轮提醒正在聊天的模型考虑用 hold 存档（只提醒，不自动抽取）；
+    说到回忆语气词（记得 / 上次 / 之前 / 来着…）或库里的 `[[名字]]` 时，注入最相关的一条记忆。
+  - 召回 = 字面（中文两字切词 BM25）与向量的 RRF 融合；**反向门**：两路前 2 名里有同一条才注入，否则不注入、交给模型自己 breath_search。
+    比的是名次不是原始分数，不受句长影响。离线评测：带回忆语气的问句 Hit@1 0.938；长度对齐的「需要 / 不需要记忆」各 60 余句上，需要的放行 90%、不需要的误放 10%。
+  - 原文存在 `<buckets_dir>/.autorecall/transcript.sqlite3`，原文与本会话新写的桶按相似度自动连线（分数照存，不设门槛）；随 ZIP 备份导出、导入时结构校验。
+  - 独立通道，不进 breath_search 的融合打分，不改任何普通记忆的召回分数。
+  - 新端点：`/autorecall/{session-start,prompt,stop,session-end}`（hook token 或 Dashboard 登录态，独立限流）；`/api/settings/autorecall`（面板读写，先写盘再生效）。
+  - 新配置段 `autorecall`（见 config.example.yaml）。
+- `surfacing.you_max_results`（默认 6，1～50）/ `surfacing.you_max_tokens`（默认 0 = 不限，0～40000，#124）：You 读回的
+  条数和 token 预算由用户在 Dashboard「设置」里定，热更新；模型传的 max_results 只能更少。写入允许一条认识长达 500 字，
+  原先写死的 160 token 连一条正常长度的中文认识都装不下。设了预算时，放不下的那条跳过、后面放得下的照常返回。
+
+### 变更 / Changed
+
+- 代码、测试、提示词里的示例人名一律换成虚构名字（Quinn / Nova / 阿树 / Mochi 等）；`attribution` 不再把某个具体网名硬编码成「指代用户」，需要的话写进 `attribution.user_names`。
+
 ## 3.8.0
 
 > testing 分支，待主负责人审核后合入 main。处理上游 open issue 的一批修复，另移植 PR #130（作者 Iris3971）和 PR #125 里的两处加固（作者陈阳）。新增的配置项都默认关或保持原值，旧配置不用改。
@@ -15,7 +40,7 @@
   anchor / release / hold / plan / letter_lock_update 的 11 个 id 参数现在把整数收成字符串，对外 schema 仍是 string。
 - **越界 importance 被静默处理**（#128 #129）：hold 照旧修正到 1～10，但补发 OB-W001；trace 收到越界值改为报错，不再静默丢弃。
 - **You 读回整段为空**（#124）：排在前面的一条认识超出预算时只跳过它，不再连带丢掉后面放得下的；没有正文时不再返回两行
-  空头部。token 预算改为默认不限、面板可设（见「新增」）。
+  空头部。160 token 上限不变。
 - **保存被启动环境变量接管的配置时显示干净的成功**（#122）：保存压缩 / 向量化配置时，如果字段（含旧名 `OMBRE_API_KEY`、
   `OMBRE_BASE_URL`、`OMBRE_COMPRESS_API_FORMAT`）来自启动环境变量，返回里加一条警告：重启或重建容器后会被覆盖。只列变量名，
   不改保存结果和状态码。
@@ -42,9 +67,6 @@
   structuredContent 副本，也不声明 outputSchema；把整个响应存进对话历史的客户端能少一半体量。改完要重启服务、客户端重连。
 - `embedding.abandon_after_failures`（默认 0 = 永不放弃，#117）：一条向量在别的向量都能成功、只有它反复失败够 N 次时停止
   重试；原文和队列条目都保留，错误面板 / pulse / Dashboard 显示已放弃数；改内容、补齐缺失向量或换引擎后重新尝试。
-- `surfacing.you_max_results`（默认 6，1～50）/ `surfacing.you_max_tokens`（默认 0 = 不限，0～40000，#124）：You 读回的
-  条数和 token 预算由用户在 Dashboard「设置」里定，热更新；模型传的 max_results 只能更少。写入允许一条认识长达 500 字，
-  原先写死的 160 token 连一条正常长度的中文认识都装不下。设了预算时，放不下的那条跳过、后面放得下的照常返回。
 
 ### 测试 / Tests
 
@@ -124,7 +146,7 @@
   - 现在裸读 `You()` 会列出还在攒的候选，带齐重申需要的全部东西：
     `concept_key=concept_value`、aspect、正文、**bucket_ids**、`id`、
     还差几个不同的日子。任何一个窗口拿到就能接力。
-  - **带 query 的读回不附欠账**：`recall(query="Lin")` 问的是「我对 Lin 了解
+  - **带 query 的读回不附欠账**：`recall(query="Nova")` 问的是「我对 Nova 了解
     什么」，拿还没算数的候选去回答是答非所问。被动浮现同样拿不到——欠账是
     待办，浮现是「想起了什么」。
   - them 的清单一并补上了 `bucket_ids`。
@@ -589,7 +611,7 @@ B 认知链、C 候选滞留可见性。**A 没有采纳**，理由写在下面�
 
 - **`them` 的「每条依据都要指明是谁」现在也认标题与桶名。**
   - 规则原话是「一条依据自己都指不明白是谁，就不该拿来撑一条关于谁的判断」，
-    而实现只翻了正文。一篇标题写着「和 Zoey 的晚饭」、正文用「她」承接的日记
+    而实现只翻了正文。一篇标题写着「和 Quinn 的晚饭」、正文用「她」承接的日记
     ——它指明了，却被拒在门外，而那不是这条规则要挡的东西。
   - **门槛一点没降**：仍然是「每个桶都要指明」而不是「至少一个」，
     poluz 2026-08-20 定的那条边界一个字未动。
@@ -2386,7 +2408,7 @@ B 认知链、C 候选滞留可见性。**A 没有采纳**，理由写在下面�
 
 ### 变更 / Changed —— Dashboard 面板重设计（纯前端，不动数据结构）
 
-信息架构与文案按「面板只回答好不好、婷易的妈妈能看懂」原则整体重做，均集中在 `frontend/dashboard.html`：
+信息架构与文案按「面板只回答好不好、不写代码的家人也能看懂」原则整体重做，均集中在 `frontend/dashboard.html`：
 
 - **诊断 `[object Object]` 泄露修复**：`renderDiagnosticCheck` 面板主体只留 状态灯 + 一句人话 + 建议，原始 details（schema 名 / 字段路径 / 嵌套 JSON）一律折叠进「查看详情」；`esc()` 加对象兜底，任何调用点都不再吐 `[object Object]`。
 - **顶栏常驻系统状态条**：全绿收成一行「系统正常 · OK」；有问题才展开「需处理」卡片，按钮 `scrollToField()` 直达对应设置字段并高亮。

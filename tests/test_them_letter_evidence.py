@@ -63,15 +63,15 @@ async def _write(service, buckets=("memory-1", "memory-2")):
         aspect="communication_preference",
         concept_key="talk_style",
         concept_value="blunt",
-        names=["Zoey"],
+        names=["Quinn"],
     )
 
 
 @pytest.mark.asyncio
 async def test_an_open_letter_can_back_a_claim(tmp_path):
     service, manager = _enabled(tmp_path)
-    manager.buckets["memory-1"] = _letter("memory-1", "今天和 Zoey 吃饭，她说话很直。")
-    manager.buckets["memory-2"] = _letter("memory-2", "Zoey 又一次直接给了结论。")
+    manager.buckets["memory-1"] = _letter("memory-1", "今天和 Quinn 吃饭，她说话很直。")
+    manager.buckets["memory-2"] = _letter("memory-2", "Quinn 又一次直接给了结论。")
 
     claim, _ = await _write(service)
 
@@ -81,10 +81,10 @@ async def test_an_open_letter_can_back_a_claim(tmp_path):
 @pytest.mark.asyncio
 async def test_a_locked_letter_is_refused(tmp_path):
     service, manager = _enabled(tmp_path)
-    manager.buckets["memory-1"] = _letter("memory-1", "今天和 Zoey 吃饭。")
+    manager.buckets["memory-1"] = _letter("memory-1", "今天和 Quinn 吃饭。")
     manager.buckets["memory-2"] = _letter(
         "memory-2",
-        "Zoey 说了一些话。",
+        "Quinn 说了一些话。",
         lock_type="permanent",
         locked_by="human",
     )
@@ -96,10 +96,10 @@ async def test_a_locked_letter_is_refused(tmp_path):
 @pytest.mark.asyncio
 async def test_a_letter_the_ai_locked_itself_is_allowed(tmp_path):
     service, manager = _enabled(tmp_path)
-    manager.buckets["memory-1"] = _letter("memory-1", "今天和 Zoey 吃饭。")
+    manager.buckets["memory-1"] = _letter("memory-1", "今天和 Quinn 吃饭。")
     manager.buckets["memory-2"] = _letter(
         "memory-2",
-        "Zoey 说了一些话。",
+        "Quinn 说了一些话。",
         lock_type="permanent",
         locked_by="ai",
     )
@@ -112,10 +112,10 @@ async def test_a_letter_the_ai_locked_itself_is_allowed(tmp_path):
 @pytest.mark.asyncio
 async def test_an_expired_time_lock_is_open_again(tmp_path):
     service, manager = _enabled(tmp_path)
-    manager.buckets["memory-1"] = _letter("memory-1", "今天和 Zoey 吃饭。")
+    manager.buckets["memory-1"] = _letter("memory-1", "今天和 Quinn 吃饭。")
     manager.buckets["memory-2"] = _letter(
         "memory-2",
-        "Zoey 说了一些话。",
+        "Quinn 说了一些话。",
         lock_type="timed",
         locked_by="human",
         unlock_date="2020-01-01T00:00:00+00:00",
@@ -129,8 +129,8 @@ async def test_an_expired_time_lock_is_open_again(tmp_path):
 @pytest.mark.asyncio
 async def test_other_private_types_are_still_refused(tmp_path):
     service, manager = _enabled(tmp_path)
-    manager.buckets["memory-1"] = _bucket("memory-1", "Zoey 说话很直。")
-    manager.buckets["memory-2"] = _bucket("memory-2", "Zoey 又直说了。", type="feel")
+    manager.buckets["memory-1"] = _bucket("memory-1", "Quinn 说话很直。")
+    manager.buckets["memory-2"] = _bucket("memory-2", "Quinn 又直说了。", type="feel")
 
     with pytest.raises(ValueError, match="feel 类型"):
         await _write(service)
@@ -144,9 +144,9 @@ async def test_other_private_types_are_still_refused(tmp_path):
 @pytest.mark.asyncio
 async def test_a_title_naming_the_person_counts(tmp_path):
     service, manager = _enabled(tmp_path)
-    manager.buckets["memory-1"] = _bucket("memory-1", "Zoey 说话很直。")
+    manager.buckets["memory-1"] = _bucket("memory-1", "Quinn 说话很直。")
     manager.buckets["memory-2"] = _bucket(
-        "memory-2", "她又一次直接给了结论。", title="和 Zoey 的晚饭"
+        "memory-2", "她又一次直接给了结论。", title="和 Quinn 的晚饭"
     )
 
     claim, _ = await _write(service)
@@ -157,9 +157,9 @@ async def test_a_title_naming_the_person_counts(tmp_path):
 @pytest.mark.asyncio
 async def test_a_bucket_name_naming_the_person_counts(tmp_path):
     service, manager = _enabled(tmp_path)
-    manager.buckets["memory-1"] = _bucket("memory-1", "Zoey 说话很直。")
+    manager.buckets["memory-1"] = _bucket("memory-1", "Quinn 说话很直。")
     manager.buckets["memory-2"] = _bucket(
-        "memory-2", "她又一次直接给了结论。", name="Zoey 的沟通方式"
+        "memory-2", "她又一次直接给了结论。", name="Quinn 的沟通方式"
     )
 
     claim, _ = await _write(service)
@@ -171,7 +171,7 @@ async def test_a_bucket_name_naming_the_person_counts(tmp_path):
 async def test_naming_nowhere_is_still_refused(tmp_path):
     """门槛没降：正文、标题、桶名都不提这个人，照旧拒。"""
     service, manager = _enabled(tmp_path)
-    manager.buckets["memory-1"] = _bucket("memory-1", "Zoey 说话很直。")
+    manager.buckets["memory-1"] = _bucket("memory-1", "Quinn 说话很直。")
     manager.buckets["memory-2"] = _bucket(
         "memory-2", "她又一次直接给了结论。", title="一次晚饭"
     )
@@ -185,7 +185,7 @@ async def test_every_bucket_must_still_name_the_person(tmp_path):
     """仍然是「每个桶都要有」，不是「至少一个」。"""
     service, manager = _enabled(tmp_path)
     manager.buckets["memory-1"] = _bucket(
-        "memory-1", "Zoey 说话很直。", title="和 Zoey 聊天"
+        "memory-1", "Quinn 说话很直。", title="和 Quinn 聊天"
     )
     manager.buckets["memory-2"] = _bucket("memory-2", "她又一次直接给了结论。")
 

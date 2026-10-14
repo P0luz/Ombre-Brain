@@ -7,8 +7,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "4f0f4a60883ee5cb34bdc52beaa698c119cb4c9c2fa930e79a942fa050471601",
-      "size": 576681
+      "sha256": "d2c3772b3c6a57542b381806545a0e74baf1a904c0dff3a4bd7038005d98f627",
+      "size": 583869
     },
     {
       "path": "frontend/favicon.svg",
@@ -32,7 +32,7 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "da2b77adbd557e6ddeb4d4e49019eb8b75567c055d0a03cd01af5b94f7ee837d",
+      "sha256": "b4116d6e880009dc1440ddab7ec054bcea529aea394ec5bab7943b415a359281",
       "size": 5
     },
     {
@@ -52,8 +52,8 @@
     },
     {
       "path": "src/dehydrator.py",
-      "sha256": "6885edb577519978e4062388421d68193b10b2bf5d1426e7b0ff7e6a3b2919ce",
-      "size": 63244
+      "sha256": "03be67a991f7e13124a4eed6d24655f4a4bda22503ae3058dbfe57ef25a92716",
+      "size": 63245
     },
     {
       "path": "src/deletion_requests.py",
@@ -82,8 +82,8 @@
     },
     {
       "path": "src/migrate_engine.py",
-      "sha256": "677fbb1c6b145aabb2af82bb63a93fefab1aa0fe40d4cf7d8fc229a400fbd73a",
-      "size": 81391
+      "sha256": "92970cf9cc634c398d0f08cf77fed488a15024f5e50243be2f8f7c4be3afae3e",
+      "size": 83412
     },
     {
       "path": "src/migration_engine.py",
@@ -149,6 +149,26 @@
       "path": "src/ombrebrain/architecture/defaults.py",
       "sha256": "ef823f642f3c4af70757565ffa63ddd4d3cbbf1a66fa940f272c7d3de26cbe9f",
       "size": 2277
+    },
+    {
+      "path": "src/ombrebrain/autorecall/__init__.py",
+      "sha256": "762ce83f54cc1cf1267927a67f37e8836769227320d455656e638385a8cdd8e5",
+      "size": 431
+    },
+    {
+      "path": "src/ombrebrain/autorecall/lexical.py",
+      "sha256": "f14622cdd52ce8c70546cc1e0bf779493132418815810130b894ab15e0176db0",
+      "size": 2853
+    },
+    {
+      "path": "src/ombrebrain/autorecall/service.py",
+      "sha256": "0901db576cc233726c4ade53f3127753a947fc3d9363b29b7dafd88431a25672",
+      "size": 16953
+    },
+    {
+      "path": "src/ombrebrain/autorecall/transcript_store.py",
+      "sha256": "00b90d1a6ff42f9951bbd0fbe08dcac7be75c7d1c332834fd4f10ff9cbd89219",
+      "size": 13983
     },
     {
       "path": "src/ombrebrain/domain/__init__.py",
@@ -432,13 +452,13 @@
     },
     {
       "path": "src/ombrebrain/storage/attribution.py",
-      "sha256": "214a36223fcd435316a7a67e4f923b4b9ee90ac5caa848948f8bb5b0819fccd6",
-      "size": 12452
+      "sha256": "26e7df336e253f6d8df9449ed37d76e7a4ca57d02e9ad03a2b801722a5c900c0",
+      "size": 12451
     },
     {
       "path": "src/ombrebrain/storage/backup_archive.py",
-      "sha256": "e8db1c674f1b6ceb82bea2f506eb9e18caf5688eb9d68d441c82a3e133c0abd3",
-      "size": 37301
+      "sha256": "a7fff7cd1f10ee8296865699a0cfce9087d97d8497af0b1c046ac6fefb5964fb",
+      "size": 38297
     },
     {
       "path": "src/ombrebrain/storage/bucket_paths.py",
@@ -517,8 +537,8 @@
     },
     {
       "path": "src/ombrebrain/them/service.py",
-      "sha256": "1c62cfe54faa2dc59f492329074cc2e85bfa55253d82b482727022e0fffb7954",
-      "size": 57165
+      "sha256": "88d78c048d6806d4b162f292136e7e286f4709ca1415ab9cf8c8517cbfe921c1",
+      "size": 57172
     },
     {
       "path": "src/ombrebrain/them/store.py",
@@ -552,8 +572,8 @@
     },
     {
       "path": "src/ombrebrain/you/service.py",
-      "sha256": "dd9c38dbe17deddf887e5f41149676f052a0b87330c4a082fd5b49d993f22c86",
-      "size": 36204
+      "sha256": "5dd01131dee7824e8dceb33d2f2279d07be751b996fd08eebd0b1e59f184fb7b",
+      "size": 36206
     },
     {
       "path": "src/ombrebrain/you/store.py",
@@ -577,8 +597,8 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "b859998067e57e359c3653ec4e78bcbad063219fac7602bd8b51658e65e9896a",
-      "size": 83908
+      "sha256": "53f53a604a21cda39b20a06cc264a6c2ecc93671a4d7e027a6c60c0755ed4c42",
+      "size": 84422
     },
     {
       "path": "src/server_app.py",
@@ -797,8 +817,8 @@
     },
     {
       "path": "src/web/__init__.py",
-      "sha256": "ae65f7e5500dfc63cb2ac7070114a3d8240e9cda1bd77894047b76e3ef8a9f29",
-      "size": 2342
+      "sha256": "ccbdce90542c6ae5abf50d6636a7f827c9dc3f6abb5fc5e2c296ed25ce1865ab",
+      "size": 2412
     },
     {
       "path": "src/web/_shared.py",
@@ -809,6 +829,11 @@
       "path": "src/web/auth.py",
       "sha256": "ddc3fa8d6ce3653f53f2920fc9d5df01eb5e34b85ed928cde0ff0da97f4f5be7",
       "size": 22690
+    },
+    {
+      "path": "src/web/autorecall.py",
+      "sha256": "9cf9feeec73232991f1fc439f075c490e86807b2d36e91af65b1257b8be20d0b",
+      "size": 11266
     },
     {
       "path": "src/web/buckets.py",
@@ -912,5 +937,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "3.8.0"
+  "version": "4.0.0"
 }

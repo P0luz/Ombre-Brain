@@ -67,7 +67,7 @@ async def test_自动拆分把原文存一份并让每个桶指回去(装配, mo
     ])
     monkeypatch.setattr(grow_core_mod.rt, "dehydrator", dehy, raising=False)
 
-    原文 = "早上开会定了方案\n中午和 Zoey 吃饭聊到她要换组"
+    原文 = "早上开会定了方案\n中午和 Quinn 吃饭聊到她要换组"
     await grow_core_mod.grow_core(原文)
 
     assert store.saved == [原文], "原文只该存一份，且逐字保存"

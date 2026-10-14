@@ -2639,6 +2639,37 @@
       <div id="you-setting-msg" role="status" aria-live="polite" style="min-height:16px;margin-top:8px;font-size:12px;color:var(--text-dim);"></div>
     </div>
 
+    <!-- Claude Code 自动召回：只给 Claude Code 的钩子用，其他客户端不受影响。 -->
+    <div class="config-section" id="sec-autorecall" data-sgroup="basics">
+      <h3>自动召回 <span class="sec-en">Claude Code</span></h3>
+      <p id="autorecall-description" style="font-size:12px;color:var(--text-dim);line-height:1.7;margin:4px 0 12px;">
+        <span style="display:block;">仅 Claude Code 可用，需要装 deploy/claude-code-hooks 里的钩子。</span>
+        <span style="display:block;">开新窗口或压缩后接上上一段对话的最后几轮原文，当天第一次开窗附一次 dream。</span>
+        <span style="display:block;">说到「记得 / 上次 / 之前」或库里的人名时，注入最相关的一条记忆；两路检索不一致就不注入。</span>
+        <span style="display:block;">每隔若干轮提醒正在聊天的模型考虑用 hold 存档。原文只存在这个记忆库里。</span>
+      </p>
+      <div class="hw-toggle-row" style="justify-content:space-between;gap:14px;">
+        <span id="autorecall-toggle-label">关闭</span>
+        <span class="hw-switch" id="autorecall-enabled-sw" role="switch" tabindex="0"
+          aria-checked="false" aria-labelledby="autorecall-toggle-label" aria-describedby="autorecall-description"
+          onclick="toggleAutorecallSetting(this)"
+          onkeydown="if(event.key==='Enter'||event.key===' '){event.preventDefault();toggleAutorecallSetting(this);}"></span>
+        <input type="checkbox" id="autorecall-enabled" style="display:none" aria-hidden="true">
+      </div>
+      <div class="config-row"><label>唤醒词</label><input type="text" id="cfg-ar-wake" placeholder="记得,上次,之前" maxlength="2000" /></div>
+      <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">逗号分隔。库里写成 [[名字]] 的人名 / 宠物名会自动算进来；没被写成链接的名字（比如宠物）加在这里</div>
+      <div class="config-row"><label>库内名字唤醒</label><input type="checkbox" id="cfg-ar-names" style="width:auto;flex:none;accent-color:var(--accent);cursor:pointer;" /></div>
+      <div class="config-row"><label>hold 提醒间隔</label><input type="number" id="cfg-ar-reminder" min="0" max="500" /></div>
+      <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">每多少轮提醒一次，0 = 不提醒</div>
+      <div class="config-row"><label>接续轮数</label><input type="number" id="cfg-ar-rounds" min="0" max="50" /></div>
+      <div class="config-row"><label>开窗附 dream</label><input type="checkbox" id="cfg-ar-dream" style="width:auto;flex:none;accent-color:var(--accent);cursor:pointer;" /></div>
+      <div class="config-row"><label>反向门 前 N 名</label><input type="number" id="cfg-ar-agree" min="0" max="20" /></div>
+      <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">字面和向量两路的前 N 名里有同一条才注入；0 = 关闭（不推荐）</div>
+      <div class="config-row"><label>向量检索</label><input type="checkbox" id="cfg-ar-vector" style="width:auto;flex:none;accent-color:var(--accent);cursor:pointer;" /></div>
+      <div style="margin-top:10px;"><button class="btn-primary" onclick="saveAutorecallSettings()" title="保存 / Save" style="padding:0 14px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="check"></i> 保存 Save</button></div>
+      <div id="autorecall-setting-msg" role="status" aria-live="polite" style="min-height:16px;margin-top:8px;font-size:12px;color:var(--text-dim);"></div>
+    </div>
+
     <!-- ① 我 -->
     <div class="config-section" id="sec-me" data-sgroup="basics">
       <h3>我 <span class="sec-en">Me</span></h3>
@@ -4626,6 +4657,89 @@ async function toggleYouSetting(control) {
   }
 }
 
+var _autorecallBusy = false;
+
+function renderAutorecallSetting(data, message, isError) {
+  var enabled = !!(data && data.enabled);
+  setHwSwitch('autorecall-enabled', enabled);
+  var label = document.getElementById('autorecall-toggle-label');
+  if (label) label.textContent = enabled ? '开启' : '关闭';
+  if (data) {
+    document.getElementById('cfg-ar-wake').value = (data.wake_words || []).join(',');
+    document.getElementById('cfg-ar-names').checked = data.wake_on_names !== false;
+    document.getElementById('cfg-ar-reminder').value = data.reminder_every;
+    document.getElementById('cfg-ar-rounds').value = data.restore_rounds;
+    document.getElementById('cfg-ar-dream').checked = data.dream_on_start !== false;
+    document.getElementById('cfg-ar-agree').value = data.agree_top;
+    document.getElementById('cfg-ar-vector').checked = data.vector !== false;
+  }
+  var status = document.getElementById('autorecall-setting-msg');
+  if (status) {
+    var info = message;
+    if (!info && data) {
+      var st = data.store || {};
+      info = '已存 ' + (st.turns || 0) + ' 条原文，' + (st.links || 0) + ' 条连线，' + (st.sessions || 0) + ' 个对话';
+      if (enabled && !data.hook_token_configured) info += '。⚠️ 还没设置 hook token，钩子会被拒绝（401）';
+    }
+    status.textContent = info || '';
+    status.style.color = isError ? 'var(--negative)' : 'var(--text-dim)';
+  }
+}
+
+async function loadAutorecallSetting() {
+  try {
+    var response = await authFetch('/api/settings/autorecall');
+    if (!response) return;
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '加载失败');
+    renderAutorecallSetting(data, '', false);
+  } catch (error) {
+    renderAutorecallSetting(null, '加载失败', true);
+  }
+}
+
+async function postAutorecallSetting(payload) {
+  if (_autorecallBusy) {
+    renderAutorecallSetting(null, '上一次保存还没完成，请稍后再点', true);
+    return;
+  }
+  _autorecallBusy = true;
+  renderAutorecallSetting(null, '保存中…', false);
+  try {
+    var response = await authFetch('/api/settings/autorecall', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(payload),
+    });
+    if (!response) throw new Error('登录状态已失效');
+    var data = await readJsonSafe(response);
+    if (!response.ok) throw new Error(data.error || '保存失败');
+    renderAutorecallSetting(data, '', false);
+  } catch (error) {
+    await loadAutorecallSetting();
+    renderAutorecallSetting(null, error && error.message ? error.message : '保存失败', true);
+  } finally {
+    _autorecallBusy = false;
+  }
+}
+
+function toggleAutorecallSetting(control) {
+  if (!control) return;
+  postAutorecallSetting({enabled: control.getAttribute('aria-checked') !== 'true'});
+}
+
+function saveAutorecallSettings() {
+  function num(id) { return parseInt(document.getElementById(id).value, 10); }
+  postAutorecallSetting({
+    wake_words: document.getElementById('cfg-ar-wake').value,
+    wake_on_names: document.getElementById('cfg-ar-names').checked,
+    reminder_every: num('cfg-ar-reminder'),
+    restore_rounds: num('cfg-ar-rounds'),
+    dream_on_start: document.getElementById('cfg-ar-dream').checked,
+    agree_top: num('cfg-ar-agree'),
+    vector: document.getElementById('cfg-ar-vector').checked,
+  });
+}
 
 var _themStateRevision = 0;
 var _themToggleBusy = false;
@@ -5377,6 +5491,7 @@ function activateDashboardTab(tab) {
         loadGithubStatus(),
         loadSamplingSettings(),
         loadYouSetting(),
+        loadAutorecallSetting(),
         loadThemSetting(),
         loadEnvVars(),
         loadHostVault(),

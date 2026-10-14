@@ -75,6 +75,11 @@ from ombrebrain.you.store import (
     validate_you_snapshot_bytes,
     validate_you_snapshot_file,
 )
+from ombrebrain.autorecall.transcript_store import (
+    TranscriptStoreError,
+    validate_transcript_snapshot_bytes,
+    validate_transcript_snapshot_file,
+)
 from ombrebrain.storage.vector_codec import decode_vector, encode_vector
 
 try:
@@ -318,6 +323,8 @@ class MigrateEngine:
         self._you_tool_gate: Any = None
         self._them_db_bytes: Optional[bytes] = None
         self._them_db_path: str = ""
+        self._autorecall_db_bytes: Optional[bytes] = None
+        self._autorecall_db_path: str = ""
         self._them_service: Any = None
         self._them_tool_gate: Any = None
         self._parse_temp_dir: str = ""
@@ -394,6 +401,8 @@ class MigrateEngine:
         self._you_db_path = ""
         self._them_db_bytes = None
         self._them_db_path = ""
+        self._autorecall_db_bytes = None
+        self._autorecall_db_path = ""
         for bucket in self._parsed_buckets:
             bucket.md_bytes = None
             bucket.md_path = ""
@@ -699,6 +708,8 @@ class MigrateEngine:
         self._you_db_path = str(parsed.get("you_db_path") or "")
         self._them_db_bytes = parsed.get("them_db_bytes")
         self._them_db_path = str(parsed.get("them_db_path") or "")
+        self._autorecall_db_bytes = parsed.get("autorecall_db_bytes")
+        self._autorecall_db_path = str(parsed.get("autorecall_db_path") or "")
         self._parse_temp_dir = str(parsed.get("temp_dir") or "")
         self._integrity_verified = bool(parsed.get("integrity_verified"))
         self._integrity_warning = str(parsed.get("integrity_warning") or "")
@@ -894,6 +905,20 @@ class MigrateEngine:
             except ThemStoreError as exc:
                 raise BackupArchiveError("them 快照结构校验失败") from exc
 
+        autorecall_db_bytes: Optional[bytes] = None
+        autorecall_db_path = ""
+        if "autorecall/transcript.sqlite3" in names:
+            autorecall_source = files["autorecall/transcript.sqlite3"]
+            try:
+                if disk_backed:
+                    autorecall_db_path = str(autorecall_source)
+                    validate_transcript_snapshot_file(autorecall_db_path)
+                else:
+                    autorecall_db_bytes = bytes(autorecall_source)
+                    validate_transcript_snapshot_bytes(autorecall_db_bytes)
+            except TranscriptStoreError as exc:
+                raise BackupArchiveError("自动召回原文库快照结构校验失败") from exc
+
         # 3) 原文证据按文件名中的内容哈希预检。旧版备份可能完全
         # 没有 sources/，保持可导入并显式告警；但只要包已声称携带证据，
         # 任何损坏都必须在写入记忆之前整包失败。
@@ -1009,6 +1034,8 @@ class MigrateEngine:
             "you_db_path": you_db_path,
             "them_db_bytes": them_db_bytes,
             "them_db_path": them_db_path,
+            "autorecall_db_bytes": autorecall_db_bytes,
+            "autorecall_db_path": autorecall_db_path,
             "integrity_verified": package["integrity_verified"],
             "integrity_warning": integrity_warning,
             "manifest": package["manifest"],
@@ -1181,6 +1208,8 @@ class MigrateEngine:
                  self._install_you_snapshot),
                 ("them", bool(self._them_db_bytes or self._them_db_path),
                  self._install_them_snapshot),
+                ("自动召回原文库", bool(self._autorecall_db_bytes or self._autorecall_db_path),
+                 self._install_autorecall_snapshot),
             ):
                 if not 有快照:
                     continue
@@ -1316,6 +1345,20 @@ class MigrateEngine:
             校验=validate_them_snapshot_file,
             service=self._them_service,
             gate=self._them_tool_gate,
+        )
+
+    def _install_autorecall_snapshot(self, buckets_dir: str) -> None:
+        # 原文库没有 MCP 工具要对齐显隐，service / gate 传 None 即可。
+        self._install_module_snapshot(
+            buckets_dir,
+            目录名=".autorecall",
+            文件名="transcript.sqlite3",
+            标签="自动召回原文库",
+            源路径=self._autorecall_db_path,
+            源字节=self._autorecall_db_bytes,
+            校验=validate_transcript_snapshot_file,
+            service=None,
+            gate=None,
         )
 
     def _install_source_members(self, buckets_dir: str) -> None:

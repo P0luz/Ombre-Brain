@@ -20,20 +20,20 @@ from ombrebrain.storage.attribution import (
 )
 from ombrebrain.storage.quote_store import render_quotes
 
-KNOWN = ["Zoey", "阿哲"]
+KNOWN = ["Quinn", "阿哲"]
 
 
 class TestSplit:
     def test_拆出第三方发言并移出正文(self):
-        content = "今天聊到方案。\nZoey：我觉得这个方案撑不住。\n后来就散了。"
+        content = "今天聊到方案。\nQuinn：我觉得这个方案撑不住。\n后来就散了。"
         body, statements = split_third_party_speech(content, known_names=KNOWN)
-        assert "Zoey" not in body
+        assert "Quinn" not in body
         assert "撑不住" not in body
         assert body == "今天聊到方案。\n后来就散了。"
         assert statements == [
             {
                 "order": 1,
-                "speaker": "Zoey",
+                "speaker": "Quinn",
                 "speaker_role": "third_party",
                 "text": "我觉得这个方案撑不住。",
             }
@@ -41,16 +41,16 @@ class TestSplit:
 
     def test_半角冒号同样命中(self):
         _, statements = split_third_party_speech(
-            "Zoey: it will not hold", known_names=KNOWN
+            "Quinn: it will not hold", known_names=KNOWN
         )
         assert len(statements) == 1
         assert statements[0]["text"] == "it will not hold"
 
     def test_多条按原顺序编号(self):
-        content = "Zoey：先做 A。\n中间说了点别的。\n阿哲：我不同意。"
+        content = "Quinn：先做 A。\n中间说了点别的。\n阿哲：我不同意。"
         _, statements = split_third_party_speech(content, known_names=KNOWN)
         assert [s["order"] for s in statements] == [1, 2]
-        assert [s["speaker"] for s in statements] == ["Zoey", "阿哲"]
+        assert [s["speaker"] for s in statements] == ["Quinn", "阿哲"]
 
     def test_没有第三方时正文一个字不动(self):
         content = "她验收时要求逐条核对。\n注意：不接受囫囵结论。"
@@ -70,7 +70,7 @@ class TestRecognitionRequired:
     """第一版只看行首形状，被真实用例抓出错拆。现在必须先认得这个名字。"""
 
     def test_没认出来的名字不拆(self):
-        content = "Zoey：我觉得这个方案撑不住。"
+        content = "Quinn：我觉得这个方案撑不住。"
         body, statements = split_third_party_speech(content)
         assert statements == []
         assert body == content
@@ -85,18 +85,18 @@ class TestRecognitionRequired:
 
     def test_引语署名让这个名字被认出来(self):
         bucket = {
-            "content": "Zoey：我觉得这个方案撑不住。",
-            "metadata": {"quotes": [{"text": "撑不住", "speaker": "Zoey"}]},
+            "content": "Quinn：我觉得这个方案撑不住。",
+            "metadata": {"quotes": [{"text": "撑不住", "speaker": "Quinn"}]},
         }
-        assert "zoey" in known_person_names(bucket)
+        assert "quinn" in known_person_names(bucket)
         _, statements = split_third_party_speech(
             bucket["content"], known_names=known_person_names(bucket)
         )
         assert len(statements) == 1
 
     def test_双链让这个名字被认出来(self):
-        bucket = {"content": "今天和 [[Zoey]] 聊了很久。\nZoey：这个方案撑不住。"}
-        assert "zoey" in known_person_names(bucket)
+        bucket = {"content": "今天和 [[Quinn]] 聊了很久。\nQuinn：这个方案撑不住。"}
+        assert "quinn" in known_person_names(bucket)
         _, statements = split_third_party_speech(
             bucket["content"], known_names=known_person_names(bucket)
         )
@@ -138,10 +138,10 @@ class TestNeverSplit:
         assert statements == []
 
     def test_配置里补的称呼被认成用户(self):
-        line = "@poluz的猫：喵"
+        line = "@sam的猫：喵"
         _, before = split_third_party_speech(line)
         assert len(before) == 1  # 没登记时按第三方处理
-        _, after = split_third_party_speech(line, user_names=["poluz的猫"])
+        _, after = split_third_party_speech(line, user_names=["sam的猫"])
         assert after == []
 
     def test_url_不被冒号切开(self):
@@ -175,13 +175,13 @@ class TestNeverSplit:
 
     def test_带空格的英文名仍然认得出(self):
         _, statements = split_third_party_speech(
-            "Zoey Chen：it will not hold", known_names=["Zoey Chen"]
+            "Quinn Chen：it will not hold", known_names=["Quinn Chen"]
         )
         assert len(statements) == 1
-        assert statements[0]["speaker"] == "Zoey Chen"
+        assert statements[0]["speaker"] == "Quinn Chen"
 
     def test_行中间的冒号不触发(self):
-        line = "我记得她说过 Zoey：这句其实在句中"
+        line = "我记得她说过 Quinn：这句其实在句中"
         _, statements = split_third_party_speech(line, known_names=KNOWN)
         assert statements == []
 
@@ -190,7 +190,7 @@ class TestRender:
     def test_一条JSON而不是每人一条(self):
         block = render_third_party_block(
             [
-                {"order": 1, "speaker": "Zoey", "speaker_role": "third_party", "text": "a"},
+                {"order": 1, "speaker": "Quinn", "speaker_role": "third_party", "text": "a"},
                 {"order": 2, "speaker": "阿哲", "speaker_role": "third_party", "text": "b"},
             ]
         )
@@ -200,7 +200,7 @@ class TestRender:
 
     def test_块头写明不是用户说的(self):
         block = render_third_party_block(
-            [{"order": 1, "speaker": "Zoey", "speaker_role": "third_party", "text": "a"}]
+            [{"order": 1, "speaker": "Quinn", "speaker_role": "third_party", "text": "a"}]
         )
         assert "不是用户说的" in block
 
@@ -210,7 +210,7 @@ class TestRender:
 
 class TestQuotes:
     def test_署名第三方的引语走JSON(self):
-        rendered = render_quotes([{"text": "这个方案撑不住", "speaker": "Zoey"}])
+        rendered = render_quotes([{"text": "这个方案撑不住", "speaker": "Quinn"}])
         assert "🗣️" not in rendered
         assert "non_user_speech" in rendered
 
@@ -244,8 +244,8 @@ class TestRenderOnly:
 
         bucket = {
             "id": "b1",
-            "content": "今天开会。\nZoey：先看结论，过程回头再说。",
-            "metadata": {"type": "dynamic", "quotes": [{"text": "x", "speaker": "Zoey"}]},
+            "content": "今天开会。\nQuinn：先看结论，过程回头再说。",
+            "metadata": {"type": "dynamic", "quotes": [{"text": "x", "speaker": "Quinn"}]},
         }
         原文 = bucket["content"]
         rendered, _ = render_stored_bucket(bucket, "[bucket_id:b1]")
@@ -262,9 +262,9 @@ class TestConfig:
         assert names_from_config({}) == {"self_names": [], "user_names": []}
 
     def test_读出配置里的称呼(self):
-        names = names_from_config({"attribution": {"user_names": ["她", "Poluz"]}})
-        assert names["user_names"] == ["poluz", "她"]
+        names = names_from_config({"attribution": {"user_names": ["她", "Sam"]}})
+        assert names["user_names"] == ["sam", "她"]
 
     def test_内置表始终生效(self):
         assert not is_third_party_speaker("用户")
-        assert is_third_party_speaker("Zoey")
+        assert is_third_party_speaker("Quinn")

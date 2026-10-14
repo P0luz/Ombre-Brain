@@ -1,0 +1,20 @@
+{
+  "env": {
+    "OB_URL": "http://127.0.0.1:18001",
+    "OB_HOOK_TOKEN": "换成你在 Ombre Brain 里设置的 hook token"
+  },
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/ob_hook.py session-start", "timeout": 45 } ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/ob_hook.py prompt", "timeout": 15 } ] }
+    ],
+    "Stop": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/ob_hook.py stop", "async": true } ] }
+    ],
+    "SessionEnd": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/ob_hook.py session-end", "timeout": 10 } ] }
+    ]
+  }
+}

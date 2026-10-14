@@ -73,17 +73,17 @@ def _enabled(tmp_path, *, buckets=2):
     service.set_enabled(True)
     for index in range(1, buckets + 1):
         bucket_id = f"memory-{index}"
-        manager.buckets[bucket_id] = _bucket(bucket_id, f"第 {index} 次她提到希望被叫做 Lin。")
+        manager.buckets[bucket_id] = _bucket(bucket_id, f"第 {index} 次她提到希望被叫做 Nova。")
     return service, manager
 
 
-async def _write(service, *, content="她希望日常被称呼为 Lin", buckets=("memory-1", "memory-2")):
+async def _write(service, *, content="她希望日常被称呼为 Nova", buckets=("memory-1", "memory-2")):
     return await service.write(
         content=content,
         bucket_ids=list(buckets),
         aspect="preferred_address",
         concept_key="preferred_address",
-        concept_value="lin",
+        concept_value="nova",
         basis="explicit_statement",
         explicit=True,
         long_term=True,
@@ -143,7 +143,7 @@ async def test_one_write_only_creates_a_candidate(tmp_path, monkeypatch):
     assert claim.lifecycle == "candidate"
     assert claim.review_date_count == 1
     assert "还要在另外 2 个不同的日子" in message
-    assert await service.recall(query="Lin") == "", "候选不该被召回"
+    assert await service.recall(query="Nova") == "", "候选不该被召回"
 
 
 @pytest.mark.asyncio
@@ -170,7 +170,7 @@ async def test_three_distinct_days_make_it_real(tmp_path, monkeypatch):
     assert claim.review_date_count == REQUIRED_CONFIRMATIONS
     assert claim.lifecycle == "formal"
     assert "已经生效" in message
-    assert "Lin" in await service.recall(query="Lin")
+    assert "Nova" in await service.recall(query="Nova")
 
 
 @pytest.mark.asyncio
@@ -181,12 +181,12 @@ async def test_editing_a_live_entry_sends_it_back_to_candidate(tmp_path, monkeyp
         await _write(service)
 
     _stamp(monkeypatch, 20)
-    edited, message = await _write(service, content="她希望被称呼为 Lin，工作场合除外")
+    edited, message = await _write(service, content="她希望被称呼为 Nova，工作场合除外")
 
     assert edited.lifecycle == "candidate", "改了正文就得重新攒三天"
     assert edited.review_date_count == 1
     assert "还要在另外 2 个不同的日子" in message
-    assert await service.recall(query="Lin") == ""
+    assert await service.recall(query="Nova") == ""
 
 
 @pytest.mark.asyncio
@@ -200,7 +200,7 @@ async def test_losing_a_supporting_bucket_expires_the_entry(tmp_path, monkeypatc
     manager.buckets.pop("memory-2")
     await service._remove_bucket_evidence(service.status().scope, "memory-2")
 
-    assert await service.recall(query="Lin") == "", "依据塌到门槛以下就不该再被召回"
+    assert await service.recall(query="Nova") == "", "依据塌到门槛以下就不该再被召回"
     remaining = service.store.get_claim(service.status().scope, claim.id)
     assert remaining.lifecycle == "expired"
 
@@ -217,7 +217,7 @@ async def test_deleting_needs_no_confirmations(tmp_path, monkeypatch):
     message = await service.delete(claim.id)
 
     assert "撤回了" in message
-    assert await service.recall(query="Lin") == ""
+    assert await service.recall(query="Nova") == ""
 
 
 @pytest.mark.asyncio
@@ -227,7 +227,7 @@ async def test_disabled_module_refuses_both_directions(tmp_path):
     with pytest.raises(YouStoreError, match="unknown tool"):
         await _write(service)
     with pytest.raises(YouStoreError, match="unknown tool"):
-        await service.recall(query="Lin")
+        await service.recall(query="Nova")
     assert not (tmp_path / ".you").exists(), "关着的时候连库都不该建"
 
 
@@ -282,7 +282,7 @@ async def test_依据被删掉之后读回时当场失效(tmp_path, monkeypatch)
     """
     service, manager = _enabled(tmp_path)
     await _formalized(service, monkeypatch)
-    assert "Lin" in await service.recall(query="称呼")
+    assert "Nova" in await service.recall(query="称呼")
 
     del manager.buckets["memory-1"]  # 依据塌到只剩一个
 
@@ -296,7 +296,7 @@ async def test_塌了一个但还够就继续生效(tmp_path, monkeypatch):
         _stamp(monkeypatch, day)
         await _write(service, buckets=("memory-1", "memory-2", "memory-3"))
     del manager.buckets["memory-1"]  # 还剩两个，仍然过门槛
-    assert "Lin" in await service.recall(query="称呼")
+    assert "Nova" in await service.recall(query="称呼")
 
 
 @pytest.mark.asyncio
@@ -309,7 +309,7 @@ async def test_读桶抖动不会误杀(tmp_path, monkeypatch):
         raise OSError("disk hiccup")
 
     manager.get = 炸
-    assert "Lin" in await service.recall(query="称呼")
+    assert "Nova" in await service.recall(query="称呼")
 
 
 @pytest.mark.asyncio
@@ -325,7 +325,7 @@ async def test_归档的依据仍然撑得住(tmp_path, monkeypatch):
     归档了["metadata"] = {**归档了["metadata"], "type": "archived"}
     manager.buckets["memory-1"] = 归档了
 
-    assert "Lin" in await service.recall(query="称呼")
+    assert "Nova" in await service.recall(query="称呼")
 
 
 _长认识 = ("她聊到说话方式时反复表示希望先听结论再听原因，" * 6)[:128]
@@ -357,12 +357,12 @@ async def test_一条放不下不连累后面放得下的(tmp_path, monkeypatch)
     assert service._query_score(长, "希望先听结论") > service._query_score(短, "希望先听结论")
 
     读回 = await service.recall(query="希望先听结论", max_tokens=_BUDGET)
-    assert "Lin" in 读回
+    assert "Nova" in 读回
     assert _长认识 not in 读回
     assert count_tokens_approx(读回) <= _BUDGET
 
     带id = await service.recall(query="希望先听结论", with_ids=True, max_tokens=_BUDGET)
-    assert "Lin" in 带id and f"id={短.id}" in 带id
+    assert "Nova" in 带id and f"id={短.id}" in 带id
     assert f"id={长.id}" not in 带id
     assert count_tokens_approx(带id) <= _BUDGET
 
@@ -385,7 +385,7 @@ async def test_默认不限预算长认识也读得回来(tmp_path, monkeypatch)
 
     读回 = await service.recall(query="希望先听结论")
     assert _长认识 in 读回
-    assert "Lin" in 读回
+    assert "Nova" in 读回
 
 
 @pytest.mark.asyncio
@@ -401,14 +401,14 @@ async def test_面板设置决定条数和预算(tmp_path, monkeypatch):
 
     monkeypatch.setattr(rt, "config", {"surfacing": {}}, raising=False)
     读回 = await dispatch(query="希望先听结论")
-    assert _长认识 in 读回 and "Lin" in 读回
+    assert _长认识 in 读回 and "Nova" in 读回
 
     monkeypatch.setattr(rt, "config", {"surfacing": {"you_max_tokens": _BUDGET}}, raising=False)
     读回 = await dispatch(query="希望先听结论")
-    assert _长认识 not in 读回 and "Lin" in 读回
+    assert _长认识 not in 读回 and "Nova" in 读回
 
     # 条数上限 1：只剩排第一的长认识；模型传更大的 max_results 也越不过面板。
     monkeypatch.setattr(rt, "config", {"surfacing": {"you_max_results": 1}}, raising=False)
     for 读回 in (await dispatch(query="希望先听结论"),
                 await dispatch(query="希望先听结论", max_results=10)):
-        assert _长认识 in 读回 and "Lin" not in 读回
+        assert _长认识 in 读回 and "Nova" not in 读回

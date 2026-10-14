@@ -13,7 +13,7 @@ False），踩线的是 `concept_key="personality"`——模型看着那句指�
 + concept_value 再写一次」，而那两个字符串只存在于写它的那次对话里。them 早
 就列了欠账清单，You 一直没有——上游反馈里 You 的抱怨更尖锐，原因就在这。
 
-带 query 的读回**不**附欠账：`recall(query="Lin")` 问的是「我对 Lin 了解
+带 query 的读回**不**附欠账：`recall(query="Nova")` 问的是「我对 Nova 了解
 什么」，拿还没算数的候选去回答它是答非所问，这条由 test_you_pipeline 守着。
 """
 

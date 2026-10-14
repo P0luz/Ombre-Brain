@@ -77,7 +77,7 @@ def test_the_vector_store_is_still_created(tmp_path):
 async def test_writes_degrade_instead_of_raising(tmp_path):
     engine = _engine(tmp_path, CONTAMINATED)
 
-    assert await engine.generate_and_store("b1", "今天下午和万世聊了很久") is False
+    assert await engine.generate_and_store("b1", "今天下午和阿树聊了很久") is False
 
 
 def test_a_clean_key_still_enables_embedding(tmp_path):

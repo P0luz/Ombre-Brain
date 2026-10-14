@@ -31,8 +31,8 @@ def _claim(scope: Scope, *, bucket_id: str = "memory-1") -> YouClaim:
     return YouClaim.new(
         scope=scope,
         concept_key="preferred_address",
-        concept_value="lin",
-        content="对方希望日常交流时使用称呼 Lin",
+        concept_value="nova",
+        content="对方希望日常交流时使用称呼 Nova",
         aspect="preferred_address",
         recall_policy="core",
         evidence=(edge,),
@@ -91,7 +91,7 @@ def test_claim_revision_and_projection_staleness_are_atomic(tmp_path):
     store.put_projection(state.scope, 1, {"claim_ids": [stored.id], "hints": []})
     assert store.get_projection(state.scope) is not None
 
-    changed = replace(stored, content="对方偏好在交谈中被称为 Lin")
+    changed = replace(stored, content="对方偏好在交谈中被称为 Nova")
     updated = store.put_claim(changed, expected_revision=stored.revision)
 
     assert updated.revision == 2
@@ -142,7 +142,7 @@ def test_fixed_policy_rejects_forbidden_subjects(text):
 
 def test_fixed_policy_allows_supported_non_sensitive_observations():
     assert contains_forbidden_subject("她明确说疲惫时希望先安静一会儿") is False
-    assert contains_forbidden_subject("以后请叫我 Lin") is False
+    assert contains_forbidden_subject("以后请叫我 Nova") is False
 
 
 def test_normalized_leak_guard_blocks_source_copy_and_allows_atomic_values():
@@ -151,7 +151,7 @@ def test_normalized_leak_guard_blocks_source_copy_and_allows_atomic_values():
     assert leaks_protected_text("下班以后，通常希望先安静一会儿", [source]) is True
     assert leaks_protected_text("下 班 以 后 通 常 希 望 先 安 静 一 会 儿", [source]) is True
     assert leaks_protected_text("先减少交流压力，再根据回应继续", [source]) is False
-    assert leaks_protected_text("Lin", ["以后请叫我 Lin"]) is False
+    assert leaks_protected_text("Nova", ["以后请叫我 Nova"]) is False
     assert leaks_protected_text("2026-08-18", ["日期是 2026-08-18"]) is False
 
 
