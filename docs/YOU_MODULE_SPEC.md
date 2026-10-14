@@ -129,7 +129,7 @@ MCP 不额外返回来源正文或内部元数据。
 - 让明确称呼、用户边界和稳定沟通偏好跨会话可靠生效。
 - 让普通偏好和相处习惯经过多个支持桶、跨日期重申后形成可追溯认识。
 - 让支持桶被删除后，依赖认识在下一次读回时失效；普通归档不触发失效。
-- 在固定上下文预算内提供少量、当前可用的正式认识。
+- 在用户可配置的条数与 token 预算内提供少量、当前可用的正式认识（token 默认不限）。
 - 前端只提供默认关闭的独立总开关，确保未启用或关闭后对既有能力和回答没有行为影响。
 - 由总开关单独控制 `You` MCP 工具是否出现在工具清单，其他 MCP 工具始终不受影响。
 - 读回只提供模型写下且通过原文复制检查的正文，不附带来源正文或内部元数据。
@@ -509,13 +509,13 @@ delete-to-archive 才触发依赖 Claim 的级联失效。支持桶删除或受�
   `contextual`。
 - 两类内容都只能由已暴露的单个 `You` MCP 工具读取；不得通过 `/breath-hook`、普通 `breath`
   或其他工具旁路注入。
-- 工具支持 bounded query 和 aspect 过滤；无 query 时只返回受预算约束的 `core` 条目。
+- 工具支持 bounded query 和 aspect 过滤；无 query 时只返回受条数上限约束的 `core` 条目。
 - 单次返回条数默认最多 6 条（面板 `surfacing.you_max_results`，1–50，模型传的 max_results 只能更少）；token 预算默认不限（面板 `surfacing.you_max_tokens`，0 = 不限）。
 - 有 query 时按规范化子串/双字符匹配分数排序并去掉零分项；无 query 时只选 `core`。达到条数后
   停止；设了 token 预算时，单条放不下就跳过该条、继续尝试后面的，不使用“用户价值分”或人格评分。
 - 返回**已生效 Claim 的正文**；Claim ID、aspect、证据、收据和生效时间都不进入 MCP 响应。
 - 服务端只选择 `formal + clear + current + callable` 的 Claim。
-- 结果数量和 token 均受硬上限约束。
+- 结果数量有上限（默认 6、最多 50）；token 默认不限，面板设了预算时按预算约束。
 
 ### 15.3 不可调用状态
 
@@ -532,7 +532,7 @@ delete-to-archive 才触发依赖 Claim 的级联失效。支持桶删除或受�
 
 - 开关关闭时，MCP 工具清单、SessionStart、普通工具和回答提示中不得出现任何 You 内容或
   占位提示。
-- 开关开启时，`You` 工具返回受预算约束的 Claim 正文；不返回 Source Bucket 正文、Source
+- 开关开启时，`You` 工具返回受条数上限（及可选 token 预算）约束的 Claim 正文；不返回 Source Bucket 正文、Source
   正文、Evidence、收据或任何内部元数据。
 - 读回结果带明确前缀，说明这是**模型自己过去写下的判断、不是此刻的事实**，需要自行判断；
   它不是回答模板。
@@ -555,7 +555,7 @@ delete-to-archive 才触发依赖 Claim 的级联失效。支持桶删除或受�
 
 仅在前端总开关开启后注册并暴露单个 `You` 工具，一个工具三条路：
 
-- **读回**：无参或带 `query` / `aspect`，服务端固定结果与 token 上限。
+- **读回**：无参或带 `query` / `aspect`，条数上限与 token 预算由服务端按面板配置决定（token 默认不限）。
 - **写入或重申**：带 `content` + `bucket_ids`（至少两个）+ `concept_key` /
   `concept_value` / `aspect`。同一 `concept_key` + `concept_value` 再写即重申。
 - **撤回**：带 `delete_id`。

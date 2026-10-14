@@ -673,7 +673,7 @@ class YouService:
         的键。放在已生效内容之后、空行隔开——看得见自己写过什么，不等于可以
         把它当成已经成立的判断。
 
-        不占 `_MAX_HINT_TOKENS`：那个预算是给召回正文的，欠账挤掉正文就本末
+        不占面板的 token 预算（surfacing.you_max_tokens）：那个预算是给召回正文的，欠账挤掉正文就本末
         倒置了。它只在显式调 You() 时出现，被动浮现拿不到（`with_pending`）。
         """
         条目: list[str] = []

@@ -1459,6 +1459,8 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `bucket_type_defaults.{type}.{field}` | （空） | iter 1.9：按桶类型覆盖 importance/valence/arousal 默认值。例：`bucket_type_defaults.feel.importance: 5`。`bucket_manager.create()` 在不传入该字段时查此表 |
 | `surfacing.breath_max_tokens` | `20000` | 覆盖 `breath` 默认 max_tokens；必须先装得下 `limits.max_pinned` 条核心准则，余下才给普通浮现 |
 | `surfacing.breath_max_results` | `20` | 覆盖 `breath` 默认 max_results |
+| `surfacing.you_max_results` | `6` | You 读回最多返回几条认识（1～50）；模型传的 max_results 只能更少 |
+| `surfacing.you_max_tokens` | `0` | You 读回的 token 预算，0 = 不限（0～40000）；设了时放不下的那条跳过、后面放得下的照常返回 |
 | `surfacing.feel_max_tokens` | `15000` | **dream** feel 历史段的 token 预算，超出折叠为 60 字摘要。3.0.0 起不再作用于 feel 通道——`feel(query=...)` 用自己的 `max_tokens`（默认 10000），且放不下时整条省略、不折叠 |
 | `timezone` | `Asia/Shanghai` | 3.0.0：用户只给日期、不写时区时按它理解（Letter 定时锁 `unlock_date` 等）。IANA 时区名；名字非法或缺 tzdata 时回退固定 `+08:00`，但 Dashboard 保存会当场校验拒绝。Dashboard「设置」可改，热更新生效 |
 | `ai_name` | （空） | 3.0.0：AI 一方的显示名。优先级高于环境变量 `AI_NAME`；随 vault 持久化，容器重建不丢。留空=未配置，回退环境变量再回退 `"AI"` |

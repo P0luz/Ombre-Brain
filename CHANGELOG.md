@@ -15,7 +15,7 @@
   anchor / release / hold / plan / letter_lock_update 的 11 个 id 参数现在把整数收成字符串，对外 schema 仍是 string。
 - **越界 importance 被静默处理**（#128 #129）：hold 照旧修正到 1～10，但补发 OB-W001；trace 收到越界值改为报错，不再静默丢弃。
 - **You 读回整段为空**（#124）：排在前面的一条认识超出预算时只跳过它，不再连带丢掉后面放得下的；没有正文时不再返回两行
-  空头部。160 token 上限不变。
+  空头部。token 预算改为默认不限、面板可设（见「新增」）。
 - **保存被启动环境变量接管的配置时显示干净的成功**（#122）：保存压缩 / 向量化配置时，如果字段（含旧名 `OMBRE_API_KEY`、
   `OMBRE_BASE_URL`、`OMBRE_COMPRESS_API_FORMAT`）来自启动环境变量，返回里加一条警告：重启或重建容器后会被覆盖。只列变量名，
   不改保存结果和状态码。
@@ -42,6 +42,9 @@
   structuredContent 副本，也不声明 outputSchema；把整个响应存进对话历史的客户端能少一半体量。改完要重启服务、客户端重连。
 - `embedding.abandon_after_failures`（默认 0 = 永不放弃，#117）：一条向量在别的向量都能成功、只有它反复失败够 N 次时停止
   重试；原文和队列条目都保留，错误面板 / pulse / Dashboard 显示已放弃数；改内容、补齐缺失向量或换引擎后重新尝试。
+- `surfacing.you_max_results`（默认 6，1～50）/ `surfacing.you_max_tokens`（默认 0 = 不限，0～40000，#124）：You 读回的
+  条数和 token 预算由用户在 Dashboard「设置」里定，热更新；模型传的 max_results 只能更少。写入允许一条认识长达 500 字，
+  原先写死的 160 token 连一条正常长度的中文认识都装不下。设了预算时，放不下的那条跳过、后面放得下的照常返回。
 
 ### 测试 / Tests
 
