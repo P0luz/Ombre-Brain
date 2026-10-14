@@ -34,6 +34,7 @@ import json
 import logging
 import re
 import time
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -157,6 +158,8 @@ class AutoRecallService:
         self._ids: list[str] = []
         self._by_id: dict[str, dict] = {}
         self.names_fn = names_fn
+        # 会话内已注入过的桶：同一个对话里同一条记忆只注入一次（照 supermemory 的做法）。
+        self._injected: "OrderedDict[str, set[str]]" = OrderedDict()
         self._names: frozenset[str] = frozenset()
         self._names_at = 0.0
 
@@ -345,11 +348,17 @@ class AutoRecallService:
             logger.warning("autorecall reminder failed: %s", type(exc).__name__)
         # 提醒已经记了账，召回出错也得把它送到，不能连带丢掉。
         try:
-            hits = await self.recall(prompt)
+            hits = await self.recall(prompt, top_k=3)
         except Exception as exc:
             logger.warning("autorecall recall failed: %s", type(exc).__name__)
             hits = []
+        already = self._injected.get(session_id, set())
+        hits = [b for b in hits if str(b.get("id")) not in already][:1]
         if hits:
+            self._injected.setdefault(session_id, set()).add(str(hits[0].get("id")))
+            self._injected.move_to_end(session_id)
+            while len(self._injected) > 1000:
+                self._injected.popitem(last=False)
             room = settings["max_chars"] - _units("\n\n".join(parts)) - _units(_RECALL_HEADER) - 4
             parts.append(_RECALL_HEADER + "\n" + self._render_bucket(hits[0], room))
         return _clip("\n\n".join(parts), settings["max_chars"])

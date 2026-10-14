@@ -143,7 +143,7 @@ def _messages(body: dict) -> list[dict]:
 
 
 _CLIENT_DIR = Path(__file__).resolve().parent.parent / "ombrebrain" / "autorecall" / "client"
-_CLIENT_FILES = frozenset({"install.py", "ob_hook.py", "ob_relay.py"})
+_CLIENT_FILES = frozenset({"install.py", "ob_hook.py", "ob_relay.py", "ob_client.py", "ob_client.mjs"})
 
 _BOOL_KEYS = ("enabled", "dream_on_start", "wake_on_names", "vector")
 _INT_KEYS = {"reminder_every": (0, 500), "restore_rounds": (0, 50), "agree_top": (0, 20)}
@@ -198,9 +198,15 @@ def _settings_payload() -> dict:
 _CHECK_PREFIX = "ob-check-"
 
 
+_EVENT_ALIASES = {"session-end": {"pre-compact"}}  # 共用端点、但要分开记到达的事件
+
+
 async def _note_arrival(service, name: str, body: dict) -> None:
+    event = str(body.get("event") or "")
+    if event not in _EVENT_ALIASES.get(name, ()):
+        event = name
     try:
-        await asyncio.to_thread(service.store.mark_seen, name)
+        await asyncio.to_thread(service.store.mark_seen, event)
         raw = body.get("client_errors")
         if isinstance(raw, list) and raw:
             errors = [
@@ -231,7 +237,8 @@ def register(mcp) -> None:
             text = (_CLIENT_DIR / name).read_text(encoding="utf-8")
         except OSError:
             return PlainTextResponse("not found", status_code=404)
-        return PlainTextResponse(text, media_type="text/x-python; charset=utf-8", headers=_NO_STORE)
+        media = "text/javascript" if name.endswith(".mjs") else "text/x-python"
+        return PlainTextResponse(text, media_type=f"{media}; charset=utf-8", headers=_NO_STORE)
 
     @mcp.custom_route("/api/settings/autorecall", methods=["GET"])
     async def get_autorecall_setting(request):

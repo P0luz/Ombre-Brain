@@ -79,7 +79,7 @@ def test_merge_keeps_existing_settings_and_is_idempotent(tmp_path, ob):
     assert settings["env"]["OB_URL"] == ob and settings["env"]["OB_HOOK_TOKEN"] == "tok"
     assert any(h["command"] == "say done" for g in settings["hooks"]["Stop"] for h in g["hooks"])
     ours = _ours(settings)
-    assert len(ours) == 4  # 装两遍也只有一份
+    assert len(ours) == 5  # 装两遍也只有一份（含 PreCompact）
     stop = next(h for h in ours if h["command"].endswith(" stop"))
     assert "async" not in stop and stop["timeout"] == 20  # 后台钩子退出时会被杀，回复存不上
     assert (tmp_path / "hooks" / "ob_hook.py").read_bytes() == (CLIENT / "ob_hook.py").read_bytes()
@@ -110,7 +110,7 @@ def test_broken_settings_json_is_left_untouched(tmp_path, ob):
 def test_no_env_keeps_token_out_of_settings(tmp_path, ob):
     _install(tmp_path, ob, "--token", "tok", "--no-env")
     settings = json.loads((tmp_path / "settings.json").read_text())
-    assert "env" not in settings and len(_ours(settings)) == 4
+    assert "env" not in settings and len(_ours(settings)) == 5
 
 
 @pytest.mark.parametrize("reply,expect", [
@@ -166,3 +166,16 @@ async def test_client_download_route_serves_only_whitelist(monkeypatch):
     assert ok.status_code == 200 and b"def main(" in ok.body
     for bad in ("../../server.py", "config.yaml", "__init__.py", ""):
         assert (await route(_Req(bad))).status_code == 404
+
+
+@pytest.mark.asyncio
+async def test_client_download_route_serves_sdks_with_types():
+    from web import autorecall
+    mcp = _MCP()
+    autorecall.register(mcp)
+    route = mcp.routes[("GET", "/autorecall/client/{name}")]
+    py = await route(_Req("ob_client.py"))
+    js = await route(_Req("ob_client.mjs"))
+    assert py.status_code == 200 and b"class OBClient" in py.body
+    assert js.status_code == 200 and b"export class OBClient" in js.body
+    assert "javascript" in js.headers["content-type"]

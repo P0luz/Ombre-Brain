@@ -5,6 +5,7 @@
 
 - 每条原文用钩子给的消息 uuid 做幂等键：Stop 每轮存一次，SessionEnd 再整段补一遍，重复的自动跳过。
 - 原文只增不改；桶删掉或归档只影响读，不删原文。
+- 入库前过隐私过滤（privacy.redact）：<private> 段落和类凭据内容不进库。
 - 连线（原文 → 桶）不设门槛，把相似度分数一起存下，以后读的时候再按扫出来的门槛筛。
 - 会话状态记三件事：项目目录 cwd（「上一段对话」只在同一个目录里找，两个窗口 / 两个项目不串）、
   上次 hold 提醒在第几轮（每满 N 轮提醒一次）、模块级的上次注入 dream 的日期（一天一次）。
@@ -23,6 +24,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ombrebrain.storage.module_sqlite import connect_module_db
+
+from .privacy import redact
 
 MAX_TURN_CHARS = 4000
 MAX_LINKS_PER_BUCKET = 20
@@ -194,12 +197,14 @@ class TranscriptStore:
                 added = new_user = 0
                 for message in messages:
                     role = str(message.get("role") or "")
-                    text = str(message.get("text") or "").strip()
-                    if role not in ("user", "assistant") or not text:
+                    raw_text = str(message.get("text") or "").strip()
+                    if role not in ("user", "assistant") or not raw_text:
                         continue
+                    # 去重键按原文算（同一句重复投递仍能认出来），入库的是过滤后的文本。
+                    text = redact(raw_text)
                     truncated = len(text) > MAX_TURN_CHARS
                     text = text[:MAX_TURN_CHARS]
-                    tid = turn_id(session, str(message.get("key") or ""), role, text)
+                    tid = turn_id(session, str(message.get("key") or ""), role, raw_text)
                     if connection.execute("SELECT 1 FROM turns WHERE id = ?", (tid,)).fetchone():
                         continue
                     seq += 1

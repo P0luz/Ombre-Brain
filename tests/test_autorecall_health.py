@@ -160,8 +160,14 @@ class _FakeOB(BaseHTTPRequestHandler):
         self.wfile.write(body or b"")
 
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("content-length", 0)))
+        raw = self.rfile.read(int(self.headers.get("content-length", 0)))
         name = self.path.rsplit("/", 1)[-1]
+        try:
+            event = json.loads(raw or b"{}").get("event")
+        except ValueError:
+            event = None
+        if name == "session-end" and event == "pre-compact":
+            name = "pre-compact"
         if name == "status":
             out = {"enabled": True, "seen": type(self).seen}
         else:
@@ -196,7 +202,7 @@ def test_install_then_check_passes_and_detects_missing_stop(tmp_path):
         assert _check(tmp_path, url, "--url", url, "--token", "tok").returncode == 0
         assert (tmp_path / "hooks" / "install.py").exists()  # 自检用的副本装好了
         ok = _check(tmp_path, url, "--check")
-        assert ok.returncode == 0 and ok.stdout.count("✓") >= 4, ok.stdout
+        assert ok.returncode == 0 and ok.stdout.count("✓") >= 5, ok.stdout
         settings = json.loads((tmp_path / "settings.json").read_text())
         del settings["hooks"]["Stop"]
         (tmp_path / "settings.json").write_text(json.dumps(settings))

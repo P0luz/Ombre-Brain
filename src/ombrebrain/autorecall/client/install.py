@@ -44,6 +44,8 @@ _EVENTS = {
     # 2026-10-14 实测 claude -p 下回复一条都没存上。同步只多等一次本地请求（实测约 60ms）。
     "Stop": ("stop", {"timeout": 20}),
     "SessionEnd": ("session-end", {"timeout": 10}),
+    # 压缩前抢救（照 basic-memory）：compact 之前把本会话补存完整。
+    "PreCompact": ("pre-compact", {"timeout": 10}),
 }
 _ENV_KEYS = ("OB_URL", "OB_HOOK_TOKEN")
 
@@ -222,6 +224,7 @@ def run_check(settings_path: Path) -> int:
         "prompt": {"prompt": "自检", "prompt_id": session},
         "stop": {"prompt_id": session, "last_assistant_message": "自检"},
         "session-end": {"transcript_path": ""},
+        "pre-compact": {"transcript_path": ""},
     }
     for mode, extra in payloads.items():
         command = commands.get(mode)
@@ -233,11 +236,13 @@ def run_check(settings_path: Path) -> int:
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         except subprocess.TimeoutExpired:
             pass
-    # session-end 没有可补存的原文时钩子不会发请求，这里替它补一个直连探针，只验证链路。
-    if "session-end" in commands:
+    # 关窗 / 压缩前没有可补存的原文时钩子不发请求，这里替它们各补一个直连探针，只验证链路。
+    for mode in ("session-end", "pre-compact"):
+        if mode not in commands:
+            continue
         request = urllib.request.Request(
             f"{url}/autorecall/session-end",
-            data=json.dumps({"session_id": session, "messages": []}).encode(),
+            data=json.dumps({"session_id": session, "messages": [], "event": mode}).encode(),
             headers={"Content-Type": "application/json", "X-Ombre-Hook-Token": token}, method="POST")
         try:
             _open(request, 10).read()
@@ -258,7 +263,7 @@ def run_check(settings_path: Path) -> int:
         if all(m in fresh for m in commands):
             break
     names = {"session-start": "开窗 SessionStart", "prompt": "提问 UserPromptSubmit",
-             "stop": "存回复 Stop", "session-end": "关窗 SessionEnd"}
+             "stop": "存回复 Stop", "session-end": "关窗 SessionEnd", "pre-compact": "压缩前 PreCompact"}
     ok = True
     for mode, label in names.items():
         if mode not in commands:

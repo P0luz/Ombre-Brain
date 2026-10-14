@@ -15,6 +15,9 @@
     ],
     "SessionEnd": [
       { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/ob_hook.py session-end", "timeout": 10 } ] }
+    ],
+    "PreCompact": [
+      { "hooks": [ { "type": "command", "command": "python3 ~/.claude/hooks/ob_hook.py pre-compact", "timeout": 10 } ] }
     ]
   }
 }

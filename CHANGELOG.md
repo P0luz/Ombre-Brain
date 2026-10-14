@@ -22,7 +22,7 @@
   - 新配置段 `autorecall`（见 config.example.yaml）。
   - **一键安装**：`curl -fsSL <OB地址>/autorecall/client/install.py | python3 - --url <OB地址>`（Dashboard 卡片里给出现成命令）。
     先备份 `~/.claude/settings.json` 再只增改自己的四个钩子，可重复运行、可 `--uninstall`，最后自检 token 与开关。
-    客户端脚本放在 `src/ombrebrain/autorecall/client/`，由 `GET /autorecall/client/{install.py,ob_hook.py}` 提供下载（只有这两个文件）。
+    客户端脚本放在 `src/ombrebrain/autorecall/client/`，由 `GET /autorecall/client/{name}` 提供下载（白名单：install.py / ob_hook.py / ob_relay.py / ob_client.py / ob_client.mjs）。
   - 上线前的行为审查与真机测试（Claude Code 2.1.295）修掉的问题：
     - 「上一段对话」按项目目录（cwd）找，两个窗口 / 不同项目不再串；不知道目录就不接。
     - dream 单独限时（`dream_timeout`，默认 8 秒），失败 / 超时 / 返回失败文案都不注入、不占当天额度、不拖垮接续原文；压缩不领当天 dream。
@@ -43,6 +43,11 @@
     - `install.py --check` 按真实命令跑一遍四个钩子并确认 OB 收到（自检会话不入库）；安装时一并放一份 install.py 供离线自检；
     - 本机地址（OB 在本机 / 本地中继）绕过系统代理（macOS 上 urllib 会把 127.0.0.1 也交给代理）；中继连远端 OB 时走系统代理隧道；
     - 中继只是连不上 OB 时不再拉第二个中继（会留孤儿进程）。
+  - **参考开源记忆项目补的三项**（都不改打分）：
+    - 入库隐私过滤：`<private>…</private>` 整段不存；API key / GitHub token / AWS key / JWT / 私钥 / `Bearer …` / `password=…` 一类换成 `[REDACTED]`；
+    - 同一会话里同一条记忆只注入一次，第二次唤醒时换下一条（都注入过就不注入）；
+    - PreCompact 钩子：压缩前把本会话原文补存完整（复用 session-end，幂等）。重跑一键安装即可加上。
+  - **与客户端无关的接入协议** `docs/AUTORECALL_PROTOCOL.md`，以及给自制前端用的最小 SDK：`ob_client.py`（标准库）、`ob_client.mjs`（浏览器 / Node 18+），可从 OB 直接下载。
 
 ### 性能 / Performance
 

@@ -157,13 +157,23 @@
     },
     {
       "path": "src/ombrebrain/autorecall/client/install.py",
-      "sha256": "ffc1927c7ab07ffc688847508b1955925d2b52529b9fcd1879537d3251f4a5d6",
-      "size": 15826
+      "sha256": "d2dbe5e38cb4a6263593320e2a6ceaa29998facf70bf2ed088d5801a996446cf",
+      "size": 16145
+    },
+    {
+      "path": "src/ombrebrain/autorecall/client/ob_client.mjs",
+      "sha256": "ff77a5f56f813e9a9a956ec0460cf9bf8293fc703166c706cdee760b357b76c3",
+      "size": 2901
+    },
+    {
+      "path": "src/ombrebrain/autorecall/client/ob_client.py",
+      "sha256": "3126c2b6bab77a942772b898b651ada3c817e22b761e2234a2fa13f91c18491b",
+      "size": 3051
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_hook.py",
-      "sha256": "ed75dee56198f6cb4420ebb1c68fd6e34c3e6cf191efb1b2a3446fe73cde4abe",
-      "size": 13639
+      "sha256": "422f4ceab77e587d5a9e061ae1161435f2773d37a745531332085e5cf770cc1d",
+      "size": 13930
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_relay.py",
@@ -176,14 +186,19 @@
       "size": 2853
     },
     {
+      "path": "src/ombrebrain/autorecall/privacy.py",
+      "sha256": "6655667be0f45d2c11be9c54b8d057d0899c278e991eb99f3f5fe9702b0ef6fd",
+      "size": 1638
+    },
+    {
       "path": "src/ombrebrain/autorecall/service.py",
-      "sha256": "578cf2c3f27a6440320f971adb7d13e21ad51bc593ccaa3e207f317e1175f56b",
-      "size": 23305
+      "sha256": "95f969e8830763c0e14d66fff9b2ff31e7f3fed4e4fea5c54c2ea36c9aa145f8",
+      "size": 23903
     },
     {
       "path": "src/ombrebrain/autorecall/transcript_store.py",
-      "sha256": "b66af93a27a976c66129956356de07e3d9e066717934b338be39684e346ea3cc",
-      "size": 18233
+      "sha256": "09da4b14d60d0227a359158e5d00f12e8deb30af148f764ae21ecd3043cd4c9c",
+      "size": 18536
     },
     {
       "path": "src/ombrebrain/domain/__init__.py",
@@ -847,8 +862,8 @@
     },
     {
       "path": "src/web/autorecall.py",
-      "sha256": "da27c22ec6d97fee91bcfed9af29fa5d0c56fc26ad4348356eb61f699f50bc59",
-      "size": 15273
+      "sha256": "c88d8739f7cf44272809dbe5d2c94259e04f188a99b6d27ddd50e592ed0e6d27",
+      "size": 15595
     },
     {
       "path": "src/web/buckets.py",

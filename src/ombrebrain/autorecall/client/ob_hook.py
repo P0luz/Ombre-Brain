@@ -9,6 +9,7 @@
     python3 ob_hook.py prompt          # UserPromptSubmit：存用户原文 + hold 提醒 + 唤醒召回
     python3 ob_hook.py stop            # Stop：存这一轮的助手回复（同步挂；后台钩子退出时会被杀）
     python3 ob_hook.py session-end     # SessionEnd：尽力补存用户原文
+    python3 ob_hook.py pre-compact     # PreCompact：压缩前同样补存一遍，压缩后的开窗接续拿得到完整原文
 
 环境变量：
     OB_URL         Ombre Brain 地址，默认 http://127.0.0.1:18001
@@ -40,10 +41,11 @@ from pathlib import Path
 import urllib.error
 import urllib.request
 
-_TIMEOUTS = {"session-start": 40, "prompt": 12, "stop": 25, "session-end": 8}
+_TIMEOUTS = {"session-start": 40, "prompt": 12, "stop": 25, "session-end": 8, "pre-compact": 8}
+_ENDPOINT = {"pre-compact": "session-end"}  # 压缩前抢救和关窗补存是同一件事
 _EVENT_NAMES = {"session-start": "SessionStart", "prompt": "UserPromptSubmit"}
 _MAX_BACKFILL = 1000
-_NO_WAIT = frozenset({"stop", "session-end"})
+_NO_WAIT = frozenset({"stop", "session-end", "pre-compact"})
 _HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd()
 
 
@@ -289,13 +291,13 @@ def main() -> int:
         messages = _backfill_user_messages(str(data.get("transcript_path") or ""))
         if not messages:
             return 0
-        payload = {"session_id": session_id, "messages": messages, "cwd": cwd}
+        payload = {"session_id": session_id, "messages": messages, "cwd": cwd, "event": mode}
 
     pending = _pending_errors() if mode not in _NO_WAIT else []
     if pending:
         payload["client_errors"] = pending
     try:
-        result = _send(mode, payload, _TIMEOUTS[mode])
+        result = _send(_ENDPOINT.get(mode, mode), payload, _TIMEOUTS[mode])
     except urllib.error.HTTPError as exc:
         report_error(mode, f"OB 返回 {exc.code}" + ("（token 不对？）" if exc.code == 401 else ""))
         return 0
