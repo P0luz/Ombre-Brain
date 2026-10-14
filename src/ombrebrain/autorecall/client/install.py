@@ -168,6 +168,25 @@ def _command(hook_path: Path, mode: str, client: str = "claude") -> str:
     return f'"{sys.executable}" "{hook_path}" {flag}{mode}'
 
 
+def codex_hooks_disabled(config_toml: Path) -> bool:
+    """Codex 的钩子默认开着；用户在 config.toml 的 [features] 里写过 hooks = false（旧名 codex_hooks）就全不跑。
+    只检查、不替用户改（claude-mem 的安装器会直接写 hooks = true）。"""
+    try:
+        lines = config_toml.read_text(encoding="utf-8").splitlines()
+    except OSError:
+        return False
+    in_features = False
+    for raw in lines:
+        line = raw.split("#", 1)[0].strip()
+        if line.startswith("["):
+            in_features = line.replace(" ", "") == "[features]"
+            continue
+        key, sep, value = line.partition("=")
+        if in_features and sep and key.strip() in ("hooks", "codex_hooks") and value.strip().lower() == "false":
+            return True
+    return False
+
+
 def write_env_file(hook_path: Path, url: str, token: str) -> Path:
     """Codex / Gemini 用：地址和 token 放钩子旁边，0600；中继状态和日志也放这个目录。"""
     path = hook_path.with_name("ob_hook.env")
@@ -450,7 +469,10 @@ def main(argv=None) -> int:
     _say(f"✓ 钩子脚本：{hook_path}（自检：python3 {hook_path.with_name('install.py')}{check_flag} --check）")
     _say(f"✓ 已合并进 {settings_path}（{' / '.join(profile['events'])}）")
     if client == "codex":
-        _say("· Codex 要求新钩子先信任：打开 codex，输入 /hooks，逐个信任 ob_hook.py 的条目。")
+        _say("· Codex 要求新钩子先信任：打开 codex，输入 /hooks，逐个信任 ob_hook.py 的条目；信任之前就开着的会话要重开。")
+        if codex_hooks_disabled(settings_path.with_name("config.toml")):
+            _say(f"! {settings_path.with_name('config.toml')} 的 [features] 里把钩子关了（hooks = false）："
+                 "改成 hooks = true，否则这些钩子不会跑。")
     if client == "antigravity":
         _say("· 实验性支持，开发者没能实测：原文从 agy 的记录文件里读，格式参照别的开源项目。")
         _say("· 用过请到 https://github.com/P0luz/Ombre-Brain/issues 说说行不行；没存上的排查办法见 deploy/clients/README.md。")

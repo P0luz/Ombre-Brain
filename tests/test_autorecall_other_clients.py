@@ -200,3 +200,16 @@ def test_antigravity_stop_skips_cancelled_and_unreadable(tmp_path, ob):
     import time as _time
     _time.sleep(0.5)
     assert len(ob.calls) == n
+
+
+def test_codex_hooks_feature_flag_detection(tmp_path):
+    cfg = tmp_path / "config.toml"
+    assert install.codex_hooks_disabled(cfg) is False  # 没有文件 = 默认开
+    cfg.write_text('model = "x"\n[features]\ngoals = true\nhooks = true\n')
+    assert install.codex_hooks_disabled(cfg) is False
+    cfg.write_text('[features]\nhooks = false  # 关了\n[other]\nhooks = true\n')
+    assert install.codex_hooks_disabled(cfg) is True
+    cfg.write_text('[features]\ncodex_hooks = false\n')
+    assert install.codex_hooks_disabled(cfg) is True
+    cfg.write_text('[profiles.a]\nhooks = false\n')
+    assert install.codex_hooks_disabled(cfg) is False

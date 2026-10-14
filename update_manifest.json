@@ -157,8 +157,8 @@
     },
     {
       "path": "src/ombrebrain/autorecall/client/install.py",
-      "sha256": "e33deebfd2756e97751fda5881e0d48f67b1d141c81a183bc2cd77df3ab39c7f",
-      "size": 22205
+      "sha256": "50e296da2d4626717938845bfd356ee9648568f15ce548099d6d111b34285e4d",
+      "size": 23323
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_client.mjs",
