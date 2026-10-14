@@ -26,6 +26,12 @@ import urllib.parse
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+try:  # 断线不丢：重试用完的请求写进 ob_hook 的待发目录，连上后补发（同目录的 ob_hook.py 提供）
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
+    from ob_hook import spool_count, spool_flush, spool_put
+except Exception:  # 单独拷走的旧中继：退回原来的只报错
+    spool_put = None
+
 IDLE_SECONDS = 30 * 60
 UPSTREAM_TIMEOUT = 30
 _PATHS = frozenset({"session-start", "prompt", "stop", "session-end"})
@@ -132,21 +138,40 @@ def serve(url: str, token: str) -> None:
     backlog: "queue.Queue[tuple[str, bytes]]" = queue.Queue(maxsize=1000)
     last_seen = [time.monotonic()]
 
+    def send(path: str, body: bytes) -> int:
+        try:
+            return upstream.post(path, body)[0]
+        except Exception:
+            return 0
+
+    def flush() -> None:
+        if spool_put is not None and spool_count():
+            spool_flush(send)
+
     def worker() -> None:
         while True:
-            path, body = backlog.get()
+            try:
+                path, body = backlog.get(timeout=60)
+            except queue.Empty:
+                flush()  # 闲着的时候也试一下：OB 回来了就把暂存的补发掉
+                continue
             last = ""
             for delay in (0, 2, 10):
                 time.sleep(delay)
                 try:
                     status, _ = upstream.post(path, body)
-                    if status < 500:
+                    if status < 500 and status != 429:
+                        flush()
                         break
                     last = f"OB 返回 {status}"
                 except Exception as exc:
                     last = f"{type(exc).__name__}: {exc}"
             else:
-                _report(path, f"中继后台发送三次都失败：{last}")
+                if spool_put is not None:
+                    spool_put(path, body)
+                    _report(path, f"中继后台发送三次都失败，已暂存，连上后补发：{last}")
+                else:
+                    _report(path, f"中继后台发送三次都失败：{last}")
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self):

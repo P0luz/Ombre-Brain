@@ -177,13 +177,13 @@
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_hook.py",
-      "sha256": "0e088430f7c4f919b7c07fb24694b14df9796b832e46ab89ab50935b082bed78",
-      "size": 23576
+      "sha256": "6195a7c805f31ad3e3efad01d15b92910434999ad46ec284b5ade7e116116111",
+      "size": 28230
     },
     {
       "path": "src/ombrebrain/autorecall/client/ob_relay.py",
-      "sha256": "8bfc9ca9c36aa7555a9c0b9a435fe17badd462dbdc2ba5c85d24b4e2e43b4aa5",
-      "size": 8652
+      "sha256": "ee431ed2bc0a9101fdb16dc79ea48b144074f3c64f420c71ad8a3f9b6a48a610",
+      "size": 9712
     },
     {
       "path": "src/ombrebrain/autorecall/lexical.py",

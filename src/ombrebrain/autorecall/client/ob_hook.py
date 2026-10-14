@@ -62,6 +62,7 @@ _HERE = Path(__file__).resolve().parent if "__file__" in globals() else Path.cwd
 
 _LOG_LIMIT = 200 * 1024
 _PENDING_LIMIT = 20
+_SPOOL_LIMIT = 500  # 待补发的请求最多留多少条；再多就丢最旧的
 
 
 def _load_env_file() -> None:
@@ -134,6 +135,107 @@ def _open(request, timeout: float):
     if host in ("127.0.0.1", "localhost", "::1"):
         return _DIRECT.open(request, timeout=timeout)
     return urllib.request.urlopen(request, timeout=timeout)
+
+
+# ---- 断线不丢：发不出去的「存回复 / 关窗补存」先落盘，连上后补发 ----
+# 照 claude-mem 的做法：先落盘再投递。这两类请求都带去重键，补发几次都不会存重。
+
+def _spool_dir() -> Path:
+    return _state_dir() / "spool"
+
+
+def spool_put(path: str, body: bytes) -> None:
+    """把一条发不出去的请求原样写进待发目录（0600）。超过上限丢最旧的。"""
+    try:
+        directory = _spool_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        name = f"{time.time_ns()}-{os.getpid()}-{uuid.uuid4().hex[:6]}.json"
+        temp = directory / f".{name}.tmp"
+        fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump({"path": path, "body": body.decode("utf-8")}, handle, ensure_ascii=False)
+        os.replace(temp, directory / name)
+        files = sorted(directory.glob("*.json"))
+        for old in files[:max(0, len(files) - _SPOOL_LIMIT)]:
+            old.unlink(missing_ok=True)
+    except Exception:
+        pass
+
+
+def spool_count() -> int:
+    try:
+        return sum(1 for _ in _spool_dir().glob("*.json"))
+    except OSError:
+        return 0
+
+
+def spool_flush(send) -> int:
+    """按时间顺序补发。send(path, body) 返回 HTTP 状态码。
+    2xx / 4xx（除 429）都算处理完（4xx 重发也不会成）；5xx、429、网络错误就停下，留着下次再发。"""
+    sent = 0
+    for item in sorted(_spool_dir().glob("*.json")):
+        claimed = item.with_name(f"{item.name}.sending-{os.getpid()}")
+        try:
+            os.replace(item, claimed)  # 先认领，两个补发进程不会抢同一条
+        except OSError:
+            continue
+        try:
+            record = json.loads(claimed.read_text(encoding="utf-8"))
+            status = send(str(record["path"]), str(record["body"]).encode("utf-8"))
+        except (OSError, ValueError, KeyError):
+            claimed.unlink(missing_ok=True)  # 坏文件
+            continue
+        except Exception:
+            status = 0
+        if status and status < 500 and status != 429:
+            claimed.unlink(missing_ok=True)
+            sent += 1
+            continue
+        os.replace(claimed, item)
+        break
+    return sent
+
+
+def _post_raw(path: str, body: bytes, timeout: float = 20) -> int:
+    base = os.environ.get("OB_URL", "http://127.0.0.1:18001").rstrip("/")
+    request = urllib.request.Request(
+        f"{base}/autorecall/{path}", data=body, method="POST",
+        headers={"Content-Type": "application/json", "X-Ombre-Hook-Token": os.environ.get("OB_HOOK_TOKEN", "")})
+    try:
+        with _open(request, timeout) as response:
+            response.read()
+            return response.status
+    except urllib.error.HTTPError as exc:
+        return exc.code
+
+
+def _flush_spool() -> int:
+    """--flush：脱离的子进程把待发目录补发掉。60 秒内只跑一个。"""
+    lock = _spool_dir() / ".flush.lock"
+    try:
+        if lock.exists() and time.time() - lock.stat().st_mtime < 60:
+            return 0
+        lock.write_text(str(os.getpid()))
+        sent = spool_flush(_post_raw)
+        if sent:
+            _debug(f"补发了 {sent} 条")
+    except Exception as exc:
+        report_error("flush", f"补发失败：{type(exc).__name__}: {exc}")
+    finally:
+        try:
+            lock.unlink()
+        except OSError:
+            pass
+    return 0
+
+
+def _after_success() -> None:
+    """刚刚确实连上了 OB：待发目录里有东西就交给后台补发，不拖慢这一次。"""
+    if spool_count():
+        try:
+            _detach([str(Path(__file__).resolve()), "--flush"])
+        except OSError:
+            pass
 
 
 def _post(path: str, payload: dict, timeout: float) -> dict:
@@ -234,11 +336,22 @@ def _send(path: str, payload: dict, timeout: float) -> dict:
 
 def _deliver(path: str) -> int:
     """--deliver：脱离的子进程从 stdin 读 payload 直连发出。"""
+    raw = sys.stdin.read() or "{}"
     try:
-        payload = json.loads(sys.stdin.read() or "{}")
-        _post(path, payload, _TIMEOUTS.get(path, 20))
+        _post(path, json.loads(raw), _TIMEOUTS.get(path, 20))
+    except urllib.error.HTTPError as exc:
+        if exc.code >= 500 or exc.code == 429:
+            spool_put(path, raw.encode("utf-8"))
+            report_error(path, f"OB 返回 {exc.code}，已暂存，连上后补发")
+        else:
+            report_error(path, f"后台发送被拒：OB 返回 {exc.code}")
+    except (urllib.error.URLError, OSError) as exc:
+        spool_put(path, raw.encode("utf-8"))
+        report_error(path, f"连不上 OB，已暂存，连上后补发：{type(exc).__name__}: {exc}")
     except Exception as exc:
         report_error(path, f"后台发送失败：{type(exc).__name__}: {exc}")
+    else:
+        _after_success()
     return 0
 
 
@@ -417,6 +530,8 @@ def _antigravity(mode: str, event: str = "") -> int:
             result = _send(mode, payload, _TIMEOUTS[mode])
             if pending:
                 _clear_pending()
+            if mode not in _NO_WAIT:
+                _after_success()
             context = result.get("context") if isinstance(result, dict) else ""
             if context:
                 out = {"injectSteps": [{"systemMessage": {"systemMessage": context}}]}
@@ -432,6 +547,8 @@ def main() -> int:
     _load_env_file()
     if len(sys.argv) > 2 and sys.argv[1] == "--deliver":
         return _deliver(sys.argv[2]) if os.environ.get("OB_HOOK_TOKEN") else 0
+    if len(sys.argv) > 1 and sys.argv[1] == "--flush":
+        return _flush_spool() if os.environ.get("OB_HOOK_TOKEN") else 0
     args = sys.argv[1:]
     client = "claude"
     if len(args) >= 2 and args[0] == "--client":
@@ -497,6 +614,8 @@ def main() -> int:
         return 0
     if pending:
         _clear_pending()
+    if mode not in _NO_WAIT:  # 等了结果、确实连上了
+        _after_success()
 
     context = result.get("context") if isinstance(result, dict) else ""
     names = _CLIENT_EVENT_NAMES.get(client, _EVENT_NAMES)

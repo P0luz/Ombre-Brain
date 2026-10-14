@@ -68,6 +68,9 @@
       各家真实钩子输入样例存进 `tests/fixtures/autorecall_clients/`（Claude Code 官方文档示例原样、Codex 官方 JSON schema 原样等，
       每份标明来源），`test_autorecall_client_contracts.py` 拿它们真跑 ob_hook，Codex 的输入输出还按官方 schema 校验；
       改坏一处字段映射会立刻变红（已做反向检查）。
+  - **断线不丢回复**（照 claude-mem「先落盘再投递」）：存回复 / 关窗补存发不出去时（中继重试三次都失败、或直连失败、OB 返回 5xx / 429），
+    原样写进钩子目录下的 `spool/`（0600，最多 500 条，丢最旧的）；之后任何一次连上 OB 就在后台按顺序补发，中继闲着时也会定期试。
+    这两类请求自带去重键，补发几次都不会存重；4xx 不暂存。真机：停掉 OB 期间的回复，在 OB 恢复后的下一句话时补进了库。
       **未实测**：开发者账号在本机和 129（均在美国）都过不了 agy 的资格检查。
 
 ### 性能 / Performance
