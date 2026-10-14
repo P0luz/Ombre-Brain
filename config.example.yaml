@@ -180,6 +180,7 @@ embedding:
   model: "gemini-embedding-001"   # 云端模型名（如 gemini-embedding-001）
   base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"
   timeout_seconds: 120             # Embedding request timeout seconds / 向量化请求超时秒数
+  keep_alive: -1                   # 仅 ollama：模型常驻多久（-1 = 一直常驻，"30m" 等）。不常驻时闲置 5 分钟就卸载，下一次查询冷启动要好几秒
   # api_key: ""                   # Use OMBRE_EMBED_API_KEY / 使用 OMBRE_EMBED_API_KEY
 
 # --- Scoring weights / 检索权重参数 ---

@@ -629,6 +629,11 @@ class BucketManager:
 
         # Active-bucket cache and its on-disk fingerprint are invalidated after writes.
         self._active_cache: "list[dict] | None" = None
+        # 含归档的全量列举按文件缓存解析结果：(mtime_ns, size, ino) 没变就不重解析。
+        # 2026-10-14 在 129（2 核 ARM，约 1450 桶）实测这一步占 breath_search 的一半（547ms），
+        # 而归档几乎不变。缓存出任何错就退回逐个解析，结果与原来逐字相同。
+        self._archive_parse_cache: "dict[str, tuple[tuple[int, int, int], dict | None]]" = {}
+        self._archive_parse_lock = threading.Lock()
         self._active_file_state: dict[str, tuple[int, int]] = {}
         self._active_cache_state_guard = threading.RLock()
         self._active_cache_generation = 0
@@ -853,6 +858,29 @@ class BucketManager:
         """不含 archive 的活跃桶目录（list_all/_collect_all_tags/查找均使用）。。。顺序不可随意调整：feel/plan/letter 在 dynamic 之后是为了与原代码扫描顺序保持一致。"""
         return [self.permanent_dir, self.dynamic_dir,
                 self.feel_dir, self.plan_dir, self.letter_dir]
+
+    def _list_all_with_archive_cached(self) -> list[dict]:
+        """``list_all(include_archive=True)`` 的按文件缓存版：只重解析变过的文件。"""
+        dirs = list(self._active_dirs) + [self.archive_dir]
+        out: list[dict] = []
+        seen: set[str] = set()
+        with self._archive_parse_lock:
+            cache = self._archive_parse_cache
+            for _root, _fname, file_path in self._iter_md_files(dirs):
+                stat = os.stat(file_path)
+                stamp = (stat.st_mtime_ns, stat.st_size, stat.st_ino)
+                seen.add(file_path)
+                hit = cache.get(file_path)
+                if hit is not None and hit[0] == stamp:
+                    bucket = hit[1]
+                else:
+                    bucket = self._load_bucket(file_path)
+                    cache[file_path] = (stamp, bucket)
+                if bucket:
+                    out.append({**bucket, "metadata": dict(bucket.get("metadata") or {})})
+            for gone in set(cache) - seen:
+                del cache[gone]
+        return out
 
     def _iter_md_files(self, dirs: list[str]):
         """递归遍历多个目录下的 *.md，yield (root, filename, full_path)。
@@ -3780,6 +3808,12 @@ class BucketManager:
         递归遍历目录（含域子目录），列出所有记忆桶。
         """
         if include_archive:
+            try:
+                return self._list_all_with_archive_cached()
+            except Exception as exc:  # 缓存坏了不影响结果：退回逐个解析
+                logger.warning("archive parse cache failed, falling back: %s", exc)
+                with self._archive_parse_lock:
+                    self._archive_parse_cache.clear()
             buckets = []
             dirs = list(self._active_dirs) + [self.archive_dir]
             for _root, _fname, file_path in self._iter_md_files(dirs):

@@ -199,8 +199,15 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
         dim: int = _GEMINI_DEFAULT_DIM,
         timeout_seconds: float = _API_TIMEOUT_SECONDS,
         api_format: str = "openai_compat",
+        keep_alive: Any = -1,
     ):
         self.api_key = api_key
+        # ollama：模型闲置 5 分钟（服务端默认）就被卸载，下一次查询要冷启动 3 秒多
+        # （2026-10-14 在 2 核 ARM 上实测 3.2s）。OpenAI 兼容的 /v1/embeddings 不认
+        # keep_alive，只有原生 /api/embed 认——而且两边算出的向量逐位相同（实测
+        # maxdiff=0），所以 ollama 改走原生接口并带上 keep_alive；原生接口不通就退回 /v1。
+        self.keep_alive = keep_alive
+        self._ollama_native_ok = True
         self.base_url = base_url
         self.api_format = (api_format or "openai_compat").strip().lower()
         self.backend_name = (
@@ -227,11 +234,12 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
         # 请求但不回」的服务器（挂死的代理、黑洞中间设备）就是 600×3 次尝试，而 MCP
         # 那头等着的是模型。dehydrator.py 的写法才是对的。
         # http_client 仍要自己建，因为本地 ollama 需要 trust_env=False（见上）。
+        self._http = httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=not _is_local_host)
         self._client = AsyncOpenAI(
             api_key=api_key,
             base_url=base_url,
             timeout=self.timeout_seconds,
-            http_client=httpx.AsyncClient(timeout=self.timeout_seconds, trust_env=not _is_local_host),
+            http_client=self._http,
         )
 
     def model_name(self) -> str:
@@ -248,9 +256,42 @@ class APIEmbeddingEngine(BaseEmbeddingEngine):
             logger.warning("[embedding] sync generate() called inside event loop; use generate_async")
             return []
 
+    async def _ollama_native(self, text: str) -> list[float] | None:
+        """原生 /api/embed（带 keep_alive）。调不通返回 None，并记住以后不再试。"""
+        if self.backend_name != "ollama" or not self._ollama_native_ok:
+            return None
+        root = (self.base_url or "").rstrip("/")
+        if root.endswith("/v1"):
+            root = root[: -len("/v1")]
+        if not root:
+            return None
+        try:
+            response = await self._http.post(
+                f"{root}/api/embed",
+                json={"model": self.model, "input": text[:_MAX_INPUT_CHARS], "keep_alive": self.keep_alive},
+            )
+            if response.status_code in (404, 405):
+                raise RuntimeError(f"native endpoint unavailable ({response.status_code})")
+            response.raise_for_status()
+            vectors = response.json().get("embeddings") or []
+            vec = list(vectors[0]) if vectors and vectors[0] else []
+            if vec and len(vec) != self._dim:
+                self._dim = len(vec)
+            return vec or None
+        except Exception as exc:
+            self._ollama_native_ok = False
+            logger.warning(
+                "[embedding] ollama 原生接口不可用，退回 /v1（模型闲置后会冷启动）: %s: %s",
+                type(exc).__name__, exc,
+            )
+            return None
+
     async def generate_async(self, text: str) -> list[float]:
         if not text or not text.strip():
             return []
+        native = await self._ollama_native(text)
+        if native:
+            return native
         try:
             response = await self._client.embeddings.create(
                 model=self.model,
@@ -516,6 +557,7 @@ class EmbeddingEngine:
                 dim=dim,
                 timeout_seconds=timeout_seconds,
                 api_format=api_format,
+                keep_alive=embed_cfg.get("keep_alive", -1),
             )
         elif api_format == "gemini":
             model = embed_cfg.get("model") or "gemini-embedding-001"

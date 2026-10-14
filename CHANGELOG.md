@@ -37,6 +37,15 @@
   条数和 token 预算由用户在 Dashboard「设置」里定，热更新；模型传的 max_results 只能更少。写入允许一条认识长达 500 字，
   原先写死的 160 token 连一条正常长度的中文认识都装不下。设了预算时，放不下的那条跳过、后面放得下的照常返回。
 
+### 性能 / Performance
+
+- **breath_search 提速，结果逐字不变**（2026-10-14 在 2 核 ARM、约 1450 桶的真实库上实测，12 句真实问句）：中位 1142ms → 574ms，最慢 4270ms → 680ms。
+  - 含归档的全量列举按文件缓存解析结果（mtime/size/inode 没变就不重解析），547ms → 16ms；缓存出错退回逐个解析。
+  - ollama 后端改走原生 `/api/embed` 并带 `keep_alive`（新配置 `embedding.keep_alive`，默认 -1 常驻）：
+    原来闲置 5 分钟模型就被卸载，下一次查询冷启动 3.2s。两个接口算出的向量逐位相同（实测 maxdiff=0），原生接口不通自动退回 `/v1`。
+  - 剩下的大头是 CPU 上跑 bge-m3 的查询向量化本身（约 420ms）。
+  - 有测试保证：同一批问句在开 / 关缓存时 breath_search 输出逐字相同。
+
 ### 变更 / Changed
 
 - 代码、测试、提示词里的示例人名一律换成虚构名字（Quinn / Nova / 阿树 / Mochi 等）；`attribution` 不再把某个具体网名硬编码成「指代用户」，需要的话写进 `attribution.user_names`。
