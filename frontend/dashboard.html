@@ -3086,6 +3086,10 @@
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">500-40000。breath 单次返回总 token 上限；40000 为安全上限，不是默认值</div>
         <div class="config-row"><label>feel 历史 token</label><input type="number" id="cfg-sf-feel-tokens" min="500" max="20000" step="500" /></div>
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">500-20000。dream / breath(domain=feel) 中新 feel 的全文预算</div>
+        <div class="config-row"><label>You 读回条数</label><input type="number" id="cfg-sf-you-results" min="1" max="50" /></div>
+        <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">1-50，默认 6。You 读回最多返回几条认识；AI 传的 max_results 只能更少</div>
+        <div class="config-row"><label>You 读回 token</label><input type="number" id="cfg-sf-you-tokens" min="0" max="40000" step="100" /></div>
+        <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">0-40000，默认 0 = 不限。设了上限时，装不下的那条会被跳过，后面装得下的照常返回</div>
         <div class="config-row"><label>时区</label><input type="text" id="cfg-timezone" list="cfg-timezone-options" placeholder="Asia/Shanghai" maxlength="64" /></div>
         <datalist id="cfg-timezone-options">
           <option value="Asia/Shanghai"></option>
@@ -8035,6 +8039,8 @@ async function loadConfig() {
     document.getElementById('cfg-sf-breath-results').value = sf.breath_max_results || 20;
     document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 20000;
     document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 15000;
+    document.getElementById('cfg-sf-you-results').value = sf.you_max_results || 6;
+    document.getElementById('cfg-sf-you-tokens').value = sf.you_max_tokens || 0;
     document.getElementById('cfg-timezone').value = cfg.timezone || 'Asia/Shanghai';
     document.getElementById('config-readonly').innerHTML =
       'Transport（已保存）: <strong>' + esc(cfg.transport) + '</strong>'
@@ -8338,6 +8344,8 @@ async function saveConfig(persist) {
       breath_max_results: parseInt(document.getElementById('cfg-sf-breath-results').value) || 20,
       breath_max_tokens: parseInt(document.getElementById('cfg-sf-breath-tokens').value) || 20000,
       feel_max_tokens: parseInt(document.getElementById('cfg-sf-feel-tokens').value) || 15000,
+      you_max_results: parseInt(document.getElementById('cfg-sf-you-results').value) || 6,
+      you_max_tokens: parseInt(document.getElementById('cfg-sf-you-tokens').value) || 0,
     },
     timezone: (document.getElementById('cfg-timezone').value || '').trim(),
     persist: persist,

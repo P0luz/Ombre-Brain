@@ -8,11 +8,13 @@ import pytest
 
 from ombrebrain.you import YouService, YouStore, YouStoreError
 from ombrebrain.you.service import (
-    _MAX_HINT_TOKENS,
     MIN_SUPPORTING_BUCKETS,
     REQUIRED_CONFIRMATIONS,
 )
 from utils import count_tokens_approx
+
+# 面板设了 token 预算时的典型值（早先写死的就是它）。默认是 0 = 不限（#124）。
+_BUDGET = 160
 
 
 class FakeBucketManager:
@@ -354,15 +356,15 @@ async def test_一条放不下不连累后面放得下的(tmp_path, monkeypatch)
     长 = await _formalized_long(service, manager, monkeypatch)
     assert service._query_score(长, "希望先听结论") > service._query_score(短, "希望先听结论")
 
-    读回 = await service.recall(query="希望先听结论")
+    读回 = await service.recall(query="希望先听结论", max_tokens=_BUDGET)
     assert "Lin" in 读回
     assert _长认识 not in 读回
-    assert count_tokens_approx(读回) <= _MAX_HINT_TOKENS
+    assert count_tokens_approx(读回) <= _BUDGET
 
-    带id = await service.recall(query="希望先听结论", with_ids=True)
+    带id = await service.recall(query="希望先听结论", with_ids=True, max_tokens=_BUDGET)
     assert "Lin" in 带id and f"id={短.id}" in 带id
     assert f"id={长.id}" not in 带id
-    assert count_tokens_approx(带id) <= _MAX_HINT_TOKENS
+    assert count_tokens_approx(带id) <= _BUDGET
 
 
 @pytest.mark.asyncio
@@ -370,5 +372,43 @@ async def test_没有正文就不返回空头部(tmp_path, monkeypatch):
     service, manager = _enabled(tmp_path)
     await _formalized_long(service, manager, monkeypatch)
 
-    assert await service.recall(query="希望先听结论") == ""
-    assert await service.recall(query="希望先听结论", with_ids=True) == ""
+    assert await service.recall(query="希望先听结论", max_tokens=_BUDGET) == ""
+    assert await service.recall(query="希望先听结论", with_ids=True, max_tokens=_BUDGET) == ""
+
+
+@pytest.mark.asyncio
+async def test_默认不限预算长认识也读得回来(tmp_path, monkeypatch):
+    """写入允许 500 字，读回却写死 160 token 时，这条 128 字的认识永远读不回来（#124）。"""
+    service, manager = _enabled(tmp_path)
+    await _formalized(service, monkeypatch)
+    await _formalized_long(service, manager, monkeypatch)
+
+    读回 = await service.recall(query="希望先听结论")
+    assert _长认识 in 读回
+    assert "Lin" in 读回
+
+
+@pytest.mark.asyncio
+async def test_面板设置决定条数和预算(tmp_path, monkeypatch):
+    import tools._runtime as rt
+    from tools.you.core import dispatch
+
+    service, manager = _enabled(tmp_path)
+    await _formalized(service, monkeypatch)
+    await _formalized_long(service, manager, monkeypatch)
+    monkeypatch.setattr(rt, "you_service", service, raising=False)
+    monkeypatch.setattr(rt, "mark_op", None, raising=False)
+
+    monkeypatch.setattr(rt, "config", {"surfacing": {}}, raising=False)
+    读回 = await dispatch(query="希望先听结论")
+    assert _长认识 in 读回 and "Lin" in 读回
+
+    monkeypatch.setattr(rt, "config", {"surfacing": {"you_max_tokens": _BUDGET}}, raising=False)
+    读回 = await dispatch(query="希望先听结论")
+    assert _长认识 not in 读回 and "Lin" in 读回
+
+    # 条数上限 1：只剩排第一的长认识；模型传更大的 max_results 也越不过面板。
+    monkeypatch.setattr(rt, "config", {"surfacing": {"you_max_results": 1}}, raising=False)
+    for 读回 in (await dispatch(query="希望先听结论"),
+                await dispatch(query="希望先听结论", max_results=10)):
+        assert _长认识 in 读回 and "Lin" not in 读回

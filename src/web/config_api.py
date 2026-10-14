@@ -311,6 +311,9 @@ def register(mcp) -> None:
                 "breath_max_results": int(sh.config.get("surfacing", {}).get("breath_max_results") or 20),
                 "breath_max_tokens": int(sh.config.get("surfacing", {}).get("breath_max_tokens") or 20000),
                 "feel_max_tokens": int(sh.config.get("surfacing", {}).get("feel_max_tokens") or 15000),
+                # You 读回：条数默认 6；token 预算默认 0 = 不限（#124）。
+                "you_max_results": int(sh.config.get("surfacing", {}).get("you_max_results") or 6),
+                "you_max_tokens": int(sh.config.get("surfacing", {}).get("you_max_tokens") or 0),
             },
             "merge_threshold": sh.config.get("merge_threshold", 75),
             # 只给日期不写时区时按它理解（Letter 定时锁等）。前端「设置」可改。
@@ -489,6 +492,8 @@ def register(mcp) -> None:
                 ("breath_max_results", 1, 50),
                 ("breath_max_tokens", 500, 40000),
                 ("feel_max_tokens", 500, 20000),
+                ("you_max_results", 1, 50),
+                ("you_max_tokens", 0, 40000),
             ):
                 if key in surfacing_payload:
                     surfacing_values[key] = _bounded_config_int(

@@ -510,9 +510,9 @@ delete-to-archive 才触发依赖 Claim 的级联失效。支持桶删除或受�
 - 两类内容都只能由已暴露的单个 `You` MCP 工具读取；不得通过 `/breath-hook`、普通 `breath`
   或其他工具旁路注入。
 - 工具支持 bounded query 和 aspect 过滤；无 query 时只返回受预算约束的 `core` 条目。
-- 单次返回上限为 160 tokens 且最多 6 条。
+- 单次返回条数默认最多 6 条（面板 `surfacing.you_max_results`，1–50，模型传的 max_results 只能更少）；token 预算默认不限（面板 `surfacing.you_max_tokens`，0 = 不限）。
 - 有 query 时按规范化子串/双字符匹配分数排序并去掉零分项；无 query 时只选 `core`。达到条数后
-  停止；单条放不下约 160 token 余量时跳过该条、继续尝试后面的，不使用“用户价值分”或人格评分。
+  停止；设了 token 预算时，单条放不下就跳过该条、继续尝试后面的，不使用“用户价值分”或人格评分。
 - 返回**已生效 Claim 的正文**；Claim ID、aspect、证据、收据和生效时间都不进入 MCP 响应。
 - 服务端只选择 `formal + clear + current + callable` 的 Claim。
 - 结果数量和 token 均受硬上限约束。
@@ -649,7 +649,7 @@ scope + 当前有效 formal Claims + projection policy version
 4. 正文变更会清空重申收据并把已生效条目退回 `candidate`。
 5. 命中固定禁止主题模式或归一化连续原文片段的内容会被拒绝写入。
 6. 写入路径不调用任何 LLM；读回也不再调用 `abstract_you_hint`。
-7. 读回直接返回模型写下的 Claim 正文，最多 6 条、约 160 tokens，不附带证据或内部元数据。
+7. 读回直接返回模型写下的 Claim 正文，条数与 token 预算由面板配置（默认 6 条、token 不限），不附带证据或内部元数据。
 8. 支持桶被删除后，Claim 在下一次读回时失效；普通归档继续算有效支持，读桶异常不误杀。
 9. 模型可用 `delete_id` 立即撤回条目；撤回不物理删除，也不需要三日确认。
 10. Scope 不匹配或模块关闭时，存储与服务层都拒绝读取/写入。

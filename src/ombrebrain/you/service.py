@@ -46,8 +46,11 @@ def _basis_choices() -> str:
 def _core_aspect_choices() -> str:
     return " / ".join(sorted(_CORE_ASPECTS))
 _IGNORED_BUCKET_TYPES = frozenset({"archived", "feel", "plan", "letter", "self", "i"})
+# 读回的条数和 token 预算由面板（surfacing.you_max_results / you_max_tokens）决定，
+# 这里只是默认值和硬上限。token 预算默认 0 = 不限：写入允许一条认识长达 500 字，
+# 写死的 160 token 连一条正常长度的中文认识都装不下，它就永远读不回来（#124）。
 _MAX_HINT_RESULTS = 6
-_MAX_HINT_TOKENS = 160
+_HINT_RESULTS_CEILING = 50
 
 # 闸一：立一条 you 要模型在几个**不同自然日**重申。改一条同理——证据或正文一变，
 # 先前的重申就不算数，得重新攒。
@@ -574,6 +577,7 @@ class YouService:
         query: str = "",
         aspect: str = "",
         max_results: int = _MAX_HINT_RESULTS,
+        max_tokens: int = 0,
         with_ids: bool = False,
         with_pending: bool = True,
     ) -> str:
@@ -584,9 +588,13 @@ class YouService:
         if normalized_aspect and normalized_aspect not in VALID_ASPECTS:
             return ""
         try:
-            result_limit = max(1, min(_MAX_HINT_RESULTS, int(max_results)))
+            result_limit = max(1, min(_HINT_RESULTS_CEILING, int(max_results)))
         except (TypeError, ValueError, OverflowError):
             result_limit = _MAX_HINT_RESULTS
+        try:
+            token_budget = max(0, int(max_tokens))
+        except (TypeError, ValueError, OverflowError):
+            token_budget = 0
         projection = self.store.get_projection(state.scope)
         if projection is None:
             projection = await self.rebuild_projection(state.scope)
@@ -614,8 +622,8 @@ class YouService:
         # id 默认不给，要才给。
         #
         # delete_id 此前是够不着的：这条路径从来不交出 claim id，而它是撤回的
-        # 唯一入口。但无条件带上也不行——一个 id 约 12 token，而这里总预算只有
-        # 160，实测 4 条会掉到 3 条，为一个偶尔才用的能力常年砍掉 1/4 正文。
+        # 唯一入口。但无条件带上也不行——一个 id 约 12 token，面板设了 token
+        # 预算时（早先写死 160）实测 4 条会掉到 3 条，为一个偶尔才用的能力砍掉正文。
         #
         # 所以照 breath_search(quotes=True) 那套：默认一字不少，想撤回时明确要。
         lines = ["[你自己写下的、关于对方的长期认识；不是此刻的事实，按需自行判断]"]
@@ -629,7 +637,7 @@ class YouService:
             if with_ids:
                 next_line += f"  [id={claim.id}]"
             # 单条放不下只跳过这一条，不连累后面放得下的（同 #114 breath 侧）。
-            if count_tokens_approx("\n".join([*lines, next_line])) > _MAX_HINT_TOKENS:
+            if token_budget and count_tokens_approx("\n".join([*lines, next_line])) > token_budget:
                 continue
             lines.append(next_line)
             正文条数 += 1

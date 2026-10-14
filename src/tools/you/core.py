@@ -23,7 +23,7 @@ async def dispatch(
     long_term: Optional[bool] = False,
     delete_id: Optional[str] = "",
     with_ids: Optional[bool] = False,
-    max_results: Optional[int] = 6,
+    max_results: Optional[int] = None,
 ) -> str:
     """读回（默认）、写入/重申（给 content）、或撤回（给 delete_id）。"""
 
@@ -48,9 +48,22 @@ async def dispatch(
         )
         return message
 
+    # 条数和 token 预算由用户在面板上定；模型传的 max_results 只能往小里收（#124）。
+    surfacing = (getattr(rt, "config", None) or {}).get("surfacing") or {}
+    results_cap = _config_int(surfacing.get("you_max_results"), 6)
+    token_budget = _config_int(surfacing.get("you_max_tokens"), 0)
+    requested = results_cap if max_results is None else _config_int(max_results, results_cap)
     return await rt.you_service.recall(
         query="" if query is None else str(query),
         aspect="" if aspect is None else str(aspect),
-        max_results=6 if max_results is None else max_results,
+        max_results=max(1, min(results_cap, requested)),
+        max_tokens=token_budget,
         with_ids=bool(with_ids),
     )
+
+
+def _config_int(value, default: int) -> int:
+    try:
+        return int(value)
+    except (TypeError, ValueError, OverflowError):
+        return default
