@@ -7,8 +7,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "e55c96fe6c913050fe884df442d630ce47c219d12579b6c8e9860a2e71b521ae",
-      "size": 575642
+      "sha256": "4f0f4a60883ee5cb34bdc52beaa698c119cb4c9c2fa930e79a942fa050471601",
+      "size": 576681
     },
     {
       "path": "frontend/favicon.svg",
@@ -552,8 +552,8 @@
     },
     {
       "path": "src/ombrebrain/you/service.py",
-      "sha256": "a79e11753d7fc30382a04d5fe9525737d72aa02031b8c0e8128b11e1a069fde8",
-      "size": 35642
+      "sha256": "e53691191f5ec12f0d1fa821df9245abf19d2ac678354533e4c6fd45cdd12bdd",
+      "size": 36171
     },
     {
       "path": "src/ombrebrain/you/store.py",
@@ -787,8 +787,8 @@
     },
     {
       "path": "src/tools/you/core.py",
-      "sha256": "3c7cff7a5a5d871340d661f409fca9bbfd31439d1d1e2e001572cb227056c185",
-      "size": 1996
+      "sha256": "de35780c5956f2bdccb97bb7ebd059260865f7c1c000b89514587358e4e860f3",
+      "size": 2597
     },
     {
       "path": "src/utils.py",
@@ -817,8 +817,8 @@
     },
     {
       "path": "src/web/config_api.py",
-      "sha256": "16616e0ec7160d0664b9195891fa9b335404f9ecc48693f9725248ec39e14611",
-      "size": 76902
+      "sha256": "92b8f6cb0cdf59bd424b7a704a40284a38e3dcf0c63f067f863aadb9d71681a1",
+      "size": 77281
     },
     {
       "path": "src/web/dashboard.py",
