@@ -92,6 +92,12 @@ _TEXT_HASH_CHUNK_CHARS = 1024 * 1024
 
 _IMPORT_ERROR_RULES = (
     (
+        "empty_extraction",
+        re.compile(r"extraction returned empty response", re.I),
+        "模型返回了空的记忆提取响应",
+        "检查模型是否只返回思考内容、是否达到输出上限，以及接口格式是否匹配。",
+    ),
+    (
         "model_not_found",
         re.compile(r"model does not exist|model[_ ]?not[_ ]?found|模型不存在", re.I),
         "模型名称不可用",
@@ -1370,8 +1376,9 @@ class ImportEngine:
             temperature=_EXTRACT_TEMPERATURE,
         )
 
-        if not raw.strip():
-            return []
+        # 空正文不是明确的 JSON []；必须走失败路径，不能伪装成正常零提取。
+        if raw is None or not raw.strip():
+            raise ValueError("LLM extraction returned empty response")
 
         return self._parse_extraction(raw)
 

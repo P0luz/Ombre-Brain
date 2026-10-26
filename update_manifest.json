@@ -32,8 +32,8 @@
     },
     {
       "path": "src/VERSION",
-      "sha256": "b4116d6e880009dc1440ddab7ec054bcea529aea394ec5bab7943b415a359281",
-      "size": 5
+      "sha256": "cd6321af37482f49efc326524a9fcd7fc86902a48da8d4bbd3dc718d290c3fea",
+      "size": 6
     },
     {
       "path": "src/bm25_index.py",
@@ -77,8 +77,8 @@
     },
     {
       "path": "src/import_memory.py",
-      "sha256": "9f89c8ef32b09f0d6ee3274bba1984b8d383ee2ae338ccd4e56dd04171ab5f55",
-      "size": 60702
+      "sha256": "2b09b75f1ef38ce8cc8c429f157856646007c8097d51ea9b470763aca5db7ee8",
+      "size": 61140
     },
     {
       "path": "src/migrate_engine.py",
@@ -972,5 +972,5 @@
     }
   ],
   "rollout_strategy": "single-node",
-  "version": "4.0.0"
+  "version": "4.0.1"
 }

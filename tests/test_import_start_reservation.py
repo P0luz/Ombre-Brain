@@ -74,6 +74,55 @@ async def _wait_until_finished(engine: ImportEngine) -> None:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("raw_response", "expected_status", "expected_failed"),
+    [("", "error", 1), ("[]", "completed", 0)],
+)
+async def test_upload_status_distinguishes_empty_response_from_empty_array(
+    tmp_path, monkeypatch, raw_response, expected_status, expected_failed,
+):
+    class ResponseDehydrator:
+        api_available = True
+        import_max_tokens = 4096
+
+        async def _chat(self, *_args, **_kwargs):
+            return raw_response
+
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path), "human": "用户"},
+        object(),
+        ResponseDehydrator(),
+    )
+    monkeypatch.setattr(import_api.sh, "_require_auth", lambda _request: None)
+    monkeypatch.setattr(import_api.sh, "import_engine", engine, raising=False)
+    mcp = FakeMCP()
+    import_api.register(mcp)
+    request = BodyRequest(
+        "Human: 周三参加读书会。\nAssistant: 我记下了。",
+        "response-boundary.md",
+    )
+
+    started = await mcp.routes[("POST", "/api/import/upload")](request)
+    assert started.status_code == 200
+    started_payload = _payload(started)
+    assert started_payload["status"] == "started"
+    await _wait_until_finished(engine)
+    response = await mcp.routes[("GET", "/api/import/status")](request)
+    status = _payload(response)
+
+    assert response.status_code == 200
+    assert status["job_id"] == started_payload["job_id"]
+    assert status["status"] == expected_status
+    assert status["chunks_failed"] == expected_failed
+    assert status["memories_created"] == 0
+    if expected_failed:
+        assert len(status["errors"]) == 1
+        assert status["diagnostics"][0]["code"] == "empty_extraction"
+    else:
+        assert status["errors"] == status["diagnostics"] == []
+
+
+@pytest.mark.asyncio
 async def test_import_engine_concurrent_starts_have_one_owner(tmp_path):
     dehydrator = BlockingDehydrator()
     engine = ImportEngine(

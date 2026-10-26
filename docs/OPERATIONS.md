@@ -96,6 +96,7 @@ python tools/check_buckets.py --json
 | 语义检索不可用 | 关键词/BM25 仍可读，返回明确降级提示 | 修复 provider 后等待 outbox 清空 |
 | Obsidian 修改后结果旧 | 等待外部变更轮询周期 | 检查 `storage.external_change_poll_seconds`，再看系统诊断的外部变更计数 |
 | ZIP 上传被拒绝 | 本地 vault 未写入 | 按错误修复损坏、路径穿越、重复项或清单不一致，重新导出 |
+| Markdown 导入提示模型返回空提取响应 | 该分块没有创建记忆，计入失败；其他成功分块保留 | 查看任务的 `errors` / `diagnostics`，检查模型输出模式、输出上限与接口格式；模型明确返回合法 `[]` 则仍是正常零提取，不属于此错误 |
 | SQLite quick_check 失败 | Markdown 真源通常仍在 | 先备份 Markdown，移走损坏的派生库，再重建向量；不要删除 Markdown |
 | 记忆库里出现 `embeddings.db.corrupt-<时间戳>` 或 `dehydration_cache.db.corrupt-<时间戳>` | 对应派生库启动时打不开，已被自动隔离并重建；Markdown 未受影响 | 确认服务已正常启动、向量在后台补齐后，这些隔离文件可以删除。留着只为取证，不会被读取 |
 | outbox 长时间不下降 | 记忆正文仍安全 | 查看熔断状态、最近错误、Key/模型/维度和 provider 连通性 |

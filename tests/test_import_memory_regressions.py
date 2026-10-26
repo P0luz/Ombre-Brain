@@ -11,9 +11,13 @@
 import hashlib
 import json
 import os
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
+import import_memory as import_memory_module
+from dehydrator import Dehydrator
 from import_memory import (
     ImportEngine,
     ImportState,
@@ -110,6 +114,197 @@ class FakeBucketManager:
 
     async def update(self, bucket_id, **_kw):
         return True
+
+
+class RawResponseDehydrator(FakeDehydrator):
+    """逐次返回指定模型正文，不在测试替身中预先处理空结果。"""
+
+    def __init__(self, *responses):
+        super().__init__()
+        self.responses = iter(responses)
+
+    async def _chat(self, prompt, content, max_tokens=0, temperature=0.0):
+        self.prompts.append(prompt)
+        self.chat_calls.append(content)
+        return next(self.responses)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", ["", " \t\n ", None])
+async def test_empty_extraction_response_fails_and_persists_error(tmp_path, raw):
+    bucket_mgr = FakeBucketManager()
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path), "human": "用户"},
+        bucket_mgr,
+        RawResponseDehydrator(raw),
+    )
+
+    result = await engine.start(
+        "Human: 周三我参加了北桥读书会。\nAssistant: 我记下了。",
+        filename="empty-response.md",
+    )
+
+    assert result["status"] == "error"
+    assert result["processed"] == result["total_chunks"] == 1
+    assert result["api_calls"] == result["chunks_failed"] == 1
+    assert result["memories_created"] == result["memories_skipped"] == 0
+    assert len(result["errors"]) == 1
+    assert "empty response" in result["errors"][0]
+    assert engine.get_status()["diagnostics"][0]["code"] == "empty_extraction"
+    assert bucket_mgr.created == []
+    assert engine.is_running is False
+    assert engine.active_job_id == ""
+
+    persisted = ImportState(str(tmp_path))
+    assert persisted.load() is True
+    assert persisted.to_dict()["status"] == "error"
+    assert persisted.to_dict()["errors"] == result["errors"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("raw", [
+    "[]",
+    " \n [] \n ",
+    "```json\n[]\n```",
+    "没有值得记忆的信息。\n[]",
+])
+async def test_explicit_empty_extraction_array_still_completes(tmp_path, raw):
+    bucket_mgr = FakeBucketManager()
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path), "human": "用户"},
+        bucket_mgr,
+        RawResponseDehydrator(raw),
+    )
+
+    result = await engine.start(
+        "Human: 你好。\nAssistant: 你好。",
+        filename="no-memory.md",
+    )
+
+    assert result["status"] == "completed"
+    assert result["processed"] == result["api_calls"] == 1
+    assert result["chunks_failed"] == result["memories_created"] == 0
+    assert result["errors"] == engine.get_status()["diagnostics"] == []
+    assert bucket_mgr.created == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("response_case", [
+    "no_choices", "null_content", "empty_content", "whitespace_content",
+    "reasoning_only", "length_empty", "explicit_empty_array",
+])
+async def test_real_dehydrator_empty_response_reaches_import_failure(
+    tmp_path, monkeypatch, caplog, response_case,
+):
+    dehydrator = Dehydrator({
+        "buckets_dir": str(tmp_path),
+        "dehydration": {
+            "api_key": "test-key",
+            "api_format": "openai_compat",
+            "base_url": "https://provider.invalid/v1",
+            "model": "test-extraction",
+        },
+    })
+    content = {
+        "no_choices": None,
+        "null_content": None,
+        "empty_content": "",
+        "whitespace_content": " \t\n ",
+        "reasoning_only": None,
+        "length_empty": "",
+        "explicit_empty_array": "[]",
+    }[response_case]
+    response = SimpleNamespace(choices=[] if response_case == "no_choices" else [
+        SimpleNamespace(
+            message=SimpleNamespace(
+                content=content,
+                reasoning_content="合成思考" if response_case == "reasoning_only" else None,
+            ),
+            finish_reason="length" if response_case == "length_empty" else "stop",
+        ),
+    ])
+    create = AsyncMock(return_value=response)
+    monkeypatch.setattr(dehydrator.client.chat.completions, "create", create)
+    bucket_mgr = FakeBucketManager()
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path), "human": "用户"},
+        bucket_mgr,
+        dehydrator,
+    )
+
+    try:
+        result = await engine.start(
+            "Human: 隐私哨兵-S134-不应进入日志。\nAssistant: 我记下了。",
+            filename="provider-response.md",
+        )
+    finally:
+        await dehydrator.client.close()
+        dehydrator._cache_conn.close()
+
+    assert create.await_count == 1
+    assert result["api_calls"] == 1
+    assert bucket_mgr.created == []
+    if response_case == "explicit_empty_array":
+        assert result["status"] == "completed"
+        assert result["errors"] == []
+        assert result["chunks_failed"] == 0
+    else:
+        assert result["status"] == "error"
+        assert result["chunks_failed"] == 1
+        assert "empty response" in result["errors"][0]
+        assert engine.get_status()["diagnostics"][0]["code"] == "empty_extraction"
+    assert "隐私哨兵-S134" not in caplog.text
+    assert "隐私哨兵-S134" not in json.dumps(result, ensure_ascii=False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("empty_first", [False, True])
+async def test_empty_response_marks_partial_without_losing_other_chunk(
+    tmp_path, monkeypatch, empty_first,
+):
+    chunks = [
+        {"content": "[用户] 第一件事", "timestamp_start": "", "timestamp_end": ""},
+        {"content": "[用户] 第二件事", "timestamp_start": "", "timestamp_end": ""},
+    ]
+    monkeypatch.setattr(
+        import_memory_module, "chunk_turns", lambda *_args, **_kwargs: chunks,
+    )
+    valid = json.dumps([{"name": "读书会", "content": "周三参加了读书会。"}])
+    responses = ("", valid) if empty_first else (valid, "")
+    bucket_mgr = FakeBucketManager()
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path), "human": "用户"},
+        bucket_mgr,
+        RawResponseDehydrator(*responses),
+    )
+
+    result = await engine.start("Human: 两件事", filename="partial.md")
+
+    assert result["status"] == "partial"
+    assert result["processed"] == result["api_calls"] == 2
+    assert result["chunks_failed"] == result["memories_created"] == 1
+    assert len(result["errors"]) == 1
+    assert [item["content"] for item in bucket_mgr.created] == ["周三参加了读书会。"]
+
+
+@pytest.mark.asyncio
+async def test_empty_response_failure_releases_job_for_explicit_empty_array(tmp_path):
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path), "human": "用户"},
+        FakeBucketManager(),
+        RawResponseDehydrator("", "[]"),
+    )
+    raw = "Human: 你好。\nAssistant: 你好。"
+
+    failed = await engine.start(raw, filename="first.md")
+    assert failed["status"] == "error"
+    assert engine.is_running is False
+    completed = await engine.start(raw, filename="second.md")
+
+    assert completed["status"] == "completed"
+    assert completed["job_id"] != failed["job_id"]
+    assert completed["errors"] == engine.get_status()["diagnostics"] == []
+    assert completed["chunks_failed"] == 0
 
 
 @pytest.mark.asyncio
