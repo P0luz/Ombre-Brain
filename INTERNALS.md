@@ -180,7 +180,7 @@
 | `/auth/change-password` | POST | 修改密码 🔒 |
 
 > 🔒 = 需要 Dashboard 认证（未认证返回 401 JSON）
-> 🔑 = **App 的小钥匙 `OMBRE_APP_TOKEN` 也能开**(2026-11-01,`server.py` 的 `_APP_TOKEN_ROUTES`):桶列表 / 桶详情 / 改桶 / 删桶 / 信箱读改删 / 便利贴读勾改删。dwell-bridge 拿着它替 App 的 Journal 页读写;App 本身不拿。不设 = 关着。白名单外的门(设置、导入、改密码、回收站……)带它照样 401,测试 `tests/test_app_token.py`
+> 🔑 = **App 的小钥匙 `OMBRE_APP_TOKEN` 也能开**(2026-11-01,`server.py` 的 `_APP_TOKEN_ROUTES`):桶列表 / 桶详情 / 改桶 / 删桶 / 信箱读改删 / 便利贴读勾改删。dwell-bridge 拿着它替 App 的 Journal 页读写;App 本身不拿。不设 = 关着。白名单外的门(设置、导入、改密码、回收站……)带它照样 401,测试 `tests/test_app_token.py`。**改这张白名单或 `/api/buckets` 的字段之前,先看 `rivers-system` 的 `dwell-bridge/MAINTENANCE.md`《Journal》**(那边按这些字段给 App 分类、配原话)
 
 **Dashboard 认证**
 - 密码存储：SHA-256 + 随机 salt，保存于 `{buckets_dir}/.dashboard_auth.json`
