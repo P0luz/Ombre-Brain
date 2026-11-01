@@ -153,7 +153,7 @@
 | `/breath-hook` | GET | SessionStart 钩子 |
 | `/dream-hook` | GET | Dream 钩子 |
 | `/dashboard` | GET | Dashboard 页面 |
-| `/api/buckets` | GET | 桶列表 🔒 |
+| `/api/buckets` | GET | 桶列表 🔒🔑。`?full=1`(2026-11-01)每条多带**原文**(不去 `[[链接]]`)和 `trigger_date` / `trigger_handled`,给 App 的 Journal 页用;面板不带,照旧只有 200 字预览 |
 | `/api/bucket/{id}` | GET | 桶详情 🔒 |
 | `/api/bucket/{id}` | PATCH | 改桶（白名单字段：名称/内容/域/标签/重要度/情感/已解决/已消化/钉选/休眠/触发日期，与 `trace` 同一套；改内容才重建向量、才留写前快照；feel 桶允许空 domain）🔒 |
 | `/api/bucket/{id}` | DELETE | 删桶（默认真删，写前快照 + 清向量；`?mode=archive` 只归档，feel 桶按规格拒绝归档；钉选/固化桶需 `?force=1`）🔒 |
@@ -180,6 +180,7 @@
 | `/auth/change-password` | POST | 修改密码 🔒 |
 
 > 🔒 = 需要 Dashboard 认证（未认证返回 401 JSON）
+> 🔑 = **App 的小钥匙 `OMBRE_APP_TOKEN` 也能开**(2026-11-01,`server.py` 的 `_APP_TOKEN_ROUTES`):桶列表 / 桶详情 / 改桶 / 删桶 / 信箱读改删 / 便利贴读勾改删。dwell-bridge 拿着它替 App 的 Journal 页读写;App 本身不拿。不设 = 关着。白名单外的门(设置、导入、改密码、回收站……)带它照样 401,测试 `tests/test_app_token.py`
 
 **Dashboard 认证**
 - 密码存储：SHA-256 + 随机 salt，保存于 `{buckets_dir}/.dashboard_auth.json`
@@ -1017,7 +1018,7 @@ time curl -s -b "ombre_session=<你的>" https://ianmian.zeabur.app/api/network 
 | 事 | 实际情况 |
 |---|---|
 | 读 | `GET /api/todos`(只读,原样返回条目,渲染交给前端) |
-| 写 | `POST /api/todos/add` / `toggle` / `delete`,鉴权与面板其余接口一致 |
+| 写 | `POST /api/todos/add` / `toggle` / `delete`,鉴权与面板其余接口一致。**2026-11-01 加 `update`**(`{id, text}`,只改字、`by` 不动、另记 `edited`,不在正文标注改过),给 App 的 Journal 页长按改字用 |
 | 存储 | **复用晏那套**:`_load_todos_list` / `_save_todos_list`(原子写)/ `_new_todo_id`(4 位短码)。**别在面板这边另造一份写法**——两套写法迟早会写坏同一个文件 |
 | 并发 | 新增 `_todos_lock()`(照 `_letters_lock` 那套 flock):晏走 MCP、她走面板,两边都是「读整本 → 改 → 整本重写」,撞上时后写的会把先写的整个顶掉且不报错。⚠️ **两边都要拿这把锁** —— `_todos_impl` 的写路径 2026-09-01 部署前自审时补上了(**锁只有一边拿等于没锁**);只读路径不拿。测试钉了每条写路径各拿一次、只读不拿 |
 | 删 | **真删,不留底**(照晏那个 `remove=` 的行为;便利贴本来就是随手撕的东西,不像记忆桶有 `.history` 快照)。所以前端二次确认 |

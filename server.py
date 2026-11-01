@@ -221,9 +221,44 @@ def _is_authenticated(request) -> bool:
     return True
 
 
+# --- App 的小钥匙 OMBRE_APP_TOKEN(2026-11-01)---
+# 原生 App「Intertidal」的 Journal 页经 dwell-bridge 读 / 改 / 删他的记忆、信、便利贴。
+# dwell 带 `Authorization: Bearer <它>`,**只开下面这张白名单**:设置、导入、改密码、回收站、搜索调试一律不开 ——
+# 钥匙丢了也只是这几扇门,碰不到面板的其余部分。App 本身从不拿这把钥匙(它只有 dwell 的口令)。
+# **不设 = 关着**,和以前一模一样。值与 dwell-bridge 的 `OMBRE_APP_TOKEN` 相同,不入库。
+_APP_TOKEN_ROUTES = (
+    ("GET", "/api/buckets"),
+    ("GET", "/api/bucket/"), ("PATCH", "/api/bucket/"), ("POST", "/api/bucket/"), ("DELETE", "/api/bucket/"),
+    ("GET", "/api/letters"), ("POST", "/api/letters/update"), ("POST", "/api/letters/delete"),
+    ("GET", "/api/todos"), ("POST", "/api/todos/toggle"), ("POST", "/api/todos/update"), ("POST", "/api/todos/delete"),
+)
+
+
+def _app_token_ok(request) -> bool:
+    token = os.environ.get("OMBRE_APP_TOKEN", "").strip()
+    if not token:
+        return False
+    auth = request.headers.get("authorization", "")
+    given = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    if not given or not hmac.compare_digest(given, token):
+        return False
+    path, method = request.url.path, request.method.upper()
+    for m, p in _APP_TOKEN_ROUTES:
+        if method != m:
+            continue
+        if path == p:
+            return True
+        # 「/api/bucket/<id>」只认恰好一段 id,别让前缀把更深的路径也放进来
+        if p.endswith("/") and path.startswith(p) and path[len(p):] and "/" not in path[len(p):]:
+            return True
+    return False
+
+
 def _require_auth(request):
     """Return JSONResponse(401) if not authenticated, else None."""
     from starlette.responses import JSONResponse
+    if _app_token_ok(request):
+        return None
     if not _is_authenticated(request):
         return JSONResponse(
             {"error": "Unauthorized", "setup_needed": _is_setup_needed()},
@@ -2174,6 +2209,41 @@ async def api_todos_toggle(request):
         return JSONResponse({"error": str(e)}, status_code=500)
 
 
+@mcp.custom_route("/api/todos/update", methods=["POST"])
+async def api_todos_update(request):
+    """改一张的字(2026-11-01,App 的 Journal 页长按「Edit」)。body: {id, text}
+
+    只改正文,`by` 不动(谁贴的还是谁贴的),另记 `edited`;同信箱的规矩,**不在正文里标注改过**。
+    """
+    from starlette.responses import JSONResponse
+    err = _require_auth(request)
+    if err: return err
+    try:
+        body = await request.json()
+    except Exception:
+        return JSONResponse({"error": "bad json"}, status_code=400)
+    tid = _norm_todo_id(str(body.get("id", "")))
+    if not tid:
+        return JSONResponse({"error": "id 必填"}, status_code=400)
+    text = str(body.get("text", "")).strip()
+    if not text:
+        return JSONResponse({"error": "内容不能为空"}, status_code=400)
+    if len(text) > 500:
+        return JSONResponse({"error": "一条便利贴最多 500 字"}, status_code=400)
+    try:
+        with _todos_lock():
+            items = _load_todos_list()
+            hit = next((it for it in items if it.get("id") == tid), None)
+            if not hit:
+                return JSONResponse({"error": f"没找到编号 #{tid} 的待办"}, status_code=404)
+            hit["text"] = text
+            hit["edited"] = (datetime.utcnow() + timedelta(hours=8)).isoformat(timespec="seconds")
+            _save_todos_list(items)
+        return JSONResponse({"ok": True, "items": items})
+    except Exception as e:
+        return JSONResponse({"error": str(e)}, status_code=500)
+
+
 @mcp.custom_route("/api/todos/delete", methods=["POST"])
 async def api_todos_delete(request):
     """撕掉一张。body: {id}
@@ -2534,12 +2604,19 @@ async def api_buckets(request):
     from starlette.responses import JSONResponse
     err = _require_auth(request)
     if err: return err
+    # ?full=1(2026-11-01,App 的 Journal 页):每条多带**原文**(不去 [[链接]],改完存回去才不会把链接弄丢)
+    # 和到期提醒那两个字段,省得一条一条再去要详情。面板不带这个参数,照旧只拿 200 字预览。
+    full = request.query_params.get("full", "") in ("1", "true")
     try:
         all_buckets = await bucket_mgr.list_all(include_archive=True)
         result = []
         for b in all_buckets:
             meta = b.get("metadata", {})
+            extra = {"content": b.get("content", ""),
+                     "trigger_date": meta.get("trigger_date"),
+                     "trigger_handled": meta.get("trigger_handled", False)} if full else {}
             result.append({
+                **extra,
                 "id": b["id"],
                 "name": meta.get("name", b["id"]),
                 "type": meta.get("type", "dynamic"),
