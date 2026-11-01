@@ -78,6 +78,12 @@ class TestWhitelist:
         assert client.get("/api/letters", headers=AUTH).status_code == 200
         assert client.get("/api/todos", headers=AUTH).status_code == 200
 
+    def test_add_todo_marks_owner(self, client):
+        r = client.post("/api/todos/add", headers=AUTH, json={"text": "App 里贴的"})
+        assert r.status_code == 200
+        hit = next(it for it in r.json()["items"] if it["id"] == r.json()["id"])
+        assert hit["text"] == "App 里贴的" and hit["by"] == "owner"
+
     def test_wrong_token(self, client):
         r = client.get("/api/buckets", headers={"Authorization": "Bearer nope"})
         assert r.status_code == 401
@@ -86,7 +92,6 @@ class TestWhitelist:
         ("GET", "/api/config"),
         ("GET", "/api/trash"),
         ("GET", "/api/status"),
-        ("POST", "/api/todos/add"),
         ("POST", "/auth/change-password"),
     ])
     def test_outside_whitelist_still_401(self, client, method, path):

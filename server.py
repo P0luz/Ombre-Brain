@@ -231,6 +231,8 @@ _APP_TOKEN_ROUTES = (
     ("GET", "/api/bucket/"), ("PATCH", "/api/bucket/"), ("POST", "/api/bucket/"), ("DELETE", "/api/bucket/"),
     ("GET", "/api/letters"), ("POST", "/api/letters/update"), ("POST", "/api/letters/delete"),
     ("GET", "/api/todos"), ("POST", "/api/todos/toggle"), ("POST", "/api/todos/update"), ("POST", "/api/todos/delete"),
+    # 2026-11-02 她要在 App 里也能贴(和他的分开显示):贴的那条照样打 by: "owner",他开机看到「(她留的)」
+    ("POST", "/api/todos/add"),
 )
 
 
