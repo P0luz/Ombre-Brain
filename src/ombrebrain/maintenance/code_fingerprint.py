@@ -11,6 +11,9 @@ _CODE_DIRS = ("src", "frontend")
 # 播种，运行时目录永远停留在第一次播种时的版本（诊断读的正是运行时目录）。
 # 与 _CODE_DIRS 的区别是「缺失不算错」：老镜像和老运行时都没有这几个目录。
 _OPTIONAL_CODE_DIRS = ("docs", "tools", "kernel")
+# A dependency-only image rebuild must refresh the persisted lock baseline too.
+# Older images can lack a lockfile, so its absence remains supported.
+_OPTIONAL_ROOT_FILES = ("requirements.lock.txt",)
 _IGNORED_SUFFIXES = {".pyc", ".pyo"}
 
 
@@ -28,6 +31,7 @@ def _code_files(root: Path) -> list[Path]:
                 continue
             if path.is_file():
                 files.append(path)
+    files.extend(root / name for name in _OPTIONAL_ROOT_FILES if (root / name).is_file())
     return sorted(files, key=lambda path: path.relative_to(root).as_posix())
 
 

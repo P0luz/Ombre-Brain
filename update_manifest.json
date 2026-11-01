@@ -217,8 +217,8 @@
     },
     {
       "path": "src/ombrebrain/maintenance/code_fingerprint.py",
-      "sha256": "72f36584c96042736a66ee92c1f5d9ed95d6fbf960917fed51ad68dd8f199a26",
-      "size": 2627
+      "sha256": "2b013896aae7a6bfc62684db0d3c87247063f25f8dd8befa2575e89cd58a63d7",
+      "size": 2917
     },
     {
       "path": "src/ombrebrain/maintenance/migration_contract.py",
