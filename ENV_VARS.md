@@ -10,6 +10,7 @@
 | `OMBRE_HOOK_URL` | 否 | — | Breath/Dream Webhook 推送地址（POST JSON），留空则不推送 |
 | `OMBRE_VECTOR_MIN_SIM` | 否 | `0.70` | `breath` 向量通道的放行线:余弦超过它的桶才以「语义关联」补进结果(2026-09-30 由写死的 0.5 改来,理由见 INTERNALS 3.3.1)。设 `0.5` = 旧行为;换 embedding 模型后要重量 |
 | `OMBRE_RECALL_TOKEN` | 否 | — | **自动浮现**查询口 `GET /api/recall` 的 Bearer token(2026-09-30,见 INTERNALS 3.3.2)。**不设 = 该口子关着(404)**。值与 kelivo-shim 的 `RECALL_TOKEN` 相同,不入库 |
+| `OMBRE_APP_TOKEN` | 否 | — | **App 的小钥匙**(2026-11-01):原生 App「Intertidal」的 Journal 页经 dwell-bridge 读 / 改 / 删记忆、信箱、便利贴,dwell 带 `Authorization: Bearer <它>`。**只开白名单**(`server.py` 的 `_APP_TOKEN_ROUTES`:桶列表 / 桶详情 / 改桶 / 删桶 / 信箱读改删 / 便利贴读勾改删),设置、导入、改密码、回收站一律不开。**不设 = 关着,与改动前完全相同**。值与 dwell-bridge 的 `OMBRE_APP_TOKEN` 相同,不入库 |
 | `OMBRE_MCP_TOKEN` | 否 | — | **机器走的门的钥匙**(2026-10-03,`mcp_guard.py`)。设了之后 `/mcp`、`/breath-hook`、`/dream-hook` 要求 `Authorization: Bearer <它>`(或 `X-Ombre-Token`),否则 401。**不设 = 不上锁,与改动前完全相同**。晏(shim 的 `mcp-servers.json`)、Claude Code 会话、开场钩子、GitHub 体检(secret 同名,可选)用同一把。不入库 |
 | `OMBRE_HOOK_SKIP` | 否 | `false` | 设为 `true`/`1`/`yes` 跳过 Webhook 推送（即使 `OMBRE_HOOK_URL` 已设置） |
 | `OMBRE_DASHBOARD_PASSWORD` | 否 | — | 预设 Dashboard 访问密码；设置后覆盖文件存储的密码，首次访问不弹设置向导 |
