@@ -405,11 +405,30 @@ def configure_errors_path(buckets_dir: str) -> None:
         _errors_path = None
 
 
+def _ends_with_newline(path: str) -> bool:
+    """文件最后一个字节是不是换行。空文件/读不了都算「是」（不用补）。"""
+    try:
+        if os.path.getsize(path) == 0:
+            return True
+        with open(path, "rb") as f:
+            f.seek(-1, os.SEEK_END)
+            return f.read(1) == b"\n"
+    except OSError:
+        return True
+
+
 def _persist_error_record(record: dict) -> None:
     if not _errors_path:
         return
     try:
         with _errors_path_lock:
+            # 崩溃会把最后一行截在中间。直接追加会把新记录粘到那半行后面，
+            # 于是**两条都变成一行读不出来的东西**——而这个日志正是崩溃之后
+            # 要拿来看的，尾行残缺才是常态。先补一个换行，坏的只坏一条。
+            # ledger_mirror 早就这么做了，这里一直漏着。
+            if not _ends_with_newline(_errors_path):
+                with open(_errors_path, "a", encoding="utf-8", newline="\n") as f:
+                    f.write("\n")
             with open(_errors_path, "a", encoding="utf-8") as f:
                 f.write(json.dumps(record, ensure_ascii=False) + "\n")
     except Exception as e:

@@ -1,14 +1,12 @@
 import asyncio
 from concurrent.futures import ThreadPoolExecutor
 import math
-import multiprocessing
 import threading
 
 import frontmatter
 import pytest
 
 from bucket_manager import _clamp01
-from ombrebrain.fabric.log.wal import WalStore
 from ombrebrain.retrieval.context import MemoryContextCompiler
 from tools import _runtime as rt
 from tools._common import (
@@ -22,45 +20,6 @@ from tools.breath._verbatim import render_stored_bucket
 from utils import positive_float
 from web.request_limits import MCPRequestBodyLimitMiddleware
 from web.search import _unit_query_float
-
-
-def _append_wal_range(path: str, start: int, count: int) -> None:
-    wal = WalStore(path)
-    for value in range(start, start + count):
-        wal.append({"value": value})
-
-
-def test_wal_concurrent_threads_preserve_index_and_checksum_chain(tmp_path):
-    path = tmp_path / "threaded.wal"
-
-    def append(value: int) -> int:
-        return WalStore(path).append({"value": value}).index
-
-    with ThreadPoolExecutor(max_workers=16) as pool:
-        indexes = list(pool.map(append, range(96)))
-
-    replayed = list(WalStore(path).replay())
-    assert sorted(indexes) == list(range(1, 97))
-    assert [entry.index for entry in replayed] == list(range(1, 97))
-    assert {entry.payload["value"] for entry in replayed} == set(range(96))
-
-
-def test_wal_concurrent_processes_preserve_index_and_checksum_chain(tmp_path):
-    path = tmp_path / "multiprocess.wal"
-    context = multiprocessing.get_context("spawn")
-    processes = [
-        context.Process(target=_append_wal_range, args=(str(path), offset * 20, 20))
-        for offset in range(4)
-    ]
-    for process in processes:
-        process.start()
-    for process in processes:
-        process.join(timeout=30)
-        assert process.exitcode == 0
-
-    replayed = list(WalStore(path).replay())
-    assert [entry.index for entry in replayed] == list(range(1, 81))
-    assert {entry.payload["value"] for entry in replayed} == set(range(80))
 
 
 def test_identical_content_turns_serialize_across_thread_event_loops():

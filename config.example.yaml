@@ -186,7 +186,7 @@ matching:
 # AI 调用 breath() 不显式传 max_* 时使用这些默认；前端「浮现默认参数」面板会回写到这里。
 surfacing:
   breath_max_results: 20          # 1-50, hard cap of buckets returned per breath
-  breath_max_tokens: 10000        # 500-40000, total token cap per breath; 40000 is a safety ceiling, not the default
+  breath_max_tokens: 20000        # 500-40000, total token cap per breath; must fit up to limits.max_pinned core rules first, then ordinary surfacing; 40000 is a safety ceiling, not the default
   feel_max_tokens: 15000          # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries
   # 3.6.0: 浮现区给近 7 天创建的桶预留几个位置，按 created 倒序；其余位置照旧按权重。
   # 权重是累积的——旧桶靠历史访问把分数攒得很高，新桶从 0 起步，永远排不进前列。

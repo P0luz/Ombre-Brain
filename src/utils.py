@@ -627,6 +627,17 @@ def load_config(config_path: Optional[str] = None) -> dict:
         except Exception:
             pass
 
+    # 空白的 buckets_dir 会让下面的 join 落到当前工作目录：记忆库看起来是空的，
+    # 新记忆散进 cwd。环境变量那条路早就把空字符串当"未设置"了
+    # （见 _apply_env_override），config.yaml 里写 buckets_dir: "" 走的是另一条
+    # 路，一直没这条规矩。统一成同一个约定。
+    if not str(config.get("buckets_dir") or "").strip():
+        config["buckets_dir"] = defaults["buckets_dir"]
+        logging.getLogger(__name__).warning(
+            "buckets_dir 是空的，已退回默认值 %s（空值会让记忆散进当前工作目录）",
+            config["buckets_dir"],
+        )
+
     # 媒体必须和记忆一起落在持久卷；默认使用数据目录下独立的 _media。
     # OMBRE_MEDIA_DIR 仅在确实挂载了另一块持久盘时覆盖。
     media_dir = os.environ.get("OMBRE_MEDIA_DIR", "").strip()
@@ -1118,6 +1129,59 @@ def atomic_write_text(path: str | Path, text: str) -> None:
         raise
 
 
+def publish_new_file(temporary: str, target: str, text: str) -> None:
+    """把已经写好的 ``temporary`` 发布成 ``target``；目标已存在就抛 FileExistsError。
+
+    首选硬链接：`link(2)` 原子地要么创建目标名、要么失败，不会覆盖别人。
+    `os.replace` 做不到这一点——它会静默覆盖，那是「更新」的语义，不是「创建」。
+
+    **但有些文件系统压根不支持硬链接**：Termux/Android 的 FUSE 挂载、部分
+    NAS/SMB 卷。真机上 `hold` 就是这么炸的（[OB-E004]）。这时退回
+    `O_CREAT|O_EXCL`——它同样是原子的「要么占到这个名字、要么 FileExistsError」，
+    只是不需要硬链接。
+
+    退回时会重写一遍正文而不是直接 `os.replace(temporary, target)`：后者一旦在
+    另一个进程刚创建同名文件之后执行，就把人家的文件盖掉了，而这个函数的全部
+    意义就是不许发生这件事。代价是这条路上「写入」不再是一次原子发布，读者有
+    可能看到半截文件——在不支持硬链接的文件系统上，这是能保住 no-clobber 的
+    最好结果。
+
+    `ombrebrain/storage/source_store.py` 早就为同一个原因做了兜底（那边靠一个
+    旁路租约），这里补上另外两处一直漏掉的。
+    """
+    link = getattr(os, "link", None)
+    if link is not None:
+        try:
+            link(temporary, target)
+            return
+        except FileExistsError:
+            raise
+        except OSError:
+            # 不支持硬链接。不按 errno 挑：不同平台报 EPERM / ENOSYS /
+            # EOPNOTSUPP / EXDEV 都有，而下面这条路本身是安全的——真是别的毛病，
+            # 它会用更清楚的错误再失败一次。
+            pass
+
+    descriptor = os.open(
+        target, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o644
+    )
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(text)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except BaseException:
+        # 这条路上「创建」和「写完」不是同一步，中间炸了（盘满、配额、SMB 断连）
+        # 就会在真实路径上留下一个半截文件。它 frontmatter 解析得通、_load_bucket
+        # 读得出来，于是调用方收到「失败」，库里却多了一条被截断的记忆。
+        # O_EXCL 保证这个名字是我们刚占下的，删掉不会碰到别人的文件。
+        try:
+            os.unlink(target)
+        except OSError:
+            pass
+        raise
+
+
 def count_tokens_approx(text: str) -> int:
     """
     Rough token count estimate.
@@ -1140,8 +1204,14 @@ def count_tokens_approx(text: str) -> int:
 
 
 def now_iso() -> str:
+    """当前时间的 ISO 串，带本地时区偏移。
+
+    以前这里是裸的本地墙上时间，没有偏移也没有 Z。单机单时区时没问题，
+    但只要库被跨时区的机器写过、或者赶上夏令时回拨的那一小时，字符串里就
+    **不存在**能还原真相的信息了——而且 OB 进程外的消费者（导出的 JSON、
+    读桶算衰减的下游工具）连「写这条的机器在哪」都无从得知。
+
+    带上偏移之后，旧的 naive 值不受影响：parse_iso_datetime 两种都吃，
+    aware 的会被归一成本地 naive，进程内的比较行为一个字都不变。
     """
-    Return current time as ISO format string.
-    返回当前时间的 ISO 格式字符串。
-    """
-    return datetime.now().isoformat(timespec="seconds")
+    return datetime.now().astimezone().isoformat(timespec="seconds")

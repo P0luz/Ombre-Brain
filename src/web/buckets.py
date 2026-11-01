@@ -20,6 +20,7 @@ from starlette.requests import Request
 from starlette.responses import Response
 
 from ombrebrain.domain.memory_messages import resolved_hint
+from tools.i import disputing_candidates, superseded_by
 from . import _shared as sh
 
 logger = sh.logger
@@ -221,7 +222,7 @@ def register(mcp) -> None:
         """Get full raw bucket content plus display-only derived text by ID.
 
         A trusted sidecar may use its service token on this exact read route so
-        Xinchao can inspect every bucket type. Dashboard sessions remain valid,
+        Xinchao can inspect bucket types using AI-side letter visibility. Dashboard sessions remain valid,
         while all bucket mutation routes keep requiring Dashboard auth.
         """
         from starlette.responses import JSONResponse
@@ -233,9 +234,12 @@ def register(mcp) -> None:
         if not bucket:
             return JSONResponse({"error": "not found"}, status_code=404)
         meta = bucket.get("metadata", {})
-        lock_state = letter_lock_state(bucket, "human")
+        # Bearer credentials never inherit human Dashboard visibility, even
+        # when a request also carries a session cookie.
+        caller_side = "ai" if sh._is_service_token_authenticated(request) else "human"
+        lock_state = letter_lock_state(bucket, caller_side)
         if lock_state["locked"]:
-            safe_letter = safe_letter_metadata(bucket, "human")
+            safe_letter = safe_letter_metadata(bucket, caller_side)
             return JSONResponse({
                 "id": bucket["id"],
                 "metadata": {
@@ -1053,6 +1057,10 @@ def register(mcp) -> None:
                 )
             ]
             self_buckets.sort(key=lambda b: b["metadata"].get("created", ""), reverse=True)
+            # 被取代的和正在被质疑的必须标出来，否则人在 Dashboard 上看到的是
+            # 一堆并列的「我认为」，中间夹着几条模型早就不这么想了的——
+            # 而人恰恰是最该看到「这条被替换了」的那个。
+            buckets_by_id = {b["id"]: b for b in all_b}
             result = []
             for b in self_buckets:
                 meta = b["metadata"]
@@ -1063,6 +1071,9 @@ def register(mcp) -> None:
                     "content": b.get("content", ""),
                     "aspect": aspect,
                     "created": meta.get("created", ""),
+                    "superseded_by": superseded_by(b),
+                    "disputed_by": disputing_candidates(b, buckets_by_id),
+                    "sedimented": bool(meta.get("i_from_candidate")),
                 })
             return JSONResponse(result)
         except Exception as e:

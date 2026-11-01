@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import sqlite3
 from pathlib import Path
 from typing import Any, Iterable
 
 from ombrebrain.projection.projection_mirror import TraceCatalogProjection
+from ombrebrain.storage.vector_codec import is_valid_stored_vector
 
 
 class TraceVectorProjectionManifest:
@@ -125,15 +125,17 @@ def _expects_vector(trace: dict[str, Any]) -> bool:
     return trace_kind != "archived"
 
 
-def _safe_iter_embeddings(conn: sqlite3.Connection) -> Iterable[tuple[str, str]]:
+def _safe_iter_embeddings(conn: sqlite3.Connection) -> Iterable[tuple[str, object]]:
     try:
         cursor = conn.execute("SELECT bucket_id, embedding FROM embeddings")
     except sqlite3.Error:
         return
     # 建立查询时的“表不存在”保持旧兼容语义；若游标已在途中
     # 读取失败，则应向上报告投影错误，不能把半份结果冒充完整诊断。
-    for bucket_id, embedding_json in cursor:
-        yield str(bucket_id), str(embedding_json)
+    for bucket_id, stored_vector in cursor:
+        # 不要 str()：BLOB 被 str() 会变成 "b'\x00...'"，
+        # 解码那头就再也认不出它了。
+        yield str(bucket_id), stored_vector
 
 
 def _safe_fetch_meta(conn: sqlite3.Connection) -> dict[str, str]:
@@ -144,16 +146,14 @@ def _safe_fetch_meta(conn: sqlite3.Connection) -> dict[str, str]:
         return {}
 
 
-def _valid_vector_json(value: str) -> bool:
-    try:
-        vector = json.loads(value)
-    except (TypeError, json.JSONDecodeError):
-        return False
-    return (
-        isinstance(vector, list)
-        and bool(vector)
-        and all(isinstance(item, (int, float)) for item in vector)
-    )
+def _valid_vector_json(value: object) -> bool:
+    """单元格里是不是一个能用的向量。
+
+    embeddings.db 里两种格式共存：float32 BLOB（现在写的）与老的 JSON 文本。
+    这个诊断报的是「向量投影和活跃 trace 对不对得上」，只按 JSON 判会把每个
+    BLOB 都算成 malformed，于是整份报告变成噪音。
+    """
+    return is_valid_stored_vector(value)
 
 
 def _int_value(value: object) -> int:

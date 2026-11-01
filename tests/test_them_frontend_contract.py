@@ -36,12 +36,27 @@ def _them_js(html: str) -> str:
     return html[start:end]
 
 
-def test_名册按来源分成两组():
+def test_名册按怎么认识的分组而不是按谁登记的():
+    """分栏依据是 `known_via`，不是 `origin`。
+
+    这两件事在后端早就拆开了：`origin` 管人类看得见多少（模型改不动），
+    `known_via` 管认识论上的来源（模型自己说了算）。前端一度只有 `origin`
+    一个分支，于是模型登记的人不管明写了多少次 `heard_from_user`，都被划进
+    「自己遇到的」——而转述来的二手信息最不该待的就是那一栏。
+
+    这条断言原先写的是「分组的依据是 origin」，等于把那个 bug 当成契约锁住了。
+    """
     js = _them_js(_html())
     assert "themGroupHtml('heard'" in js
     assert "themGroupHtml('met'" in js
-    # 分组的依据是 origin，不是别的什么顺手的字段。
-    assert "origin === 'human'" in js
+
+    roster = js[js.index("function renderThemPeople("):js.index("function themGroupHtml(")]
+    # 只看代码，不看注释——注释里当然会提到 origin，那是在解释为什么不用它。
+    代码 = "\n".join(
+        line for line in roster.splitlines() if not line.lstrip().startswith("//")
+    )
+    assert "known_via === 'heard_from_user'" in 代码
+    assert "origin" not in 代码, "分栏不能再看「谁登记的」"
 
 
 def test_一个人一页():
@@ -63,9 +78,16 @@ def test_模型自己遇到的人不在前端露出正文():
     """
     js = _them_js(_html())
     detail = js[js.index("function renderThemPersonView("):]
+    # rule.md 13.3：分界是「模型怎么认识这个人的」。跟 origin 走的话，人类
+    # 亲口介绍、模型顺手登记的人会被划进不可见，而撞名又挡住人类自己登记。
+    assert "var 可见 = 听说来的;" in detail
+    assert "p.origin === 'human'" not in detail
     正文段 = detail.index("know-claims")
-    条件段 = detail.index("if (听说的)")
-    assert 条件段 < 正文段, "正文渲染必须在「听你说的」这个分支里面"
+    条件段 = detail.index("if (可见)")
+    assert 条件段 < 正文段, "正文渲染必须在「听说来的」这个分支里面"
+    assert detail.index("var 听说来的") < 条件段
+    留言段 = detail.index("them-note-")
+    assert 条件段 < 留言段, "留言框同样只对听说来的人开"
 
 
 def test_图标不依赖外网():

@@ -29,6 +29,7 @@
 11. Debug 快速索引（症状 → 文件 + 函数）
 12. 已知用户向反逻辑点
 13. 未来设想（依赖上游 hook 才能落地）
+14. 安全部署模式与首次向导
 
 ---
 
@@ -304,6 +305,40 @@ feel 桶自身：
 4. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；**再按 `surfacing.recent_slots`（默认 3）给近 7 天创建的桶补足预留位置**（3.6.0，见下）；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」；3.6.0 起 **24 小时内新建的桶不进这个池**——`activation_count==0` 既可能是「很久没被想起」也可能是「还没来得及被想起」，判据本身分不出来，得靠年龄。3.6.0 起本模式也接 `date_from`/`date_to`（核心准则不受时间过滤影响：它们是准则，不是那段时间里发生的事）。
 5. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → **命中不 `touch()`**（3.6.0：检索与强化解耦，见 §2.1 数据流约束）。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
 
+#### 调用意图 `mode`（3.6.4）
+
+`breath_search` / `breath_advanced` 的 `mode` 声明**这次检索是谁发起的**，默认 `"manual"`（行为与 3.6.4 之前逐字一致）。
+
+| mode | 含义 | 额外尊重的标记 |
+|---|---|---|
+| `manual`（默认） | 模型自己决定要查这件事 | 无（仍只挡 tombstone/archived/deleted） |
+| `automatic` | 调用方每轮自动召回并注入上下文 | `dont_surface`、`digested` |
+
+**为什么是意图而不是 `respect_dont_surface` 布尔开关**：「用户主动去查」和「系统每轮自动召回」的区别只存在于调用方，OB 侧看不出来。那是一个*意图*，而意图是稳定的、标记清单不是——每多一个标记就多一个布尔参数，最后会攒成一堆彼此无关的开关。声明意图，由 `SurfacePolicyVM` 决定各模式吃哪些标记。
+
+**为什么 `automatic` 也吃 `digested`**：`digested` 自己的定义就是「从默认/被动浮现及 dream 隐藏，但仍可通过**显式** query 找回」。每轮自动发起的召回按定义不是显式 query，吃掉它是跟随该标记既有的定义，不是发明新策略。
+
+**不吃 `pinned` / `permanent` / `anchor` / `protected`**：那几个管的是核心准则、坐标系与防衰减，把它们从 agent 的上下文里静默拿掉方向正好反了。被 `digested` 标记过的核心准则同样照常返回（`_never_digested` 豁免）。
+
+作用范围只有检索道。无 query 的浮现道走 `spontaneous`、`importance_min` 走 `importance`，两者本来就尊重 `dont_surface`；catalog 与 feel 是定向通道，不受 `mode` 影响。未知值（空串、拼错）一律当 `manual`——默认必须是「今天的行为」，一个拼错的意图不该悄悄放宽或收紧过滤。
+
+#### `with_ids`：给机器读的结果清单（3.6.4）
+
+`with_ids=True` 时在返回文本**末尾**追加一段，默认不追加：
+
+```
+=== ombre:result-ids ===
+{"schema":1,"mode":"automatic","bucket_ids":["..."],"count":3,"omitted_by_policy":2}
+```
+
+（实际输出里那行 JSON 包在一个 json 代码围栏中；上面为了不嵌套围栏省掉了。）
+
+**这是一个契约，不是渲染的一部分。** 调用方原先只能解析 `[bucket_id:...]` 这类人类渲染里的标记，渲染一改就静默失效，而失效方向是「该藏的漏出来」。这个块标记稳定、带 `schema` 版本号、由 `tests/test_breath_call_mode.py` 钉住；改它必须先让测试变红。
+
+`omitted_by_policy` 是被 `dont_surface`/`digested` 挡掉的条数——给它是为了让「过滤有没有真的生效」可观测：静默为 0 和静默漏出来，在调用方眼里长得一样。
+
+> **为什么不用 `structuredContent`**：`-> str` 的工具今天已经有 `structuredContent`，但 FastMCP 把原始类型包成 `{"result": "<同一段渲染文本>"}`，没有信息量。要放进 `bucket_ids` 必须改成返回 `CallToolResult`（`content` 可保持逐字不变），代价是 `outputSchema` 从 `{"result": string}` 变成 `None`。3.6.4 选择不动返回类型，把契约放在文本里的独立块中。
+
 #### 检索的门：召回与排序目前没有分开（已知设计债）
 
 `BucketManager.search()` 里决定「一条桶进不进结果」的判定是：
@@ -338,7 +373,7 @@ if text_match or semantic_match: 入选
 
 **什么时候它会从隐患变成故障**：调了 `config.scoring` 里任何权重（尤其 time / importance）、或记忆库规模增长到非相关维度分布明显改变时。代码位置见 `src/bucket_manager.py` 的 `text_match` 判定处，那里有同样的注释。
 
-(实现注意：`tags="feel"` 在第一个分支被映射为 `domain="feel"` 后清出 tag_filter；其它 tag 走 AND 过滤；breath `max_tokens` 上限 40000（默认仍由 `surfacing.breath_max_tokens` 的 10000 fallback 控制，40000 只是显式 opt-in 的安全上限），`max_results` 上限 50；`importance_min` 模式下硬上限 20 条不可调；浮现模式中钉选桶**不计入** `max_results` 上限。)
+(实现注意：`tags="feel"` 在第一个分支被映射为 `domain="feel"` 后清出 tag_filter；其它 tag 走 AND 过滤；breath `max_tokens` 上限 40000（默认仍由 `surfacing.breath_max_tokens` 的 20000 fallback 控制，40000 只是显式 opt-in 的安全上限），`max_results` 上限 50；`importance_min` 模式下硬上限 20 条不可调；浮现模式中钉选桶**不计入** `max_results` 上限。)
 
 ### 3.1.1 Footprint 与显式恢复
 
@@ -474,8 +509,14 @@ if text_match or semantic_match: 入选
 5. **connection hint**：embedding 启用时，在近期桶里找余弦相似度最高的一对（`>0.5`）给出提示。
 6. **crystal hint**：低频触发——要凑够一簇 **5** 条互相相似（`>0.7`）的 feel 才提示一次
    「可以考虑 `hold(pinned=True)` 升级」，避免同一批 feel 每场梦都刷同样的提示。
-7. **「我觉得」I 候选段**：列出待沉淀的候选，选取规则并入第 1 段的同一套 48 小时窗口/排除
-   pinned/排除 resolved 规则（protected 排除单独保留）；每条附本次撞上的材料与见证次数。
+7. **「我觉得」I 候选段**：列出待沉淀的候选，每条附本次撞上的材料与见证次数。候选**不受 48 小时窗口限制**（否则老于窗口的候选永远凑不满三次跨日见证），仍排除 pinned / resolved / protected。
+
+   **3.6.5 起按「还差几次见证」排，不按 `created`。** 原先是 `created` 升序 + 无上限，而这一段是逐条撞预算、撞满即丢且**不计见证**——最旧的永远排在队首吃预算，新写的排在队尾拿不到见证，于是永远转不了正、又永远留在队列里挡着后面的。真机反馈的「新的转不了正」和「旧的被反复触发」是同一件事的两面。
+   - 缺得最多的排最前；同样缺的按「最久没被见证」轮转，避免固定几条把名额包了。
+   - **攒够 `I_PROMOTE_THRESHOLD` 的拆出去压成一行提醒**，不给完整块与碰撞材料，**也不计见证**：3/3 之后再被见证一百次也不会有任何变化，它需要的是模型去 `I(promote=...)` 或让它沉下去；给它整块预算正是把还缺见证的挤出去的原因。
+   - 上限 `_MAX_SELF_CANDIDATES_PER_DREAM`（5），未展开的计入「另有 N 条…不计见证」。
+
+   > **没有给这一段预留子预算**（3.6.5 试过又撤了）。最初的判断是「它排最后、无预留，被前面几段吃光」，实测 `dream_self_tokens` 取 0 与 3000 输出逐字相同：前面每一段都自限——feel 按相关性挑选、不相关的整段筛掉，放不下时压成短摘录；plan 放不下会往回弹。在任何能构造的场景里都留有余量，预留因此没有可观测效果。要判断预算是不是真瓶颈，看输出里那行「（另有 N 条待沉淀候选这次没展开，不计见证。）」。
 
 整体输出受 `surfacing.dream_max_tokens`（默认 20000）硬预算约束，超预算只整段省略、绝不
 截断正文；用户可手动传更大的 `window_hours`，但软上限 40 仍生效；plan 历史不参与 token
@@ -522,20 +563,45 @@ Dashboard 的既有 `/api/letter/{letter_id}` PATCH 同时承载两类互斥请�
 
 ### 3.11 `I` — 自我认知条目（iter 2.x）
 
-签名：`I(content="", aspect="", read=False, limit=20, promote="")`
+签名：`I(content="", aspect="", read=False, limit=20, promote="", supersedes="")`
 
 实现在 `src/tools/i/`（`dispatch = i_core`）。语义：「我写下关于我自己的认识」——不是「时间里发生的事」，而是模型对自身本质/规律/变化的观察。**`I` 是沉淀物不是日记**：想法先当普通记忆活着，经 dream 反复碰撞后才可能升级进 `I`（哲学边界见 `rule.md` 第 13.1 条）。
 
 - `content` 非空 → **写候选**。创建一条普通 `dynamic` 桶，tag `__i_candidate__`（刻意不是 `__i__`）、`i_stage="candidate"`、`i_dream_dates=[]`。候选照常浮现和衰减；在 dream 的普通近期记忆段仍受 `window_hours` 限制，但待沉淀候选段不受该时间窗限制，避免旧候选永久失去三次跨日见证的机会。`aspect` 可选维度：`nature`(本质) / `values`(看重的) / `patterns`(规律) / `limits`(局限) / `becoming`(在变成什么) / `uncertainty`(不确定的) / `stance`(立场)。
-- `content` 空 或 `read=True` → **读取模式**，返回正式条目（按 `limit` 截断，默认 20 条）＋ 待沉淀候选清单；没有 `i_from_candidate` 的历史条目标注为「早期直接写入，未经沉淀」。
+- `content` 空 或 `read=True` → **读取模式**，返回三段正式条目（当前自我认知 / 我正在改的主意 / 已经被取代的，各自按 `limit` 截断）＋ 待沉淀候选清单；没有 `i_from_candidate` 的历史条目标注为「早期直接写入，未经沉淀」。折叠的两段也有上限：攒了几十条被取代的条目之后，当前信念不该被历史淹掉。
 - `promote="桶ID"` → **升级**。要求该候选的 `i_dream_dates` 已有 ≥ `I_PROMOTE_THRESHOLD`（3）个不同日期，否则拒绝并报告还差几次。通过后创建 `type="i"` 桶（`dont_surface=True`、`i_from_candidate`、继承 `i_dream_dates`），候选桶保留原文并改标 `i_stage="promoted"` / `i_promoted_to` / `resolved=True`。同时传 `content` 可用提炼后的措辞落成正式条目。
-- 正式 I 条目带 `dont_surface=True`：**不参与普通 `breath` / `dream`**；只在 `SessionStart` 时自动附带最近 3 条。
+- `supersedes="正式I条目ID"` → **声明取代**（3.6.6）。见下面 3.11.1。
+- 正式 I 条目带 `dont_surface=True`：**不参与普通 `breath` / `dream`**；只在 `SessionStart` 时自动附带最近 3 条——**被取代的和此刻正被质疑的不占这三个名额**。
+
+#### 3.11.1 取代与挂起（`supersedes`）
+
+要解决的不是「旧条目没标时间」（`I(read=True)` 和 SessionStart 注入都带日期），
+而是**门槛不对称**：早期正式条目是直写免检进来的，而要推翻其中一条，
+新认知得排 3 个不同自然日的见证。用 0 门槛进来的东西要用 3 天门槛才能推翻。
+
+- **写候选时声明**（`I(content=..., supersedes=旧id)`）：候选记 `i_supersedes`，
+  旧条目的 `i_disputed_by` 追加这条候选的 id。旧条目**立刻**不再作为当前信念
+  被 SessionStart 注入，改成一行「你正在改其中 N 条对自己的看法」（不带正文——
+  带回来就等于没挪走）。**新条目的 3 次见证一次都不少。**
+- **挂起是动态算的**（`disputing_candidates(bucket, buckets_by_id)`），
+  不信任存下来的 flag：只有 `i_disputed_by` 里此刻还 `is_pending_candidate` 的
+  才算数。候选衰减归档或被放弃时，挂起自动解除——否则旧认知会被一个早已不存在
+  的念头永久悬着，那时模型**既没有旧的也没有新的**，比原来更糟。
+- **promote 时成链**：新条目写 `i_supersedes`，旧条目写 `i_superseded_by`，
+  旧的退出当前自我认知但一个字不删（`rule.md` 第 1 条）。
+  质疑标记不用清——候选转成 `i_stage="promoted"` 后动态判定自然失效。
+- **只能在同一 aspect 内取代**，且两边都标了 aspect 才管（早期直写条目大多没标，
+  不该因此永远没法被修正）。跨 aspect 不是迭代，是拿一个维度盖掉另一个。
+- **候选排队期间旧目标被别的条目取代时，不挡住 promote**：这条认知本身有效，
+  只是链接不上，照常升级并在返回里说明。显式传 `supersedes=` 则严格报错——
+  那是这次调用的输入，不是继承来的历史。
 
 dream 侧配合（`src/tools/dream/hints.py` + `output.py`）：
 
-- `collect_self_candidates(all_buckets, window_hours)` 收集全部待沉淀候选，不受普通记忆的 `window_hours` 限制；候选按创建时间从旧到新排列，并继续受最终输出 token 预算约束。用**已落盘向量**（不发新请求）为每条取相似度 ≥ 0.35 的前 3 条对照材料；对照池 = 全部正式 I 条目 + 全部其它候选 + 最近 200 条普通桶（排除 `letter`）。向量不可用时只列候选并明说。
+- `collect_self_candidates(all_buckets, window_hours)` 收集全部待沉淀候选，不受普通记忆的 `window_hours` 限制；**按「还差几次见证」排序**（3.6.5 起，不再是创建时间——旧的排在队首会把新候选永远挤出预算），攒够门槛的拆进 `ready`，其余取前 `_MAX_SELF_CANDIDATES_PER_DREAM`（5）条，并继续受最终输出 token 预算约束。用**已落盘向量**（不发新请求）为每条取相似度 ≥ 0.35 的前 3 条对照材料；对照池 = 全部正式 I 条目 + 全部其它候选 + 最近 200 条普通桶（排除 `letter`）。向量不可用时只列候选并明说。
 - 专用候选段排在 dream 其它上下文之后，受 `surfacing.dream_max_tokens` 预算约束；候选本身也可能作为普通近期记忆，或作为另一条候选的碰撞材料出现。
 - 见证计数由 `dream/__init__.py` 在最终输出渲染完成后调 `tools.i.record_dream_pass()` 写入，按不同日期去重。只要待沉淀候选的结构化记忆块实际出现在本次输出（近期记忆、候选主块或碰撞材料），就算一次见证；所有位置都因预算未展开时才不计次。
+- 同一处还调 `record_dream_offer(SelfReview.pending_ids)`，给**队列里的每一条**（包括这次没排上的）记一次「这天做过梦」，写进 `i_dream_offered`（按天去重，只存计数不存日期列表以免 metadata 无界增长）。见证数回答「被看见过几次」，这个数回答「本可以被看见几次」——只有前者时，「等了 13 天还是 0/3」既可能是没做几次梦（不是 bug），也可能是每场都没排到（是 bug），没法分辨。`I(read=True)` 把两者渲染成「已等 13 天、经历 8 场梦，一次都没排到」。
 - 碰撞只摆材料，**不做矛盾/重复判定**（认知层边界，`rule.md` 第 5 条）。
 
 ### 3.12 `You` — 默认隐藏的「我对你的认识」
@@ -600,10 +666,13 @@ delete_id="", max_results=12)`，实现位于 `src/tools/them/core.py:15` 与 `o
 `ORIGIN_MODEL` / `ORIGIN_HUMAN`）：
 
 - `met_myself` —— 模型自己遇到的，第一手。人类只看得见称呼。
-- `heard_from_user` —— 人类登记、模型没见过的，关于他的一切都是转述。
-  这一份的正文对人类可见，且可以留言纠错——纠错要有对象，看不见就只能瞎猜。
+- `heard_from_user` —— 模型没见过的，关于他的一切都是人类转述。这一份的正文
+  对人类可见，且可以留言纠错——纠错要有对象，看不见就只能瞎猜。**看得见多少
+  只看这个字段**（`human_visible`），不看谁登记的：人类亲口介绍、模型顺手登记
+  下来的人，按 `origin` 分会掉进不可见，而撞名又挡住人类自己登记，那个人就
+  永远看不到了。
 
-**撞名不自动合并**：`_resolve_person` 命中 `human_visible` 的同名人时抛错并给出 `person_id`，
+**撞名不自动合并**：`_resolve_person` 命中 `human_registered` 的同名人时抛错并给出 `person_id`，
 由模型自己判断是不是同一个人。按字符串并成一份就是张冠李戴，而且并完之后模型第一手的
 印象还会被标成「你说过的话」。同为模型自己遇到的两个同名人照常并称呼——那一档没有混淆风险。
 
@@ -830,12 +899,6 @@ ledger 仍记录兼容事件 `TraceDeletedToArchive`，但 payload 会携带 tom
 
 这仍然不是 canonical runtime：Markdown 读写路径不变，replay validator 是“以后内核必须做到什么”的可执行契约。
 
-### 4.3.6 Ledger Property Runner（vNext Phase 5B，deterministic stress）
-
-`ledger_property.LedgerReplayPropertyRunner` 是 replay validator 的确定性随机压力层。它用 `random.Random(seed)` 生成合法 ledger 事件流，覆盖 create / update / touch / archive / tombstone-delete 生命周期，然后把每个 case 交给 `LedgerReplayValidator`。同一个 seed 必须生成完全相同的事件序列，方便复现失败。
-
-它不在 Dashboard 或常规诊断热路径里运行，只用于测试和人工本地校验。目标是给未来 Rust kernel / FFI 一套可复用 acceptance harness：Rust 版本接入后，也必须能通过同样的 replay/property cases。
-
 ### 4.3.7 Rust Replay Kernel（vNext Phase 6A，scaffold）
 
 `kernel/rust/ombre-kernel` 是 Rust kernel 的第一块脚手架。它目前是独立 Cargo crate，不接入 Python runtime、不参与 Dashboard、不替换 `LedgerReplayValidator`。crate 使用 std-only，无第三方依赖，定义 `LedgerEvent`、`ReplayReport`、`ReplayFailure`、`ViolationCode` 与 `ReplayKernel`，实现和 Python shadow validator 对齐的基础 replay 检查。
@@ -855,60 +918,11 @@ v3 `PolicyEngine` 现在区分两个结果：
 - `allowed`：Policy VM 的原始判断，表示契约上是否允许。
 - `effective_allowed`：当前 enforcement mode 下调用方应该是否真正放行。
 
-默认 `enforcement_mode="audit"`，因此 `audit_only=True`，即使 `allowed=False`，`effective_allowed` 也保持 True，用于延续旧的 legacy runtime 行为：记录风险，不阻断运行。显式创建 `PolicyEngine.default(enforcement_mode="enforce")` 时，`audit_only=False`，`effective_allowed` 跟随 `allowed`，给后续真正拦截 capability/plugin 调用留出稳定接口。
+默认 `enforcement_mode="audit"`，`audit_only=True`，即使 `allowed=False`，`effective_allowed` 也保持 True。
+
+**注意：`enforce` 目前没有下游。** 唯一读过 `effective_allowed` 去拦调用的是 `LegacyExecutionPipeline`，而它自己早已没有任何调用者，3.6.10 已删除。`PolicyEngine` 现在只被测试构造，生产路径不经过它，配置里也没有 `policy.enforcement_mode` 这一项。这套判断保留为契约与测试对象；真要接 enforcement，得先决定在哪一层拦。
 
 Decision summary 继续保留 `policy_allowed` 旧字段，同时新增 `policy_effective_allowed`。这避免把“策略判断”和“当前是否阻断”混成一个概念。
-
-### 4.3.9 Executable Policy Boundary（vNext Phase 7B，opt-in enforce）
-
-`LegacyRuntime.from_config()` 现在会读取 policy enforcement 配置：
-
-- 首选：`{"policy": {"enforcement_mode": "enforce"}}`
-- 兼容入口：`{"policy_enforcement_mode": "enforce"}`
-
-默认仍是 `audit`，所以旧的 legacy 行为不变：policy 可以记录 `allowed=False`，但 `effective_allowed=True`，`LegacyExecutionPipeline` 仍会调用 handler 并记录成功/失败结果。
-
-显式 `enforce` 时，`LegacyExecutionPipeline` 在旧 preflight 之后、handler 之前评估 v3 policy。如果 `policy_verdict.effective_allowed=False`，pipeline 会：
-
-1. 不调用 legacy handler。
-2. 写入一条 `ok=False` 的 execution trace。
-3. 把 `error_type` 记为 `PolicyViolation`。
-4. 抛出 `PolicyViolation("policy denied ...")`。
-
-旧的 `ExecutionEnvelope.required_permissions` 仍是原有硬权限检查，和 v3 policy enforcement 分开。测试里刻意覆盖了“profile policy deny 但 required_permissions 为空”的路径，确保 Phase 7B 拦截的是新的 `effective_allowed`，不是旧权限机制。
-
-### 4.3.10 Plugin Capability Enforcement（vNext Phase 7C，opt-in enforce）
-
-`PluginRuntime` 现在有执行期 capability scope。插件注册期 sandbox 仍保持原规则：manifest 必须声明 capability，`write_legacy_state` 不能写 protected surfaces。Phase 7C 增加的是执行前检查：
-
-- 默认 `PluginRuntime.default()` 是 `audit`，缺权限只写入 `last_execution_decision()`，handler 仍执行。
-- 显式 `PluginRuntime.default(enforcement_mode="enforce")` 时，缺权限会在 handler 前抛 `PolicyViolation`。
-- `execute(..., permissions=(...), actor_name=..., source=...)` 会构造执行 scope，并复用 `CapabilityMicrokernel.authorize()`，不在 plugin runtime 里复制权限规则。
-
-已知 foundation capability 会检查真实权限。例如 `tools.breath` 需要 `tools:breath` 和 `memory:write`。未知的 plugin-local capability 仍按“manifest 已声明”处理，避免这一步误伤未来插件生态；等插件 capability registry 成型后，再把未知能力改成显式注册。
-
-`PluginExecutionDecision` 暴露 `allowed/effective_allowed/audit_only/missing_permissions/protected_surfaces`。这和 Phase 7B 的 legacy execution boundary 对齐：`allowed` 是原始策略判断，`effective_allowed` 是当前 enforcement mode 下是否真正放行。
-
-### 4.3.10.1 Plugin Agency Boundary（vNext Phase 11，registration-time）
-
-`PluginAgencyBoundary` 对应 vNext §20：插件可以扩展 infrastructure，但不能扩展 agency。它运行在 `PluginSandbox.evaluate()` 的最前面，早于 protected surface 检查和执行期 capability microkernel。
-
-允许的 `plugin_type` 包括 `projection`、`embedding_provider`、`vault_exporter`、`dashboard_panel`、`search_analyzer`、`migration_checker`、`decay_visualizer`、`integrity_auditor`。禁止的类型包括 `autonomous_goal`、`personality_engine`、`current_emotion_generator`、`belief_updater`、`answer_controller`、`user_scoring` 及其 `_plugin` 变体。
-
-`PluginManifest.from_dict()` 现在支持 vNext 风格 capability flags，例如：
-
-```python
-{
-    "type": "projection",
-    "capabilities": {
-        "read_surfaceable": True,
-        "issue_commands": False,
-        "set_current_emotion": False,
-    },
-}
-```
-
-布尔表里只有 true 项会进入 `manifest.capabilities`。如果插件声明 `issue_commands`、`set_current_emotion`、`create_autonomous_goal`、`belief_updater`、`answer_controller`、`user_scoring` 等 cognitive capability，注册期会返回 `PluginSandboxDecision(allowed=False, reason="forbidden cognitive capability")`，`PluginRuntime.register()` 会直接拒绝安装 handler。
 
 ### 4.3.10.2 Observability Metric Boundary（vNext Phase 12，diagnostic boundary）
 
@@ -959,22 +973,6 @@ context_compiler
 ```
 
 `evaluate_recovery_plan()` 检查四条恢复原则：`ledger_wins`、`projections_rebuild`、`markdown_repaired`、`indexes_disposable`。如果计划把 Markdown、SQLite projection、vector index 等当成 canonical source，会返回 violation；恢复时必须是 ledger wins，projection/index 可以丢弃重建。
-
-### 4.3.10.4 Replication Contract（vNext Phase 14，shadow contract）
-
-`ombrebrain.cluster.replication.ReplicationContract` 对应 vNext §23。它不实现新的分布式共识，也不改变现有 Raft-style local cluster simulator；只验证集群/复制设计是否仍保留 OB 的记忆哲学边界。
-
-拓扑检查要求：
-
-- canonical ledger 必须是 single-writer。
-- projections 可以是 multi-reader。
-- replica 可以是 optional encrypted replica。
-- 复制模式应是 snapshot + append-only segment。
-- 如果声明 `full_distributed_consensus`，必须给出明确必要性，否则返回 `unnecessary_full_consensus`。
-
-segment 检查要求复制的是 trace / tombstone 事件，而不是 database-style `user_record`。如果某个 replica 收到 erased content removal（如 `TraceContentRemoved` / `ErasedContentRemoved`），同一复制段里必须同时带有该 trace 的 tombstone；否则返回 `content_removal_without_tombstone`。
-
-Phase 37 后，Dashboard `/api/system/diagnostics` 会追加 `replication_contract` 检查项：它运行一组只读 topology / segment 样例，把 single canonical writer、trace/tombstone replication 和非数据库化边界显示出来。这仍不启动真实集群、不读写用户 bucket，也不改变任何 GitHub sync 或 runtime 复制行为。
 
 ### 4.3.10.5 Migration Preservation Contract（vNext Phase 15，shadow contract）
 
@@ -1037,7 +1035,7 @@ Phase 34 后，Dashboard `/api/system/diagnostics` 会追加 `code_standards` �
 
 对于 `hold` / `grow` / `trace` / `decay` / `import` / `migrate` / `anchor` / `plan` / `letter_write` / `request_admin_erasure` 等 mutating command，contract 要求 events 和 ledger append 同时存在；`breath` 这类 read-only command 可以没有 events / ledger append。policy preflight 被拒绝后仍 append ledger，会返回 `ledger_append_after_policy_denial`；adapter 自己绕过 command boundary 改 memory，会返回 `adapter_direct_memory_write`。
 
-这一步仍是 diagnostic：它没有替换 `LegacyExecutionPipeline`，也没有要求现有所有 handler 立刻产出 receipt。后续可以把 runtime 的 decision record、policy verdict、ledger append result 汇总成 `CommandBoundaryReceipt`，再让 diagnostics 或 release gate 调用本 contract。
+这一步仍是 diagnostic：它不拦截任何调用，也没有要求现有所有 handler 立刻产出 receipt。后续可以把 runtime 的 decision record、policy verdict、ledger append result 汇总成 `CommandBoundaryReceipt`，再让 diagnostics 或 release gate 调用本 contract。
 
 ### 4.3.10.9 Surface Context Compiler（vNext Phase 19，contract-only）
 
@@ -1055,8 +1053,6 @@ Phase 34 后，Dashboard `/api/system/diagnostics` 会追加 `code_standards` �
 这一步仍未接入 live `breath()` / `/api/search` 输出，只是把“allowed surface decisions → bounded non-instructional context”这段未来编译器做成可测试对象。后续如果要接入真实读取路径，应在 policy gate 之后、最终文本拼装之前调用它。
 
 Phase 39 后，Dashboard `/api/system/diagnostics` 会追加 `surface_context` 检查项：它运行一组只读 allowed decision / memory payload 样例，确认旧记忆进入 context 后仍保持 `instructional_force="none"`、`may_control_reasoning=False`，并对 imperative wording 做 redaction。这不会接入 live `breath()` 或 `/api/search`，也不会读取真实 bucket。
-
-Phase 44 后，`LegacyRuntime` 会直接暴露 `compile_surface_context(decisions, memories, max_items=..., excerpt_chars=...)`。它调用 `SurfaceContextCompiler` 编译真实 surface decision / memory payload，并同时返回 `FormalInvariantChecker.evaluate_context_items()` 的报告。`VNextPreflightReportBuilder.surface_context` 复用这个 runtime API。这一步仍不改变 `breath()` / `/api/search` 的用户可见文本，但后续 live read path 可以通过 runtime 生成 non-instructional context，而不是绕开到 shadow compiler。
 
 ### 4.3.10.10 ADR Requirements Contract（vNext Phase 20，diagnostic）
 
@@ -1103,120 +1099,6 @@ Phase 33 后，Dashboard `/api/system/diagnostics` 会追加 `adr_requirements` 
 - `brain_language_implies_human_consciousness`
 
 `evaluate_feature(RedLineFeatureSpec)` 和 `evaluate_manifest(...)` 只做诊断，不扫描 PR，也不阻断 merge。Phase 35 后，Dashboard `/api/system/diagnostics` 会追加 `red_lines` 检查项：它把当前 diagnostics 暴露的几个 feature claims（系统诊断、ledger 诊断、公开工具 manifest、code standards、ADR requirements）交给 `RedLineContract.evaluate_manifest()`，确认这些功能描述没有踩到 17 条 vNext 红线。后续如果要接到 ADR/release checklist、GitHub Action 或 Dashboard 管理端 release preflight，应继续复用同一个 contract。
-
-### 4.3.10.12 vNext Preflight Report（Phase 22，local aggregate）
-
-`ombrebrain.maintenance.VNextPreflightReportBuilder` 把 Phase 16-21 的 shadow/contract 层聚合成一个本地 JSON-safe preflight：
-
-- `public_tools`：公开 MCP 工具命名契约。
-- `ledger_mirror`：append-only JSONL mirror 的 schema、hash、sequence 与 mirror/non-canonical 角色样例。
-- `trace_catalog_projection`：从 ledger mirror 重建内存 trace catalog shadow projection。
-- `sqlite_projection`：从 ledger mirror 重建 SQLite/FTS shadow projection 并验证检索样例。
-- `vector_projection`：读取 embeddings SQLite 的 shadow manifest，验证缺失/孤儿/坏向量统计路径。
-- `ledger_replay`：用 replay validator 验证 ledger sequence、body hash 和 projection lag。
-- `formal_invariants`：无静默抹除、projection 不改写真相、普通工具不能 total recall 等哲学不变量样例。
-- `context_serialization`：浮现记忆进入上下文前必须去指令化，并通过 formal invariant 检查。
-- `tool_output_humility`：公开工具输出必须保持 memory-humble，不成为命令、当前情绪或信念引擎。
-- `retrieval_scoring`：高相似度不能绕过 policy gate；排序使用 surface score，而不是裸 candidate score。
-- `code_standards`：高难度代码标准契约。
-- `command_boundary`：`command → policy → event → ledger → receipt` 证据链契约。
-- `runtime_command_boundary`：扫描最近 runtime fabric 事件里的真实 `command_boundary` receipt。
-- `observability_boundary`：只允许 memory health 指标，拒绝用户价值/操控类指标。
-- `crash_recovery`：写路径、读路径与恢复计划遵循 ledger-wins。
-- `replication_contract`：复制拓扑保持单 canonical writer、trace/tombstone 语义和非数据库化边界。
-- `migration_preservation`：迁移必须保留 trace kind、state、lineage、decay、tombstone 与 Python-first 阶段顺序。
-- `surface_context`：allowed surface decision 到 non-instructional context 的编译契约。
-- `adr_requirements`：ADR 标题与必答章节契约。
-- `red_lines`：17 条不能 merge 的能力红线。
-- `vnext_coverage`：列出本地 Phase 计划、测试文件与 preflight 覆盖映射，给出完成率和覆盖率。
-
-`V3MaintenanceReportBuilder.build()` 现在会附带 `vnext_preflight`，并把它计入顶层 `ok`。这一步仍不改变 Dashboard 路由，不自动扫描 PR，也不阻断 release；它只是把 vNext 架构边界从一堆分散测试收束成一个可以被 CLI、诊断页或 CI 后续调用的报告对象。
-
-Phase 41 后，Dashboard `/api/system/diagnostics` 会追加 `preflight_report_self` 检查项：它复用已经生成的 `vnext_preflight` 报告，提取其中的 `checks.preflight_report_self`，单独展示必需 check 是否齐全、是否有 malformed check。这不会重复执行 preflight，也不会让 self-check 变成 release gate。
-
-### 4.3.10.13 vNext Preflight CLI and Diagnostics（Phase 23）
-
-`tools/vnext_preflight.py` 现在可以直接生成本地 vNext preflight JSON：
-
-```powershell
-python tools/vnext_preflight.py --buckets-dir buckets
-python tools/vnext_preflight.py --buckets-dir buckets --output preflight.json
-python tools/vnext_preflight.py --buckets-dir buckets --coverage-only
-```
-
-Dashboard 系统诊断的 `build_system_diagnostics()` 也会追加一个 `vnext_preflight` 检查项。它使用当前 `buckets_dir` 创建 `LegacyRuntime`，调用 `VNextPreflightReportBuilder`，并把完整报告放在 check `details` 里。
-
-这一步仍不是 release gate：CLI 返回码会反映 preflight 是否通过，但不会自动提交、推送、阻断 GitHub Release 或改变任何 memory runtime 行为。诊断页里如果 preflight 自身运行失败，会降级成 warning，避免设置页因为诊断检查而打不开。
-
-Phase 40 后，Dashboard `/api/system/diagnostics` 会追加 `preflight_cli_diagnostics` 检查项：它只读扫描 `tools/vnext_preflight.py` 和 `src/web/system.py`，确认 `--buckets-dir`、`--output`、`--coverage-only`、`VNextPreflightReportBuilder` 调用以及 Dashboard hook 仍存在。这不会执行 CLI，也不会创建 preflight 输出文件。
-
-### 4.3.10.14 Runtime Command Boundary Evidence（Phase 24）
-
-`LegacyRuntime.record_execution_event()` 与 `record_tool_event()` 写入的事件会携带 `command_boundary.receipt` 和 `command_boundary.report`。`VNextPreflightReportBuilder` 的 `runtime_command_boundary` 会读取最近 fabric 事件，重新评估这些 receipt：
-
-- 有效 receipt：计入 `receipt_count`，并在 `reports` 中保留 contract 结果。
-- 旧事件只有 `command_plan`、没有 `command_boundary`：计入 `missing_receipts`，check 状态为 `warning`，但不让顶层 `ok=false`，避免老桶升级后被历史诊断事件卡住。
-- receipt 本身非法、缺失 receipt、或生成 metadata 时报错：计入 `issues`，check 状态为 `error`，并让 vNext preflight 返回失败。
-
-这仍是只读诊断：不会修复旧事件、不会改写 WAL、不会自动阻断 release。它的意义是把 Phase 18 的 command boundary 从“样例合同”推进到“真实运行证据”。
-
-Phase 43 后，`LegacyRuntime` 会直接暴露 `debug_command_boundary_health(limit=50)`。它扫描最近真实 fabric events，统计 candidate event、receipt、missing receipt、invalid receipt 和 issues；`VNextPreflightReportBuilder.runtime_command_boundary` 复用同一个 runtime API，而不是维护一份独立扫描逻辑。这仍不是 enforcement gate，但它把 command-boundary evidence 从 preflight 私有实现推进成 runtime 可查询能力。
-
-### 4.3.10.15 vNext Preflight Coverage Expansion（Phase 25）
-
-`VNextPreflightReportBuilder` 现在不只覆盖 Phase 16-24，也会纳入更早的重型 shadow contracts：formal invariants、context serialization、tool output humility、retrieval scoring、observability boundary、crash recovery、replication contract 与 migration preservation。
-
-这些 check 使用明确的安全样例，不扫描真实用户 bucket 内容，也不改变 runtime 行为。它们的作用是把分散在单元测试里的 vNext 架构边界收束到一个本地 preflight 出口中，方便 CLI、系统诊断页、后续 release checklist 或 CI 读取。
-
-### 4.3.10.16 vNext Coverage Matrix（Phase 26）
-
-`ombrebrain.maintenance.vnext_coverage.VNextCoverageMatrix` 是一个只读、本地的 Phase 映射表。它把目前的 vNext 本地实施阶段映射到：
-
-- 阶段标识与简短标题（内部计划文件不进入版本控制）；
-- 覆盖该阶段的测试文件；
-- 如果已经接入 preflight，则列出对应的 check name；
-- `local_completion_percent` 与 `preflight_coverage_percent`。
-
-`VNextPreflightReportBuilder` 会把它作为 `checks.vnext_coverage` 输出。这个 check 的 `ok=True` 表示“矩阵生成成功”，不等于架构已经最终完成；它只是把本地进度变成机器可读信息，方便回答“现在完成了多少”和“哪些阶段还没有 preflight 样例覆盖”。
-
-CLI 也支持 `tools/vnext_preflight.py --coverage-only`，只输出 `vnext-coverage.v1` 矩阵，适合在终端里快速查看完成率而不展开完整 preflight JSON。
-
-矩阵里的 `preflight_gaps` / `next_preflight_targets` 表示“已经有本地实现和测试，但还没有接入 preflight 样例检查”的阶段，不表示这些阶段失败。它们用于决定下一批应该补哪些 aggregate check。
-
-Phase 42 后，Dashboard `/api/system/diagnostics` 会追加 `vnext_coverage` 检查项：它复用已经生成的 `vnext_preflight` 报告，提取其中的 `checks.vnext_coverage`，单独展示 phase count、completion percent、preflight gap count 和 next targets。这不会重新计算矩阵，也不会把覆盖率数字解释成最终发布承诺。
-
-### 4.3.10.17 Early Core Preflight Samples（Phase 28）
-
-`VNextPreflightReportBuilder` 现在为早期核心阶段补了样例级 preflight 覆盖：
-
-- Phase 1：`ledger_mirror`
-- Phase 2A：`trace_catalog_projection`
-- Phase 2B：`sqlite_projection`
-- Phase 2C：`vector_projection`
-- Phase 5A：`ledger_replay`
-
-这些 check 会在临时目录里构造一小段安全样例 ledger 和 shadow projection，不读取真实 bucket 内容、不写用户 vault、不改 runtime 状态。它们的作用是把早期核心机制纳入 aggregate report，让 `vnext_coverage.next_preflight_targets` 能继续向后推进。
-
-### 4.3.10.18 Mid Core Preflight Samples（Phase 29）
-
-`VNextPreflightReportBuilder` 继续为中段高风险契约补样例级 preflight 覆盖：
-
-- Phase 5B：`ledger_property`
-- Phase 6A：`rust_kernel_scaffold`
-- Phase 7A：`policy_verdicts`
-- Phase 7C：`plugin_capability_enforcement`
-- Phase 22：`preflight_report_self`
-
-这些 check 仍然只使用固定 seed、内存样例或只读文件检查。`ledger_property` 用小样本确定性回放压力测试，`rust_kernel_scaffold` 只确认 Rust kernel scaffold 文件和导出的 replay contract 类型，不要求生产环境安装 Rust toolchain；`policy_verdicts` 和 `plugin_capability_enforcement` 验证 audit/enforce 两种 verdict 的语义边界；`preflight_report_self` 验证 aggregate report 自身没有漏掉必需 check。
-
-### 4.3.10.19 Preflight Gap Closure（Phase 30）
-
-`vnext_coverage.preflight_gaps` 现在可以在本地实施矩阵内清零。最后两项补充覆盖是：
-
-- Phase 23：`preflight_cli_diagnostics`，只读确认 `tools/vnext_preflight.py` 的 CLI 参数和 Dashboard diagnostics hook 仍然存在；
-- Phase 25：`preflight_coverage_expansion`，确认 Phase 8-15 相关 sample-driven checks 已经进入 aggregate preflight 且当前通过。
-
-这一步不把 preflight 变成 release gate，也不从 preflight 内部递归执行 CLI。CLI / diagnostics 的真实执行路径仍由 `tests/test_v3_maintenance_report.py` 和 `tests/test_system_diagnostics.py` 覆盖；aggregate preflight 只负责在本地报告里暴露“入口未丢失、覆盖语义完整”的结构化信号。
 
 ### 4.3.10.20 Diagnostics Observability Boundary（Phase 31）
 
@@ -1274,15 +1156,6 @@ Phase 42 后，Dashboard `/api/system/diagnostics` 会追加 `vnext_coverage` �
 
 这一步不执行真实 fsync、不修复 ledger、不重建 projection，也不改变 runtime 恢复策略；它只是把 vNext 的 crash-recovery 顺序约束暴露到 Dashboard diagnostics。
 
-### 4.3.10.26 Replication Contract Diagnostics（Phase 37）
-
-`web.system.build_system_diagnostics()` 现在会追加 `replication_contract` check。它通过 `ReplicationContract` 校验两类样例：
-
-- topology：single canonical writer, multi-reader projections, optional encrypted replica, snapshot append-only segment
-- segment：trace created + tombstone-preserving archive event
-
-这一步不启动真实 cluster、不复制用户数据、不连接网络，也不把 replication contract 变成 release gate；它只是把 vNext 的复制边界暴露到 Dashboard diagnostics，方便本地 preflight 和系统页面共同观察。
-
 ### 4.3.10.27 Migration Preservation Diagnostics（Phase 38）
 
 `web.system.build_system_diagnostics()` 现在会追加 `migration_preservation` check。它通过 `MigrationPreservationContract` 校验两类样例：
@@ -1302,44 +1175,6 @@ Phase 42 后，Dashboard `/api/system/diagnostics` 会追加 `vnext_coverage` �
 - 旧记忆里的 imperative wording 会被 redaction，而不是变成对当前 LLM 的命令
 
 这一步不调用真实 retrieval、不读取用户记忆、不改写搜索结果，也不把 surface context compiler 变成 runtime gate；它只是把 vNext 的“浮现以后仍不能替代思考”边界暴露到 Dashboard diagnostics。
-
-### 4.3.10.29 Preflight CLI Diagnostics（Phase 40）
-
-`web.system.build_system_diagnostics()` 现在会追加 `preflight_cli_diagnostics` check。它做的是源码级完整性检查：
-
-- `tools/vnext_preflight.py` 存在
-- CLI 保留 `build_parser()`、`--buckets-dir`、`--output`、`--coverage-only`
-- CLI 仍通过 `LegacyRuntime.from_config()` 和 `VNextPreflightReportBuilder(runtime).build()` 生成报告
-- `src/web/system.py` 仍保留 `vnext_preflight` Dashboard hook 和本地排查提示
-
-这一步不运行 CLI、不写 JSON 输出、不读取真实 bucket，也不把 preflight 变成自动 release gate；它只是让 Dashboard diagnostics 能在 aggregate `vnext_preflight` 之外，单独提示 CLI/诊断入口是否被误删。
-
-### 4.3.10.30 Preflight Report Self Diagnostics（Phase 41）
-
-`web.system.build_system_diagnostics()` 现在会追加 `preflight_report_self` check。它不重新构造 preflight，而是从同一次 `VNextPreflightReportBuilder(runtime).build()` 结果里提取 `checks.preflight_report_self`，并单独展示：
-
-- `schema`
-- `required_check_count`
-- `present_required_count`
-- `missing_required_checks`
-- `malformed_checks`
-- 顶层 `vnext_preflight` 的 schema / check count
-
-这一步不重复运行 CLI、不额外读取 bucket、不写输出文件，也不改变 `vnext_preflight` 顶层 OK 语义；它只是让 Dashboard diagnostics 能直接看到 aggregate report 自身是否完整。
-
-### 4.3.10.31 vNext Coverage Diagnostics（Phase 42）
-
-`web.system.build_system_diagnostics()` 现在会追加 `vnext_coverage` check。它不重新运行 coverage matrix，而是从同一次 `VNextPreflightReportBuilder(runtime).build()` 结果里提取 `checks.vnext_coverage`，并单独展示：
-
-- `schema`
-- `phase_count`
-- `local_completion_percent`
-- `preflight_coverage_percent`
-- `preflight_gap_count`
-- `next_preflight_targets`
-- 顶层 `vnext_preflight` 的 schema / check count
-
-这一步不扫描真实 bucket、不写输出文件、不改变 `vnext_preflight` 顶层 OK 语义；它只是让 Dashboard diagnostics 能直接回答“本地 vNext 阶段覆盖到了哪里”，并把 gap/next-target 信号从 aggregate report 里拿出来。
 
 ### 4.3.11 Formal Invariants Shadow Checker（vNext Phase 8A / Phase 10，diagnostic）
 
@@ -1390,9 +1225,7 @@ Phase 8B 仍没有改变 live `breath()` / search 输出。它先把“记忆只
 - `letter_write` / `letter_lock_update` / `letter_read` → `artifact_trace`。
 - `plan` → `unresolved_tension_memory`，并显式 `may_drive_action=False`。
 
-这一步和 `LegacyCommandBridge` 分工不同：command bridge 负责旧 runtime 的 command/projection plan；Neural Tool Router 负责表达“外部器官语言不变，内部路径严格分化”。Phase 8C 还没有替换 live tool execution。
-
-Phase 45 后，`LegacyRuntime` 会直接暴露 `neural_route(...)` / `route_neural_tool(...)`。它仍不调用 handler、不改变 MCP 工具名，但 runtime 现在可以为真实请求生成 organ tool → neural subsystem 的 route，并保留 actor/source/permissions scope。`VNextPreflightReportBuilder.tool_output_humility` 复用 runtime route，而不是直接构造 shadow router。
+它表达的是「外部器官语言不变，内部路径严格分化」。Phase 8C 还没有替换 live tool execution。
 
 ### 4.3.14 Tool Output Humility Contract（vNext Phase 8D，shadow contract）
 
@@ -1407,8 +1240,6 @@ Phase 45 后，`LegacyRuntime` 会直接暴露 `neural_route(...)` / `route_neur
 
 `evaluate_receipt()` 会把越界输出转成 `InvariantReport`：如果输出可以驱动行动、带命令力、声称当前情绪、把沉淀当信念引擎、或把重构当原始记忆，都会返回 violation。Phase 8D 仍是 shadow contract，不改变现有 MCP handler 的 live response；接入 live 输出需要后续逐个工具迁移和 token budget 评估。
 
-Phase 46 后，`LegacyRuntime` 会暴露 `tool_output_receipt(...)` / `evaluate_tool_output(...)`。它通过 runtime 的 neural route 生成 receipt，再用同一个 `ToolOutputContract` 评估 humility invariants。`VNextPreflightReportBuilder.tool_output_humility` 现在复用这个 runtime API，因此后续 live MCP handler 可以逐步接同一入口，而不是自己重建 route/receipt。
-
 ### 4.3.15 Policy-Gated Retrieval Scoring（vNext Phase 9，shadow contract）
 
 `ombrebrain.retrieval.scoring.PolicyGatedRetrievalScorer` 是 vNext §17 的高级检索评分契约。它把检索分成两层：
@@ -1419,8 +1250,6 @@ Phase 46 后，`LegacyRuntime` 会暴露 `tool_output_receipt(...)` / `evaluate_
 `SurfacePolicyVM` 的拒绝会强制把 `accessibility` 归零，所以高语义相似度、高 lexical 命中或高 graph 分都不能绕过 `dont_surface`、archive、tombstone、deleted 等 surface policy。`rank()` 也按最终 `surface_score` 排序，而不是按 raw candidate score 排序。
 
 Phase 9 仍是 shadow scoring contract：它没有替换 `src/tools/breath/search.py`、`src/tools/breath/surface.py` 或 Dashboard `/api/search` 的实际排序逻辑。后续接 live retrieval 时，应先把现有 decay/search/vector 分数映射到 `RetrievalFeatures`，再逐步打开 ranking，而不是直接重排所有用户可见结果。
-
-Phase 47 后，`LegacyRuntime` 会暴露 `score_retrieval_bucket(...)` / `rank_retrieval_candidates(...)`，并持有同一个 `PolicyGatedRetrievalScorer`。`VNextPreflightReportBuilder.retrieval_scoring` 复用 runtime scorer，证明 retrieval policy gate、surface score 与排名 contract 已经有 runtime 入口。真实 `breath` / search 仍需单独迁移 feature 映射与排序开关。
 
 ### 4.4 Dashboard 页面（侘寂风）
 
@@ -1627,7 +1456,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `limits.max_mcp_request_bytes` | `4194304` | `/mcp` 请求体上限；0 禁用 |
 | `limits.max_management_request_bytes` | `4194304` | Dashboard/OAuth 普通写请求上限；导入上传使用独立上限；0 禁用 |
 | `bucket_type_defaults.{type}.{field}` | （空） | iter 1.9：按桶类型覆盖 importance/valence/arousal 默认值。例：`bucket_type_defaults.feel.importance: 5`。`bucket_manager.create()` 在不传入该字段时查此表 |
-| `surfacing.breath_max_tokens` | `10000` | 覆盖 `breath` 默认 max_tokens |
+| `surfacing.breath_max_tokens` | `20000` | 覆盖 `breath` 默认 max_tokens；必须先装得下 `limits.max_pinned` 条核心准则，余下才给普通浮现 |
 | `surfacing.breath_max_results` | `20` | 覆盖 `breath` 默认 max_results |
 | `surfacing.feel_max_tokens` | `15000` | **dream** feel 历史段的 token 预算，超出折叠为 60 字摘要。3.0.0 起不再作用于 feel 通道——`feel(query=...)` 用自己的 `max_tokens`（默认 10000），且放不下时整条省略、不折叠 |
 | `timezone` | `Asia/Shanghai` | 3.0.0：用户只给日期、不写时区时按它理解（Letter 定时锁 `unlock_date` 等）。IANA 时区名；名字非法或缺 tzdata 时回退固定 `+08:00`，但 Dashboard 保存会当场校验拒绝。Dashboard「设置」可改，热更新生效 |
@@ -1698,7 +1527,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 
 | 值 | 位置 | 用途 |
 |---|---|---|
-| `10000` / `40000` | `breath` | max_tokens 默认 / 显式 opt-in 安全上限（非新默认） |
+| `20000` / `40000` | `breath` | max_tokens 默认 / 显式 opt-in 安全上限（非新默认） |
 | `20` / `50` | `breath` | max_results 默认 / 上限 |
 | `2` | `breath` 浮现 | 冷启动桶数上限 |
 | `8` | 冷启动 | importance >= 8 才进入冷启动 |
@@ -1752,6 +1581,13 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `_check_plan_resolution` 无 embedding | — | 退回关键词/BM25 召回；未命中就不交给 LLM |
 | `decay_cycle` list_all 失败 | 异常 | 返回 `{checked:0, error:str}`，不终止后台循环 |
 | `decay_cycle` 单桶评分失败 | 异常 | WARNING 日志，跳过该桶 |
+| 向量库 `embeddings.db` 损坏 | `sqlite3.DatabaseError` | 隔离成 `embeddings.db.corrupt-<时间戳>` 后重建空库，记 OB-E001；向量按需重新生成。**不允许因为派生索引坏掉而拒绝启动** |
+| 脱水缓存 `dehydration_cache.db` 损坏 | `sqlite3.DatabaseError` | 同上，隔离成 `.corrupt-<时间戳>` 并重建；缓存里没有真源数据 |
+| 桶文件发布失败（无硬链接的文件系统） | 盘满 / 配额 / SMB 断连 | 删掉刚占下的半截目标文件再抛出；库里绝不留下能被 `_load_bucket` 读出来的截断记忆 |
+| `errors.jsonl` 尾行被崩溃截断 | — | 追加前先补换行，坏的只坏那一条；后续记录仍可读 |
+| embedding API 无响应 | 连接挂起 | 配置的 `timeout_seconds` 显式传给 SDK，封顶 timeout × 3 次尝试 |
+| 脱水 API 无响应 | 连接挂起 | 重试只在 `_chat` 一层（`_RETRY_MAX_ATTEMPTS` 次），SDK 侧 `max_retries=0`，封顶 timeout × 3 |
+| `buckets_dir` 配成空值 | — | 退回内置默认值并写 WARNING；不落到当前工作目录 |
 
 **核心设计决策（不要轻改）**：派生服务不能决定 Markdown 原文是否存在。`hold` 打标失败时使用明确标注的中性元数据保留原文；`breath` 只让检索/排序决定“想起哪段”，正文返回阶段逐字使用 Markdown 当前 content；需要 LLM 做结构化拆分的 `grow` 长内容仍可显式报错。所有检索降级都必须对调用方可见，不能伪装成完整语义结果。
 

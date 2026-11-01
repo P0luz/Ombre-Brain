@@ -63,7 +63,10 @@ EXPECTED_TOOL_ORDER = (
 
 EXPECTED_TOOL_PROPERTIES = {
     "breath": set(),
-    "breath_search": {"query", "domain", "max_results", "date_from", "date_to", "quotes"},
+    "breath_search": {
+        "query", "domain", "max_results", "date_from", "date_to", "quotes",
+        "mode", "with_ids",
+    },
     "breath_advanced": {
         "query",
         "max_tokens",
@@ -76,6 +79,9 @@ EXPECTED_TOOL_PROPERTIES = {
         "catalog",
         "date_from",
         "date_to",
+        "quotes",
+        "mode",
+        "with_ids",
     },
     "hold": {
         "content",
@@ -153,7 +159,8 @@ EXPECTED_TOOL_PROPERTIES = {
     "letter_lock_update": {"letter_id", "lock_type", "unlock_date"},
     "letter_read": {"query", "limit", "author", "date_from", "date_to"},
     "feel": {"query", "max_tokens"},
-    "I": {"content", "aspect", "read", "limit", "promote"},
+    # supersedes：3.6.6 的「声明取代即挂起旧条目」。
+    "I": {"content", "aspect", "read", "limit", "promote", "supersedes"},
     "dream": {"window_hours"},
 }
 
@@ -334,8 +341,10 @@ def _bucket_ids(text: str) -> set[str]:
 
 
 def _i_witness_progress(text: str, bucket_id: str) -> tuple[int, int]:
+    # 括号里 3.6.6 起会跟一段滞留诊断（「已等 N 天、经历 M 场梦」之类），
+    # 所以别把右括号钉死在「次 dream」后面——这里要的只是见证进度那两个数。
     match = re.search(
-        rf"{re.escape(bucket_id)}\s+（(\d+)/(\d+) 次 dream）",
+        rf"{re.escape(bucket_id)}\s+（(\d+)/(\d+) 次 dream[^）]*）",
         text,
     )
     assert match, text
@@ -902,8 +911,7 @@ def test_dream_clamps_window_to_documented_bounds(mcp_client, window_hours, expe
     ],
 )
 def test_query_tools_enforce_query_size_limit(mcp_client, tool, arguments):
-    result = mcp_client.call(tool, arguments)
-    assert "查询过大" in result
+    assert "查询过大" in _rejection_text(mcp_client, tool, arguments)
 
 
 @pytest.mark.parametrize(

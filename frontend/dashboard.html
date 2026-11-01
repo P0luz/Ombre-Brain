@@ -909,7 +909,7 @@
   .self-fab .fab-globe { display:block; width:26px; height:26px; opacity:.9; }
   .self-fab .fab-globe svg { width:100%; height:100%; display:block; }
   .know-tabs {
-    display:flex; gap:6px; padding:0 20px 14px;
+    display:flex; gap:6px; padding:0 24px 14px;
     border-bottom:1px solid var(--border);
   }
   .know-tab {
@@ -925,7 +925,7 @@
     box-shadow:inset 2px 2px 5px var(--shadow-dark-subtle),
                inset -2px -2px 5px var(--shadow-light);
   }
-  .know-pane { padding:18px 20px 28px; overflow-y:auto; flex:1; }
+  .know-pane { padding:18px 24px 28px; overflow-y:auto; flex:1; }
   .know-state {
     font-size:12px; color:var(--text-dim); margin-bottom:10px;
   }
@@ -1932,6 +1932,19 @@
     background: var(--lcd);
     padding: 2px 7px;
     border-radius: 2px;
+  }
+  .self-entry-state {
+    font-size: 10px;
+    letter-spacing: 0.4px;
+    color: var(--text-light);
+    border: 1px solid var(--text-light);
+    border-radius: 2px;
+    padding: 1px 6px;
+    opacity: 0.85;
+  }
+  /* 淡化而不是隐藏：这条不再是它现在的看法，但一个字都没删。 */
+  .self-entry-retired .self-entry-content {
+    opacity: 0.55;
   }
   .self-entry-time {
     font-family: 'Share Tech Mono', monospace;
@@ -4800,18 +4813,23 @@ function renderThemPeople() {
     box.innerHTML = '<p class="know-empty">还没有记住任何人。</p>';
     return;
   }
-  // 分组的依据不是「谁登记的」，是**怎么认识的**：听你说的 vs 自己遇到的。
-  // 这两种混在一张名单里就会张冠李戴，而人只有看得见才纠得了。
-  var 听说的 = [], 遇到的 = [];
+  // 分组的依据不是「谁登记的」，是**怎么认识的**——所以看 known_via，不看 origin。
+  //
+  // 这两件事在后端早就拆开了：origin 管人类看得见多少（模型改不动），
+  // known_via 管认识论上的来源（模型自己说了算）。前端一直只有 origin 一个
+  // 分支，于是模型登记的人不管明写了多少次 heard_from_user，都被划进
+  // 「自己遇到的」——而那正是转述来的二手信息最不该待的那一栏。
+  var 听说来的 = [], 亲自遇到的 = [];
   for (var i = 0; i < _themPeople.length; i++) {
-    (_themPeople[i].origin === 'human' ? 听说的 : 遇到的).push(_themPeople[i]);
+    (_themPeople[i].known_via === 'heard_from_user' ? 听说来的 : 亲自遇到的)
+      .push(_themPeople[i]);
   }
   var 名 = esc(aiName());
   box.innerHTML =
-      themGroupHtml('heard', '你告诉 ' + 名 + ' 的', 听说的,
-        名 + ' 没见过这些人，写下的每一句都来自你的转述——记岔了只有你认得出来。')
-    + themGroupHtml('met', 名 + ' 自己遇到的', 遇到的,
-        '第一手的印象。内容只属于 ' + 名 + '，你只看得到称呼。');
+      themGroupHtml('heard', '你告诉 ' + 名 + ' 的', 听说来的,
+        名 + ' 没见过这些人，写下的每一句都来自你的转述。')
+    + themGroupHtml('met', 名 + ' 自己遇到的', 亲自遇到的,
+        '第一手的印象。');
 }
 
 function themGroupHtml(kind, 标题, 人们, 说明) {
@@ -4823,7 +4841,10 @@ function themGroupHtml(kind, 标题, 人们, 说明) {
   for (var i = 0; i < 人们.length; i++) {
     var p = 人们[i];
     var 未读 = (p.pending_notes || []).length;
-    var 副 = kind === 'heard'
+    // 条数跟着「看不看得见」走。可见性与分栏现在是同一个字段（known_via），
+    // 所以「你告诉它的」那一栏里每个人都看得见条数，「它自己遇到的」那一栏
+    // 一个都没有——给看不见内容的人标条数是假的。
+    var 副 = p.known_via === 'heard_from_user'
       ? ((p.claims || []).length ? (p.claims.length + ' 条') : '还没记下')
       : '';
     h += '<button class="know-row" onclick="openThemPerson(\'' + esc(p.person_id) + '\')">'
@@ -4844,7 +4865,10 @@ function renderThemPersonView() {
     if (_themPeople[i].person_id === _themPersonId) p = _themPeople[i];
   }
   if (!p) { backToThemRoster(); return; }
-  var 听说的 = p.origin === 'human';
+  // rule.md 13.3：分界是「模型怎么认识这个人的」，不是「谁登记的」。
+  // 措辞和可见性因此是同一件事——听说来的就看得见、就能留言纠错。
+  var 听说来的 = p.known_via === 'heard_from_user';
+  var 可见 = 听说来的;
   var 名 = esc(aiName());
   var 别名 = (p.names || []).slice(1);
 
@@ -4856,13 +4880,15 @@ function renderThemPersonView() {
     h += '<div class="know-detail-alias">也叫：' + esc(别名.join('、')) + '</div>';
   }
   h += '<div class="know-detail-origin"><span class="know-ico">'
-     + _ICO[听说的 ? 'heard' : 'met'] + '</span><b>'
-     + (听说的 ? '你告诉 ' + 名 + ' 的' : 名 + ' 自己遇到的') + '</b></div>'
+     + _ICO[听说来的 ? 'heard' : 'met'] + '</span><b>'
+     + (听说来的 ? '你告诉 ' + 名 + ' 的' : 名 + ' 自己遇到的') + '</b></div>'
      + '<p class="know-detail-why">'
-     + (听说的
-        ? 名 + ' 没见过这个人，关于他的一切都是你转述的。所以这一页你看得见全文——'
-          + '记岔的地方只有你认得出来。'
-        : '第一手的印象，' + 名 + ' 自己写下的。内容不出这层边界，你只看得到称呼。')
+     + (听说来的
+        ? 名 + ' 没见过这个人，关于他的一切都是你转述的。'
+        : '第一手的印象，' + 名 + ' 自己写下的。')
+     + (可见
+        ? '关于他的每一句都来自你，所以这一页你看得见全文——记岔的地方只有你认得出来。'
+        : '第一手的印象不出这层边界，你只看得到称呼。')
      + '</p>';
 
   h += '<div class="know-field"><div class="know-field-label">称呼</div>'
@@ -4876,10 +4902,13 @@ function renderThemPersonView() {
      + ' 会在下一次回想时被告知一次新旧对照——正文一个字不动，那些句子是 ' + 名 + ' 写的。</p>'
      + '</div>';
 
-  if (听说的) {
+  // 可见性跟 known_via。标成 heard_from_user 本身就是在说「我没见过这个人，
+  // 全是转述」——那一份里没有第一手印象可保护（models.py 的 human_visible
+  // 有同样的说明）。
+  if (可见) {
     var claims = p.claims || [];
     h += '<div class="know-field"><div class="know-field-label">'
-       + 名 + ' 从你说的话里记下的</div>';
+       + (听说来的 ? 名 + ' 从你说的话里记下的' : 名 + ' 关于这个人记下的') + '</div>';
     if (claims.length) {
       h += '<ul class="know-claims">';
       for (var j = 0; j < claims.length; j++) {
@@ -5405,9 +5434,18 @@ async function loadBuckets() {
     selectedBucketIds.forEach(function(id) { if (!liveIds.has(id)) selectedBucketIds.delete(id); });
     updateStats();
     buildFilters();
-    // 数据刷新不等于用户切换视图：继续应用当前筛选，并保留所在页。
+    // 数据刷新不等于用户切换视图：搜索框里还有查询词就重跑搜索，否则继续应用
+    // 当前筛选。两条路都保留所在页。
+    // 从搜索结果里归档/删除一条时，这里如果无条件走 filterBuckets(allBuckets)，
+    // 列表会跳回「当前筛选下的全部桶」，而搜索框里的词还在——用户看到的是
+    // 「输入框有搜索词但列表不是搜索结果」，很容易对下一条误操作。
     // 若刷新后页数减少，_paintBuckets 会自动把 bucketPage 收敛到末页。
-    renderBuckets(filterBuckets(allBuckets), true);
+    var activeQuery = (document.getElementById('search-input') || {}).value || '';
+    if (activeQuery.trim()) {
+      await searchBuckets(activeQuery.trim(), true);
+    } else {
+      renderBuckets(filterBuckets(allBuckets), true);
+    }
     if (data.length === 0 && window.ObPet) window.ObPet.react('empty');
   } catch (e) {
     if (generation !== bucketLoadGeneration || requestedSort !== bucketSort) return;
@@ -5667,7 +5705,7 @@ function renderMeaningHtml(value) {
   '</section>';
 }
 
-async function searchBuckets(query) {
+async function searchBuckets(query, preservePage) {
   var seen = {}, merged = [];
   _localBucketMatches(query).forEach(function(b) { if (!seen[b.id]) { seen[b.id] = 1; merged.push(b); } });
   // 服务端语义搜索：补充本地字面没匹配到、但语义相关的桶（向量化未开启时会失败，自动退化为纯本地）
@@ -5678,7 +5716,7 @@ async function searchBuckets(query) {
       if (Array.isArray(results)) results.forEach(function(b) { if (!seen[b.id]) { seen[b.id] = 1; merged.push(b); } });
     }
   } catch (e) { /* 离线 / 无向量化：退化为纯本地字面 + 模糊匹配 */ }
-  renderBuckets(merged);
+  renderBuckets(merged, preservePage);
 }
 
 let detailLoadGeneration = 0;
@@ -7977,7 +8015,7 @@ async function loadConfig() {
     }
     var sf = cfg.surfacing || {};
     document.getElementById('cfg-sf-breath-results').value = sf.breath_max_results || 20;
-    document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 10000;
+    document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 20000;
     document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 15000;
     document.getElementById('cfg-timezone').value = cfg.timezone || 'Asia/Shanghai';
     document.getElementById('config-readonly').innerHTML =
@@ -8273,7 +8311,7 @@ async function saveConfig(persist) {
     merge_threshold: Number.isFinite(mergeThreshold) ? mergeThreshold : 75,
     surfacing: {
       breath_max_results: parseInt(document.getElementById('cfg-sf-breath-results').value) || 20,
-      breath_max_tokens: parseInt(document.getElementById('cfg-sf-breath-tokens').value) || 10000,
+      breath_max_tokens: parseInt(document.getElementById('cfg-sf-breath-tokens').value) || 20000,
       feel_max_tokens: parseInt(document.getElementById('cfg-sf-feel-tokens').value) || 15000,
     },
     timezone: (document.getElementById('cfg-timezone').value || '').trim(),
@@ -10791,8 +10829,20 @@ function renderSelfEntries() {
     const aspectHtml = e.aspect
       ? '<span class="self-entry-aspect">' + esc(e.aspect) + '</span>'
       : '';
-    return '<div class="self-entry">'
-      + '<div class="self-entry-meta">' + aspectHtml + '<span class="self-entry-time">' + esc(ts) + '</span></div>'
+    // 一条被取代/被质疑的条目和一条当前信念长得一样，就等于没标。
+    var stateHtml = '';
+    var retired = '';
+    if (e.superseded_by) {
+      stateHtml = '<span class="self-entry-state">已被 ' + esc(e.superseded_by) + ' 取代</span>';
+      retired = ' self-entry-retired';
+    } else if (e.disputed_by && e.disputed_by.length) {
+      stateHtml = '<span class="self-entry-state">正在改这条主意</span>';
+      retired = ' self-entry-retired';
+    } else if (e.sedimented === false) {
+      stateHtml = '<span class="self-entry-state">未经沉淀</span>';
+    }
+    return '<div class="self-entry' + retired + '">'
+      + '<div class="self-entry-meta">' + aspectHtml + stateHtml + '<span class="self-entry-time">' + esc(ts) + '</span></div>'
       + '<div class="self-entry-content">' + esc(e.content) + '</div>'
       + '</div>';
   }).join('');

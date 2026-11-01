@@ -12,8 +12,6 @@ def test_default_v3_architecture_contract_passes() -> None:
 
     assert report.ok is True
     assert report.issue_count == 0
-    assert "decision.debug" in report.components
-    assert "web.v3_debug" in report.components
 
 
 def test_architecture_audit_detects_duplicate_protected_write_owners() -> None:

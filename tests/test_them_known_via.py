@@ -127,14 +127,67 @@ async def test_bad_known_via_names_the_allowed_values(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_known_via_does_not_change_human_visibility(tmp_path):
-    """拆分的全部意义：标成「只听说过」不能顺带把私有认识交给人类。"""
+async def test_heard_from_user_is_visible_even_when_the_model_registered_it(tmp_path):
+    """rule.md 13.3：分界是「怎么认识的」，不是「谁登记的」。
+
+    人类亲口介绍、模型顺手登记下来的人——按 origin 分会被划进不可见，而撞名
+    又挡住人类自己登记，那个人就永远看不到；他说过的话被记成什么样，他自己
+    没有任何路径知道。
+    """
     service = _enabled(tmp_path)
     await _write(service, known_via=KNOWN_VIA_HEARD_FROM_USER)
 
     person = _person(service)
     assert person.known_via == KNOWN_VIA_HEARD_FROM_USER
     assert person.origin == ORIGIN_MODEL
+    assert person.human_visible is True
+    # 出处仍然记着，只是不再决定看得见多少——撞名闸还靠它。
+    assert person.human_registered is False
+
+
+@pytest.mark.asyncio
+async def test_a_person_you_introduced_is_readable_and_correctable(tmp_path):
+    """人类介绍的人，人类要看得见正文、也留得下纠错。
+
+    这是真机上撞见的那条路：模型顺手登记（origin=model）并标了
+    heard_from_user，于是内容不可见；而撞名闸又挡住人类自己去名册登记同名的
+    人，两头堵死——人类连自己说过的话被记成什么样都无从知道，更谈不上纠错。
+    """
+    service = _enabled(tmp_path)
+    from ombrebrain.them.service import REQUIRED_CONFIRMATIONS
+
+    for _ in range(REQUIRED_CONFIRMATIONS):
+        await _write(service, known_via=KNOWN_VIA_HEARD_FROM_USER)
+
+    条目 = service.list_people()[0]
+    assert 条目["origin"] == ORIGIN_MODEL
+    assert 条目["known_via"] == KNOWN_VIA_HEARD_FROM_USER
+    assert "claims" in 条目, "他说过的话被记成什么样，他自己得看得见"
+
+    # 反馈入口：留言纠错必须开着，否则「看得见」只是只读的展示。
+    service.leave_note(条目["person_id"], "她其实会先铺垫一句再讲结论")
+    assert service.list_people()[0]["pending_notes"], "留言没落到人身上"
+
+
+@pytest.mark.asyncio
+async def test_met_myself_refuses_notes(tmp_path):
+    """看不见的那一档不开留言：对着看不见的东西提意见不是纠错。"""
+    service = _enabled(tmp_path)
+    await _write(service, known_via=KNOWN_VIA_MET_MYSELF)
+
+    person = _person(service)
+    with pytest.raises(ValueError) as excinfo:
+        service.leave_note(person.id, "你记错了")
+    assert "无从纠起" in str(excinfo.value)
+
+
+@pytest.mark.asyncio
+async def test_met_myself_stays_private(tmp_path):
+    """第一手的印象不出这层边界，人类只看得到称呼。"""
+    service = _enabled(tmp_path)
+    await _write(service, known_via=KNOWN_VIA_MET_MYSELF)
+
+    person = _person(service)
     assert person.human_visible is False
 
 
@@ -147,6 +200,29 @@ async def test_human_registered_person_is_heard_from_user_and_visible(tmp_path):
     assert person.origin == ORIGIN_HUMAN
     assert person.known_via == KNOWN_VIA_HEARD_FROM_USER
     assert person.human_visible is True
+
+
+@pytest.mark.asyncio
+async def test_roster_carries_known_via_so_the_dashboard_can_group_by_it(tmp_path):
+    """名册要按「怎么认识的」分栏，那 `list_people` 就得把这个字段发出去。
+
+    前端一度只能看到 `origin`（谁登记的），于是模型登记、明写了
+    `heard_from_user` 的人照样被划进「自己遇到的」那一栏。
+    """
+    service = _enabled(tmp_path)
+    await _write(service, known_via=KNOWN_VIA_HEARD_FROM_USER)
+    service.add_person(["Iris"])
+
+    roster = {row["names"][0]: row for row in service.list_people()}
+
+    模型登记的 = next(row for row in roster.values() if row["origin"] == ORIGIN_MODEL)
+    assert 模型登记的["known_via"] == KNOWN_VIA_HEARD_FROM_USER
+    # 标了「听你说的」，正文就该出这个接口——那些话本来就是人类说的。
+    assert "claims" in 模型登记的
+
+    assert roster["Iris"]["known_via"] == KNOWN_VIA_HEARD_FROM_USER
+    assert roster["Iris"]["origin"] == ORIGIN_HUMAN
+    assert "claims" in roster["Iris"]
 
 
 def _age_receipts(service, claim):

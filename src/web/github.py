@@ -440,7 +440,7 @@ def register(mcp) -> None:
             # 3) 让 bucket_mgr 的 BM25 索引失效（导入直写磁盘，绕过了 bucket_mgr 的脏标记）
             try:
                 if sh.bucket_mgr is not None:
-                    sh.bucket_mgr._invalidate_bm25()
+                    sh.bucket_mgr.invalidate_bm25()
             except Exception:
                 pass
         return JSONResponse(result)

@@ -42,6 +42,7 @@ import threading
 
 from bucket_manager import _filesystem_turn as _kernel_filesystem_turn
 from utils import normalize_memory_title, now_iso, parse_bool
+from ombrebrain.storage import bucket_paths as _bp
 from ombrebrain.domain.plan_history import append_plan_change_log as append_plan_change_log
 
 from . import _runtime as rt
@@ -646,15 +647,15 @@ async def restore_archived_letters(
             metadata = bucket.get("metadata") or {}
             if not isinstance(metadata, dict):
                 continue
-            strong = bucket_mgr._has_strong_letter_marker(metadata)
-            ambiguous = bucket_mgr._has_ambiguous_letter_marker(metadata)
+            strong = _bp.has_strong_letter_marker(metadata)
+            ambiguous = _bp.has_ambiguous_letter_marker(metadata)
             if not (strong or ambiguous):
                 continue
             relevant_rows.append(bucket)
             path = str(bucket.get("path") or "")
             if (
                 str(metadata.get("type") or "").strip().casefold() == "archived"
-                or bucket_mgr._path_is_within(path, bucket_mgr.archive_dir)
+                or _bp.path_is_within(path, bucket_mgr.archive_dir)
             ):
                 has_archived_signal = True
 
@@ -668,12 +669,12 @@ async def restore_archived_letters(
         bucket = relevant_rows[0]
         metadata = bucket.get("metadata") or {}
         path = str(bucket.get("path") or "")
-        if not bucket_mgr._path_is_within(path, bucket_mgr.archive_dir):
+        if not _bp.path_is_within(path, bucket_mgr.archive_dir):
             reason = "not_archived"
         elif str(metadata.get("type") or "").strip().casefold() != "archived":
             reason = "invalid_archived_type"
         else:
-            reason = bucket_mgr._archived_letter_rejection(metadata)
+            reason = bucket_mgr.archived_letter_rejection(metadata)
         if reason:
             exclusions.append({"id": bucket_id, "reason": reason})
         else:

@@ -8,6 +8,7 @@ utils.atomic_write_text 那样加 `\\\\?\\` 长路径前缀。sanitize 后的深
 """
 import base64
 import os
+import shutil
 
 import httpx
 import pytest
@@ -46,8 +47,25 @@ class _FakeGitHubApi:
         return httpx.Response(200, json=body, request=request)
 
 
+@pytest.fixture
+def clean_deep_tree(tmp_path):
+    """测完把深层目录删掉——pytest 自己删不动。
+
+    这个用例故意造超过 MAX_PATH 的路径，而 pytest 的 `rm_rf` 不加长路径前缀，
+    于是它清理临时目录时够不着这些路径：轮次目录只增不减，每跑一轮全量套件就在
+    临时根里永久留下一份（实测攒到 12 个轮次目录 / 1.68 GB / 58106 个文件，
+    其中 14 个目录的路径超过 255 字符、裸 Win32 API 根本访问不到）。
+
+    造得出来就得收得回去，用同一套前缀 API 删。
+    """
+    yield
+    shutil.rmtree(_win_long_path(os.path.abspath(str(tmp_path))), ignore_errors=True)
+
+
 @pytest.mark.asyncio
-async def test_import_from_github_restores_file_past_windows_max_path(tmp_path, monkeypatch):
+async def test_import_from_github_restores_file_past_windows_max_path(
+    tmp_path, monkeypatch, clean_deep_tree
+):
     # 每层目录名拉满，六层嵌套：跟 tmp_path 拼起来必然超过 260 字符。
     segment = "深层目录名字段_" * 5  # ~35 字符/层
     rel_path = "/".join([segment] * 6) + "/记忆.md"

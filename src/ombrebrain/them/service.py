@@ -34,6 +34,7 @@ import logging
 import re
 from typing import Any, Mapping
 
+from ombrebrain.storage.letter_lock import letter_is_open_to_ai
 from ombrebrain.storage.source_store import source_links_from_metadata
 from utils import count_tokens_approx, parse_bool
 
@@ -42,7 +43,6 @@ from ..you.models import (
     VALID_BASES,
     EvidenceEdge,
     ModuleState,
-    ReviewReceipt,
     Scope,
     evidence_digest,
     utc_now,
@@ -60,6 +60,7 @@ from .models import (
 )
 from .safety import (
     contains_forbidden_subject,
+    forbidden_subject_fields,
     is_relation_label,
     leaks_protected_text,
 )
@@ -240,7 +241,7 @@ class ThemService:
         # 撞上人类登记的人：优先报这一条。两类的区别是「怎么认识的」，
         # 比「碰巧同名」重要得多，错误信息也更能指导下一步怎么写。
         for existing in 命中:
-            if existing.human_visible:
+            if existing.human_registered:
                 # **跨类同名不自动合并。**
                 #
                 # 「听别人描述一个人」和「自己认识一个人」是两码事。人类登记的
@@ -301,12 +302,15 @@ class ThemService:
     # --- 人类唯一能碰的那一处：称呼 ---
 
     def list_people(self) -> list[dict[str, Any]]:
-        """给前端看的名册。看得见多少，取决于这个人是谁登记的。
+        """给前端看的名册。看得见多少，取决于模型**怎么认识**这个人。
 
-        - 模型自己认出来的人：**只有称呼**。认识、依据、历史一概不出现——
-          那是模型的，不是给人读的。
-        - 人类自己登记的人：连模型写下的认识一起给。人类本来就认识他，
-          而且要能纠错——看不见就只能瞎猜。
+        - 模型自己遇到的人（`met_myself`）：**只有称呼**。认识、依据、历史
+          一概不出现——那是第一手的印象，是模型的，不是给人读的。
+        - 模型从人类口中听说的人（`heard_from_user`）：连模型写下的认识一起
+          给。那些话本来就是人类说的，而且要能纠错——看不见就只能瞎猜。
+
+        不看 `origin`：人类亲口介绍、模型顺手登记下来的人，按 origin 分会被
+        划进不可见，而撞名又挡住人类自己登记，那个人就永远看不到了。
         """
         try:
             scope = self._require_scope()
@@ -319,6 +323,10 @@ class ThemService:
                 "names": list(person.names),
                 "revision": person.revision,
                 "origin": person.origin,
+                # 名册按「怎么认识的」分栏，那就得把这个字段发出去。它不是一条
+                # 认识，是认识的来源标记，和 origin 同类——13.3 挡的是认识、
+                # 依据、历史，不是这个。
+                "known_via": person.known_via,
                 "pending_notes": [dict(note) for note in person.pending_notes],
             }
             if person.human_visible:
@@ -390,8 +398,8 @@ class ThemService:
     def leave_note(self, person_id: str, text: str) -> Person:
         """人类给模型留一条纠错。
 
-        只对人类自己登记的人开放：模型自己认识的人，人类连它记了什么都看不见，
-        那种情况下的「纠错」是在对着看不见的东西提意见。
+        只对「模型听人类说起的人」开放：模型自己遇到的人，人类连它记了什么都
+        看不见，那种情况下的「纠错」是在对着看不见的东西提意见。
 
         留言攒着，下次浮现时一起交给模型，念一次就清。**不占 token 配额**——
         配额管的是模型自己沉淀了多少，人类说的话不该挤掉模型的记忆。
@@ -402,8 +410,8 @@ class ThemService:
             raise ValueError(f"没有这个人：{person_id}")
         if not person.human_visible:
             raise ValueError(
-                "这个人是它自己认识的，你看不到它记了什么，也就无从纠起。"
-                "留言只对你自己登记的人开放。"
+                "这个人是它自己遇到的，你看不到它记了什么，也就无从纠起。"
+                "留言只对它从你口中听说的人开放。"
             )
         内容 = str(text or "").strip()
         if not 内容:
@@ -631,11 +639,20 @@ class ThemService:
         if len(content) > 500:
             raise ValueError(f"正文不超过 500 字，你给了 {len(content)} 字。")
         if contains_forbidden_subject(content, concept_key, concept_value):
+            # 指名道姓说是哪个字段。笼统地说「这条写不进去」时，模型只会去改
+            # 正文——真机上正文合规、踩线的是 concept_key="personality"，于是
+            # 连续五次重写正文，那个键一次没动。
+            踩线 = forbidden_subject_fields(
+                content=content, concept_key=concept_key, concept_value=concept_value
+            )
+            哪里 = "、".join(踩线) if 踩线 else "这几个字段合起来"
             raise ValueError(
-                "这条写不进去：them 只记这个人本身，不记人格判断、健康财务性与"
-                "亲密这些话题，**也不描述任何关系**——"
-                "「和谁关系怎么样」「对谁意味着什么」都不属于这里。"
-                "改成只讲这个人本身的说法再试。"
+                f"这条写不进去，踩线的是 **{哪里}**（不是整条都不行）：\n"
+                "them 只记这个人本身，不记人格判断、健康财务性与亲密这些话题，"
+                "**也不描述任何关系**——「和谁关系怎么样」「对谁意味着什么」"
+                "都不属于这里。\n"
+                "只改上面点名的那个字段再试；正文没被点名就说明正文本身没问题，"
+                "重写它没有用。"
             )
         if leaks_protected_text(content, protected_texts):
             raise ValueError("这条写不进去：不能照抄记忆原文，用你自己的话写。")
@@ -680,7 +697,20 @@ class ThemService:
                 raise ValueError(f"找不到记忆桶 {bucket_id}，无法作为依据。")
             metadata = dict(bucket.get("metadata") or {})
             bucket_type = str(metadata.get("type") or "dynamic").strip().lower()
-            if bucket_type in _IGNORED_BUCKET_TYPES:
+            if bucket_type == "letter":
+                # 3.6.5：信可以当依据，但只限**对 AI 已经开着**的那些。
+                #
+                # 放开的理由：有人每天把日记写进 letter，那就是他关于这些人最厚
+                # 的一手材料；一概拒掉等于让 them 在这种用法下根本没法用。
+                #
+                # 仍然挡住上锁的：否则模型能拿一封自己还读不到的信去撑一条认识，
+                # 而且「这封信里有没有出现某个名字」这种报错本身就是一次泄漏。
+                if not letter_is_open_to_ai(bucket):
+                    raise ValueError(
+                        f"{bucket_id} 是还没对你开放的信，不能作为依据。"
+                        "等它解锁之后再用，或者换一条现在就读得到的记忆。"
+                    )
+            elif bucket_type in _IGNORED_BUCKET_TYPES:
                 raise ValueError(f"{bucket_id} 是 {bucket_type} 类型，不能作为 them 的依据。")
             provenance = metadata.get("provenance")
             if isinstance(provenance, dict) and parse_bool(
@@ -690,10 +720,22 @@ class ThemService:
             body = str(bucket.get("content") or "").strip()
             if not body:
                 raise ValueError(f"{bucket_id} 没有正文，不能作为依据。")
-            folded = body.casefold()
+            # 标题与桶名也算「指明是谁」。
+            #
+            # 这条规则的原话是「一条依据自己都指不明白是谁，就不该拿来撑一条
+            # 关于谁的判断」。一篇标题写着「和 Zoey 的晚饭」、正文用「她」承接
+            # 的日记——它指明了。原先只翻 body，把这种最常见的日记文体整个拒在
+            # 门外，而那不是规则要挡的东西。
+            #
+            # 门槛一点没降：仍然是**每个桶都要指明**，不是「至少一个」；
+            # 只是承认标题也是这个桶自己的话。
+            folded = "\n".join(
+                str(part or "")
+                for part in (body, metadata.get("title"), metadata.get("name"))
+            ).casefold()
             if not any(name in folded for name in person.name_keys):
                 raise ValueError(
-                    f"{bucket_id} 的正文里没有出现{person.display_name}"
+                    f"{bucket_id} 的正文和标题里都没有出现{person.display_name}"
                     f"（登记的称呼：{'、'.join(person.names)}）。"
                     "关于一个人的认识，每一条依据都得指明是谁——"
                     "换一条写了名字的记忆，或者先把这个称呼补进 names。"
@@ -804,28 +846,7 @@ class ThemService:
         return self._promote_if_ready(stored)
 
     def _record_confirmation(self, claim: ThemClaim) -> ThemClaim:
-        """记一笔"模型今天重申过"。同一天重复调用只算一次。
-
-        判重用的"今天"必须和收据时间戳同源：另取一次 now 的话，跨日那一瞬两个
-        时间源会给出不同答案，同一天可能记下两条收据，三日门槛就少守了一天。
-        """
-        stamped = utc_now()
-        today = stamped[:10]
-        already = any(
-            receipt.review_date == today
-            and receipt.evidence_revision == claim.evidence_revision
-            for receipt in claim.review_receipts
-        )
-        if already:
-            return claim
-        receipt = ReviewReceipt(
-            reviewed_at=stamped,
-            reviewer_role_id=claim.scope.observer_role_id,
-            evidence_revision=claim.evidence_revision,
-            policy_version=THEM_POLICY_VERSION,
-            result="reaffirmed",
-        )
-        return replace(claim, review_receipts=(*claim.review_receipts, receipt))
+        return claim.with_confirmation(THEM_POLICY_VERSION, utc_now())
 
     def _promote_if_ready(self, claim: ThemClaim) -> ThemClaim:
         if claim.lifecycle != "candidate":
@@ -984,10 +1005,13 @@ class ThemService:
                 if claim.lifecycle != "candidate":
                     continue
                 还差 = max(0, REQUIRED_CONFIRMATIONS - claim.review_date_count)
+                # 依据桶一并给出，理由同 you/service.py 的同名方法。
+                依据 = "、".join(edge.bucket_id for edge in claim.evidence)
                 条目.append(
                     f"- {person.display_name}｜{claim.concept_key}="
                     f"{claim.concept_value}｜{claim.aspect}\n"
                     f"  「{claim.content}」还差 {还差} 个不同的日子\n"
+                    f"  bucket_ids={依据}\n"
                     f"  id={claim.id}"
                 )
         if not 条目:

@@ -248,7 +248,7 @@ class TestNameInBucket:
     async def test_桶里没这个人名就写不进去(self, tmp_path):
         service, manager = _enabled(tmp_path)
         manager.buckets["memory-2"] = _bucket("memory-2", "她又一次直接给了结论。")
-        with pytest.raises(ValueError, match="正文里没有出现"):
+        with pytest.raises(ValueError, match="都没有出现"):
             await _write(service)
 
     @pytest.mark.asyncio

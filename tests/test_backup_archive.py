@@ -466,7 +466,7 @@ async def test_export_to_empty_vault_restores_markdown_and_current_embedding_sch
     restored = await manager.get("memory-1")
     assert restored is not None
     assert restored["content"] == "restore this exact text"
-    assert await target_engine.get_embedding("memory-1") == [0.3, 0.4]
+    assert await target_engine.get_embedding("memory-1") == pytest.approx([0.3, 0.4])
     assert target_engine.get_content_hash("memory-1") == "source-hash"
     assert migrate.get_status()["result"] == {"imported": 1, "skipped": 0}
 
@@ -642,7 +642,7 @@ async def test_keep_both_maps_imported_vector_to_new_id(tmp_path):
     assert {bucket["content"] for bucket in buckets} == {"local version", "imported version"}
     imported = next(bucket for bucket in buckets if bucket["content"] == "imported version")
     assert imported["id"] != "memory-1"
-    assert await target_engine.get_embedding(imported["id"]) == [0.7, 0.8]
+    assert await target_engine.get_embedding(imported["id"]) == pytest.approx([0.7, 0.8])
 
 
 def test_keep_both_relation_target_remap_preserves_other_ledger_fields(tmp_path):

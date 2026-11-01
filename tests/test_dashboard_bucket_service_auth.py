@@ -143,7 +143,7 @@ def mcp_token(monkeypatch, tmp_path):
     monkeypatch.setattr(
         shared_web,
         "config",
-        {"buckets_dir": str(tmp_path), "mcp_token": MCP_TOKEN},
+        {"buckets_dir": str(tmp_path), "mcp_token": MCP_TOKEN, "mcp_auth_mode": "hybrid"},
         raising=False,
     )
 
@@ -196,49 +196,44 @@ def test_no_token_configured_rejects_all(monkeypatch, tmp_path):
     )
 
 
-SHORT_MCP_TOKEN = "yanjin13"  # 10 chars, mirrors the real production token length
-
-
-@pytest.fixture
-def short_mcp_token(monkeypatch, tmp_path):
-    """Configure only a short (10-char) MCP static token, no service token."""
-    monkeypatch.delenv("OMBRE_MCP_SERVICE_TOKEN", raising=False)
-    monkeypatch.setenv("OMBRE_MCP_TOKEN", SHORT_MCP_TOKEN)
-    monkeypatch.setattr(
-        shared_web,
-        "config",
-        {"buckets_dir": str(tmp_path), "mcp_token": SHORT_MCP_TOKEN},
-        raising=False,
-    )
-
-
-def test_short_mcp_token_authenticates_read_routes(monkeypatch, short_mcp_token):
-    """A 10-char MCP token should pass auth — this was the original bug."""
-    assert shared_web._is_service_token_authenticated(
-        _request("GET", "/api/bucket/feel-1", f"Bearer {SHORT_MCP_TOKEN}")
-    )
+@pytest.mark.parametrize("mode", ["oauth", "off", "invalid"])
+def test_mcp_token_cannot_bypass_disabled_mode(monkeypatch, mcp_token, mode):
+    shared_web.config["mcp_auth_mode"] = mode
     assert not shared_web._is_service_token_authenticated(
-        _request("GET", "/api/bucket/feel-1", "Bearer wrong")
+        _request("GET", "/api/bucket/feel-1", f"Bearer {MCP_TOKEN}")
+    )
+
+
+def test_short_token_rejected(monkeypatch, mcp_token):
+    token = "fake-short"
+    monkeypatch.setenv("OMBRE_MCP_TOKEN", token)
+    assert not shared_web._is_service_token_authenticated(
+        _request("GET", "/api/bucket/feel-1", f"Bearer {token}")
     )
 
 
 @pytest.mark.asyncio
-async def test_short_mcp_token_reads_exact_bucket_detail(monkeypatch, short_mcp_token):
-    """End-to-end: short MCP token can fetch bucket detail via the API route."""
-    monkeypatch.setattr(
-        buckets_web.sh, "bucket_mgr", FakeBucketManager(), raising=False
-    )
-    monkeypatch.setattr(
-        buckets_web.sh, "decay_engine", FakeDecayEngine(), raising=False
-    )
+@pytest.mark.parametrize("credential", ["mcp_token", "service_token"])
+async def test_human_locked_letter_is_hidden_from_sidecar(monkeypatch, request, credential):
+    request.getfixturevalue(credential)
+    token = MCP_TOKEN if credential == "mcp_token" else SERVICE_TOKEN
+
+    class Letters(FakeBucketManager):
+        async def get(self, bucket_id):
+            return {"id": bucket_id, "content": "PRIVATE-LETTER-BODY",
+                    "metadata": {"type": "letter", "author": "user",
+                    "locked_by": "human", "lock_type": "permanent",
+                    "unlock_date": "9999-12-31T23:59:59+00:00",
+                    "title": "PRIVATE-TITLE", "name": "PRIVATE-NAME"}}
+
+    monkeypatch.setattr(buckets_web.sh, "bucket_mgr", Letters())
+    monkeypatch.setattr(buckets_web.sh, "decay_engine", FakeDecayEngine())
     mcp = FakeMCP()
     buckets_web.register(mcp)
-
     response = await mcp.routes[("GET", "/api/bucket/{bucket_id}")](
-        _request("GET", "/api/bucket/feel-1", f"Bearer {SHORT_MCP_TOKEN}")
-    )
-    payload = json.loads(response.body)
-
+        _request("GET", "/api/bucket/feel-1", f"Bearer {token}"))
     assert response.status_code == 200
-    assert payload["metadata"]["type"] == "feel"
-    assert payload["content"] == "raw [[memory]]"
+    data = json.loads(response.body)
+    assert data["letter_locked"] is True
+    assert data["content"] == ""
+    assert "PRIVATE-" not in response.body.decode()

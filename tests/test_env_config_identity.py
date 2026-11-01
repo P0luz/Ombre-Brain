@@ -151,6 +151,8 @@ async def test_compress_runtime_reload_survives_config_persistence_failure(
         "api_key": "new-key",
         "base_url": "https://new.example/v1",
         "timeout": 45.0,
+        # 重试归 Dehydrator._chat 管；SDK 再自己重试就是 3x3=9 次尝试
+        "max_retries": 0,
     }
     assert os.environ["OMBRE_COMPRESS_API_KEY"] == "new-key"
     assert os.environ["OMBRE_COMPRESS_BASE_URL"] == "https://new.example/v1"

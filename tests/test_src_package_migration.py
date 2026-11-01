@@ -17,7 +17,6 @@ RETIRED_MODULES = (
     ("backup_archive", "ombrebrain.storage.backup_archive"),
     ("embedding_outbox", "ombrebrain.storage.embedding_outbox"),
     ("deployment_profile", "ombrebrain.security.deployment_profile"),
-    ("ledger_property", "ombrebrain.eventsourcing.ledger_property"),
     ("ledger_replay", "ombrebrain.eventsourcing.ledger_replay"),
     ("ledger_mirror", "ombrebrain.eventsourcing.ledger_mirror"),
     ("projection_mirror", "ombrebrain.projection.projection_mirror"),

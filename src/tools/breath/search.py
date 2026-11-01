@@ -30,6 +30,7 @@ tools/breath/search.py — 有 query 的检索模式
 
 from errors import ToolInputError
 import hashlib
+import json
 import random
 from datetime import datetime
 
@@ -51,8 +52,55 @@ _SEMANTIC_DISABLED_NOTE = "[检索降级：语义索引暂不可用，本次仅�
 _BUDGET_NOTICE = "[token 预算不足：命中的下一条记忆未被截断或摘要，请提高 max_tokens 后重试。]"
 
 
-def _can_surface_search(bucket: dict) -> bool:
-    return _SURFACE_POLICY.evaluate_bucket(bucket, mode="search").allowed
+def _can_surface_search(bucket: dict, mode: str = "search") -> bool:
+    return _SURFACE_POLICY.evaluate_bucket(bucket, mode=mode).allowed
+
+
+# 给机器读的那一段的定界符。**这是一个契约，不是渲染的一部分。**
+#
+# 调用方原先只能去解析 `[bucket_id:...]` 这类人类渲染里的标记，渲染一改就静默
+# 失效，而失效方向是「该藏的漏出来」。这个块换掉那条路：标记稳定、带 schema
+# 版本号、由用例钉住；改它必须先让测试变红。
+#
+# 默认不出现（with_ids=False），所以既有调用方的输出一个字都不变。
+_ID_BLOCK_MARK = "=== ombre:result-ids ==="
+_ID_BLOCK_SCHEMA = 1
+
+
+def _append_id_block(
+    text: str,
+    bucket_ids: list[str],
+    call_mode: str,
+    omitted_by_policy: int,
+    with_ids: bool,
+) -> str:
+    """把机器可读的结果清单追加到渲染文本之后。"""
+    if not with_ids:
+        return text
+    payload = json.dumps(
+        {
+            "schema": _ID_BLOCK_SCHEMA,
+            "mode": "automatic" if call_mode == "automatic" else "manual",
+            "bucket_ids": [bid for bid in bucket_ids if bid],
+            "count": len([bid for bid in bucket_ids if bid]),
+            # 被 dont_surface / digested 挡掉的条数。给它是为了让「过滤有没有
+            # 真的生效」可观测——静默为 0 和静默漏出来在调用方眼里长得一样。
+            "omitted_by_policy": omitted_by_policy,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+    )
+    return f"{text}\n\n{_ID_BLOCK_MARK}\n```json\n{payload}\n```"
+
+
+def normalize_call_mode(mode: object) -> str:
+    """把调用方给的意图归一成 policy 认得的模式名。
+
+    只认 manual / automatic 两个值，其余（含空、拼错）一律当 manual——
+    默认必须是「今天的行为」，一个拼错的意图不该悄悄放宽或收紧过滤。
+    """
+    value = str(mode or "").strip().lower()
+    return "automatic" if value == "automatic" else "search"
 
 
 def _is_archived(bucket: dict) -> bool:
@@ -178,7 +226,11 @@ async def surface_search(
     with_quotes: bool = False,
     created_from: "datetime | None" = None,
     created_to: "datetime | None" = None,
+    mode: str = "manual",
+    with_ids: bool = False,
 ) -> str:
+    call_mode = normalize_call_mode(mode)
+    omitted_by_policy = 0
     domain_filter = [d.strip() for d in domain.split(",") if d.strip()] or None
     q_valence = valence if 0 <= valence <= 1 else None
     q_arousal = arousal if 0 <= arousal <= 1 else None
@@ -295,7 +347,15 @@ async def surface_search(
             )
             if original_kind in ("feel", "plan", "letter"):
                 continue
-        elif not _can_surface_search(bucket) or meta.get("type") in ("feel", "plan", "letter"):
+        elif meta.get("type") in ("feel", "plan", "letter"):
+            continue
+        elif not _can_surface_search(bucket, call_mode):
+            # 分开数：被「别主动拿给我」这类标记挡掉的条数要报给调用方。
+            # 调用方现在只能靠解析渲染文本自己剔，而那条路失效的方向是
+            # 「该藏的漏出来」——一个明确的计数能让静默失效变成可观测的。
+            decision = _SURFACE_POLICY.evaluate_bucket(bucket, mode=call_mode)
+            if {"dont_surface", "digested"} & set(decision.reasons):
+                omitted_by_policy += 1
             continue
         eligible_matches.append(bucket)
     matches = eligible_matches
@@ -418,14 +478,17 @@ async def surface_search(
 
     if not results:
         if budget_blocked:
-            return f"{semantic_notice}\n{_BUDGET_NOTICE}" if semantic_notice else _BUDGET_NOTICE
+            text = f"{semantic_notice}\n{_BUDGET_NOTICE}" if semantic_notice else _BUDGET_NOTICE
+            return _append_id_block(text, [], call_mode, omitted_by_policy, with_ids)
         if rt.fire_webhook:
             await rt.fire_webhook("breath", {"mode": "empty", "matches": 0})
         empty_text = (
             f"没有匹配到「{query}」相关的记忆。\n"
             "可以换个关键词试试，或用 breath() 看当下权重池；feel 用 breath_advanced(domain=\"feel\")，信件用 letter_read。"
         )
-        return f"{semantic_notice}\n{empty_text}" if semantic_notice else empty_text
+        if semantic_notice:
+            empty_text = f"{semantic_notice}\n{empty_text}"
+        return _append_id_block(empty_text, [], call_mode, omitted_by_policy, with_ids)
 
     final_text = "\n---\n".join(results)
     notices = []
@@ -437,4 +500,10 @@ async def surface_search(
         final_text = "\n".join(notices + [final_text])
     if rt.fire_webhook:
         await rt.fire_webhook("breath", {"mode": "ok", "matches": len(matches), "chars": len(final_text)})
-    return final_text
+    return _append_id_block(
+        final_text,
+        [str(b.get("id") or "") for b in matches],
+        call_mode,
+        omitted_by_policy,
+        with_ids,
+    )

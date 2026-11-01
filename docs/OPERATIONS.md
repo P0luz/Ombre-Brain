@@ -43,7 +43,8 @@ Docker/Zeabur 的持久卷统一挂载 `/app/buckets`，配置路径为 `/app/bu
 7. 当前版本创建的新本地/GitHub 备份会交叉检查桶的 `source_refs`；任一引用缺文件或格式非法时整次备份失败。GitHub 恢复先把全部远端 blob 暂存并验证，再安装全部证据，最后才覆盖 Markdown。
 8. You 与 them 快照在导出和恢复前都会只读执行 SQLite `PRAGMA quick_check`，核对固定表/索引、唯一模块状态、完整 Scope，并反序列化每条记录检查作用域一致性；任一检查失败都拒绝发布该快照。
 9. 本地记忆包迁移只有在所有桶按原 ID 完整导入时才安装 You / them 快照；出现 `skip`、`keep_both` 或其他 ID 变化时会记录“快照未恢复”，并保留当前模块库。安装采用同目录临时文件 + `fsync` + `os.replace`，完成后重新同步各自工具；同步失败时把对应模块按关闭处理。
-10. GitHub 恢复会在写入 vault 前验证 `.you/you.sqlite3` 与 `.them/them.sqlite3`，但当前 Web 恢复处理只主动刷新 `You` 的运行时门禁，没有刷新 `Them`。恢复包含 them 的仓库后应重启服务，再让 MCP 客户端刷新工具列表；磁盘上的 `.them/them.sqlite3` 在重启前已经恢复，但当前进程可能仍使用旧开关缓存/工具显隐。
+10. 派生 SQLite（`embeddings.db`、`dehydration_cache.db`）在启动时打不开会被自动隔离成 `<原名>.corrupt-<时间戳>`，随即重建空库继续启动。这两个库都不含真源数据，向量与摘要会按需重新生成。**服务不会因为派生索引损坏而拒绝启动**——那等于让用户为了一个缓存丢掉全部记忆的访问权。
+11. GitHub 恢复会在写入 vault 前验证 `.you/you.sqlite3` 与 `.them/them.sqlite3`，但当前 Web 恢复处理只主动刷新 `You` 的运行时门禁，没有刷新 `Them`。恢复包含 them 的仓库后应重启服务，再让 MCP 客户端刷新工具列表；磁盘上的 `.them/them.sqlite3` 在重启前已经恢复，但当前进程可能仍使用旧开关缓存/工具显隐。
 
 清单只能发现残缺或意外篡改，不能证明备份由谁创建。需要来源认证时，应在可信存储或带签名的发布/备份系统中保管 ZIP。
 
@@ -96,6 +97,7 @@ python tools/check_buckets.py --json
 | Obsidian 修改后结果旧 | 等待外部变更轮询周期 | 检查 `storage.external_change_poll_seconds`，再看系统诊断的外部变更计数 |
 | ZIP 上传被拒绝 | 本地 vault 未写入 | 按错误修复损坏、路径穿越、重复项或清单不一致，重新导出 |
 | SQLite quick_check 失败 | Markdown 真源通常仍在 | 先备份 Markdown，移走损坏的派生库，再重建向量；不要删除 Markdown |
+| 记忆库里出现 `embeddings.db.corrupt-<时间戳>` 或 `dehydration_cache.db.corrupt-<时间戳>` | 对应派生库启动时打不开，已被自动隔离并重建；Markdown 未受影响 | 确认服务已正常启动、向量在后台补齐后，这些隔离文件可以删除。留着只为取证，不会被读取 |
 | outbox 长时间不下降 | 记忆正文仍安全 | 查看熔断状态、最近错误、Key/模型/维度和 provider 连通性 |
 | You 开关保存失败或开启后工具列表没有 `You` | 系统保持关闭或立即回退为关闭；其余 MCP 工具不受影响 | 查看服务日志与 `<buckets_dir>/.you/` 的写入权限；修复后重新开启，并让 MCP 客户端刷新工具列表或重连 |
 | MCP 客户端在关闭 You 后仍尝试调用旧工具 | 服务端返回 `Unknown tool: You`，不会读取或返回派生认识 | 让客户端重新获取工具列表或重连；不要为兼容旧缓存保留一个可调用的空壳工具 |

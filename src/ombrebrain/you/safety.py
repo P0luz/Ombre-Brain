@@ -30,6 +30,21 @@ def contains_forbidden_subject(*texts: object) -> bool:
     return any(pattern.search(joined) for pattern in _FORBIDDEN_PATTERNS)
 
 
+def forbidden_subject_fields(_check=contains_forbidden_subject, **named: object) -> list[str]:
+    """踩了禁止主题的**是哪几个字段**。
+
+    写入这条路上一次查三个字段（content / concept_key / concept_value），
+    但报错只说「这条写不进去」。真机上出过这样一次：正文本身完全合规
+    （「他做事犹豫，体制内工作」查下来是 False），踩线的是
+    concept_key="personality"——而模型看着那句指向正文的报错，**连续五次
+    重写正文**，那个键一次都没动。
+
+    所以这里逐个字段查，让报错能指名道姓。`_check` 做成参数而不是写死：
+    them 的禁止面更大（多一层关系描述），要把自己那个传进来。
+    """
+    return [name for name, value in named.items() if _check(value)]
+
+
 def normalize_for_leak_check(text: object) -> str:
     normalized = unicodedata.normalize("NFKC", str(text or "")).casefold()
     normalized = re.sub(r"\[\[([^\]]+)\]\]", r"\1", normalized)

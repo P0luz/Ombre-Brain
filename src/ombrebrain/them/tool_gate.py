@@ -4,6 +4,8 @@ import threading
 from collections.abc import Callable
 from typing import Any
 
+from ombrebrain.protocol.strict_schema import harden_tool
+
 
 class ThemToolGate:
     """原子地挂上或摘掉唯一那个可选的 them MCP 工具。
@@ -95,6 +97,9 @@ class ThemToolGate:
                 argument_model.model_config["extra"] = "forbid"
                 argument_model.model_rebuild(force=True)
                 tool.parameters = argument_model.model_json_schema()
+                # 动态挂载的工具走不到 server.py 里那一次性的压平，这里自己补。
+                # 少了它，开着 You/Them 的实例在 Gemini 上会整批工具被拒。
+                harden_tool(tool, self.TOOL_NAME)
             elif not enabled and existing is not None:
                 self._mcp._tool_manager.remove_tool(self.TOOL_NAME)
             return self._mcp._tool_manager.get_tool(self.TOOL_NAME) is not None

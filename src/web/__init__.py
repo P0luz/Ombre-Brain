@@ -31,7 +31,6 @@ from . import embedding
 from . import ollama_local
 from . import config_api
 from . import onboarding
-from . import v3_debug
 from . import them
 from . import you
 
@@ -54,7 +53,6 @@ _WEB_MODULES = (
     ("web.ollama_local", ollama_local.register),
     ("web.config_api", config_api.register),
     ("web.onboarding", onboarding.register),
-    ("web.v3_debug", v3_debug.register),
     ("web.them", them.register),
     ("web.you", you.register),
 )

@@ -36,6 +36,7 @@ import re
 
 from ..you.safety import (
     contains_forbidden_subject as _you_forbidden,
+    forbidden_subject_fields as _you_fields,
     is_atomic_value,
     leaks_protected_text,
     normalize_for_leak_check,
@@ -198,3 +199,8 @@ def describes_relationship(*texts: object) -> bool:
 def contains_forbidden_subject(*texts: object) -> bool:
     """them 的禁止主题 = you 的那张表 + 关系描述。"""
     return _you_forbidden(*texts) or describes_relationship(*texts)
+
+
+def forbidden_subject_fields(**named: object) -> list[str]:
+    """踩了禁止主题的是哪几个字段。说明见 you.safety 里的同名函数。"""
+    return _you_fields(_check=contains_forbidden_subject, **named)

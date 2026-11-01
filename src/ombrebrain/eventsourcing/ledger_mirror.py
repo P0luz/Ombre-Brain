@@ -51,13 +51,48 @@ class LedgerMirror:
         return event
 
     def latest_seq(self) -> int:
-        latest = 0
-        for event in self.iter_events():
-            try:
-                latest = max(latest, int(event.get("seq", 0)))
-            except (TypeError, ValueError):
-                continue
-        return latest
+        """最后一条事件的 seq。
+
+        从文件尾往回读，而不是把整个 ledger 扫一遍。`append_event` 每次都要
+        调它来定下一个 seq，全扫的话每次写入的代价随已有条数线性增长——实测
+        空库写 200 条 0.28 秒，已有 1000 条时同样 200 条要 1.75 秒，而每次
+        记忆的创建/更新/删除/归档都会写一条 ledger 事件。
+
+        往回读而不是缓存在内存里：这个文件可能被外部改（手工、git、恢复），
+        缓存会和磁盘脱节，而 seq 冲突是不可逆的。倒读只多读几 KB，代价固定。
+
+        尾行被崩溃截断时继续往前找：坏的那一行跳过，前一条的 seq 仍然有效。
+        """
+        if not self.path.exists():
+            return 0
+        try:
+            size = self.path.stat().st_size
+        except OSError:
+            return 0
+        if size == 0:
+            return 0
+        window = 4096
+        with self.path.open("rb") as handle:
+            while True:
+                start = max(0, size - window)
+                handle.seek(start)
+                chunk = handle.read(size - start)
+                lines = chunk.split(b"\n")
+                if start > 0:
+                    # 第一段可能被窗口从中间切断，丢掉它，扩大窗口重新拿
+                    lines = lines[1:]
+                for line in reversed(lines):
+                    text = line.strip()
+                    if not text:
+                        continue
+                    try:
+                        event = json.loads(text.decode("utf-8"))
+                        return max(0, int(event.get("seq", 0)))
+                    except (json.JSONDecodeError, UnicodeDecodeError, TypeError, ValueError):
+                        continue
+                if start == 0:
+                    return 0
+                window *= 4
 
     def iter_events(self) -> Iterator[dict[str, Any]]:
         if not self.path.exists():

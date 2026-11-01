@@ -37,9 +37,17 @@ from .._common import (
 )
 from utils import strip_wikilinks, get_ai_name, get_owner_name, get_tzinfo, get_timezone_name
 from errors import ToolInputError, safe_error_detail
+# 锁语义 3.6.5 下沉到 ombrebrain/storage/letter_lock.py：you / them 的证据闸
+# 也要判「这封信对 AI 开没开」，而 ombrebrain 不能反向 import tools。
+# 这里按原名再导出，所有既有调用点不变。
+from ombrebrain.storage.letter_lock import (  # noqa: F401
+    LETTER_LOCK_TYPES,
+    is_letter_bucket,
+    letter_lock_state,
+    normalize_lock_type,
+)
 
 
-LETTER_LOCK_TYPES = {"none", "timed", "permanent"}
 PERMANENT_UNLOCK_DATE = "9999-12-31"
 _GENERIC_RELATION_NAMES = {
     "ai", "a.i.", "assistant", "claude", "bot", "model",
@@ -47,13 +55,6 @@ _GENERIC_RELATION_NAMES = {
 }
 _HUMAN_AUTHOR_ALIASES = {"user", "human", "human-side"}
 _AI_AUTHOR_ALIASES = {"ai", "ai-side", "claude"}
-
-
-def normalize_lock_type(value: object) -> str:
-    lock_type = str(value or "none").strip().lower()
-    if lock_type not in LETTER_LOCK_TYPES:
-        raise ValueError("lock_type must be one of: none, timed, permanent")
-    return lock_type
 
 
 def normalize_unlock_date(lock_type: str, value: object, *, now: datetime | None = None) -> str | None:
@@ -118,27 +119,6 @@ def resolve_writer_name(
     return next((str(v).strip() for v in candidates if _is_actual_relation_name(v)), None)
 
 
-def is_letter_bucket(bucket: dict) -> bool:
-    """生命周期改写存储类型后，仍能识别逻辑上的 Letter。"""
-    meta = bucket.get("metadata") or {}
-    if not isinstance(meta, dict):
-        return False
-    if str(meta.get("type") or "").strip().casefold() == "letter":
-        return True
-    if str(meta.get("source_tool") or "").strip().casefold() == "letter":
-        return True
-    tags = meta.get("tags") or []
-    if isinstance(tags, str):
-        tags = [part.strip() for part in tags.split(",")]
-    if isinstance(tags, (list, tuple, set)) and "__letter__" in tags:
-        return True
-    return (
-        str(meta.get("locked_by") or "").strip() in {"human", "ai"}
-        and str(meta.get("lock_type") or "").strip().casefold()
-        in {"timed", "permanent"}
-    )
-
-
 def letter_lock_revision(bucket: dict) -> tuple[str, str, str]:
     """返回可用于原子写入前置校验的锁字段快照。"""
     meta = bucket.get("metadata") or {}
@@ -149,35 +129,6 @@ def letter_lock_revision(bucket: dict) -> tuple[str, str, str]:
         str(meta.get("unlock_date") or "").strip(),
         str(meta.get("locked_by") or "").strip().casefold(),
     )
-
-
-def letter_lock_state(bucket: dict, caller_side: str | None, *, now: datetime | None = None) -> dict:
-    meta = bucket.get("metadata") or {}
-    try:
-        lock_type = normalize_lock_type(meta.get("lock_type", "none"))
-    except ValueError:
-        lock_type = "none"
-    unlock_date = meta.get("unlock_date") or None
-    locked_by = str(meta.get("locked_by") or "").strip() or None
-    expired = False
-    if lock_type == "timed" and unlock_date:
-        try:
-            parsed = datetime.fromisoformat(str(unlock_date).replace("Z", "+00:00"))
-            expired = bool(parsed.tzinfo) and (now or datetime.now(timezone.utc)) >= parsed.astimezone(timezone.utc)
-        except (TypeError, ValueError):
-            expired = False
-    effective_type = "none" if expired else lock_type
-    owner = bool(locked_by and caller_side == locked_by)
-    locked = effective_type != "none" and not owner
-    return {
-        "lock_type": effective_type,
-        "stored_lock_type": lock_type,
-        "unlock_date": None if expired else unlock_date,
-        "locked_by": locked_by,
-        "owner": owner,
-        "locked": locked,
-        "expired": expired,
-    }
 
 
 async def normalize_expired_lock(
@@ -509,16 +460,17 @@ async def letter_read(
         date_from = ""
     if date_to is None:
         date_to = ""
+    # 同文件 218/225/301/310 行对同类失败是抛的，这里过去是 return。
     query_err = check_query_size(query)
     if query_err:
-        return query_err
+        raise ToolInputError(query_err)
     metadata_err = check_metadata_size(
         author=author,
         date_from=date_from,
         date_to=date_to,
     )
     if metadata_err:
-        return metadata_err
+        raise ToolInputError(metadata_err)
     try:
         limit = max(1, min(50, int(limit)))
     except (TypeError, ValueError, OverflowError):

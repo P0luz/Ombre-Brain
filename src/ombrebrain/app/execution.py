@@ -1,28 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass, field
-from enum import Enum
 import json
 import logging
-from typing import Any, TypeVar
-
-from ombrebrain.kernel.errors import PolicyViolation
+from typing import Any
 
 logger = logging.getLogger("ombrebrain.app.execution")
-
-T = TypeVar("T")
-
-
-class ExecutionPhase(Enum):
-    RECEIVED = "received"
-    VALIDATING = "validating"
-    AUTHORIZING = "authorizing"
-    EXECUTING = "executing"
-    APPLYING = "applying"
-    RECORDING = "recording"
-    COMPLETED = "completed"
-    FAILED = "failed"
 
 
 @dataclass(frozen=True)
@@ -53,146 +37,6 @@ class ExecutionEnvelope:
 
     def sanitized_payload(self) -> dict[str, Any]:
         return _sanitize_payload(dict(self.payload or {}))
-
-
-@dataclass(frozen=True)
-class ExecutionOutcome:
-    ok: bool
-    phase_history: tuple[str, ...]
-    result_type: str = ""
-    error_type: str = ""
-    error_message: str = ""
-
-
-class LegacyExecutionPipeline:
-    """Best-effort execution envelope for legacy modules.
-
-    The pipeline intentionally returns handler results unchanged and re-raises
-    handler exceptions unchanged. The v2.4.0 side channel records behavior; it does
-    not become a new source of visible legacy behavior.
-    """
-
-    def __init__(self, runtime: object | None = None):
-        self.runtime = runtime
-
-    def run(self, envelope: ExecutionEnvelope, handler: Callable[[], T]) -> T:
-        history = self._preflight(envelope)
-        self._authorize_policy(envelope, history)
-        try:
-            history.append(ExecutionPhase.EXECUTING.value)
-            result = handler()
-        except Exception as exc:
-            history.append(ExecutionPhase.FAILED.value)
-            self._record(
-                envelope,
-                ExecutionOutcome(
-                    ok=False,
-                    phase_history=tuple(history),
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
-                ),
-            )
-            raise
-
-        history.extend((ExecutionPhase.RECORDING.value, ExecutionPhase.COMPLETED.value))
-        self._record(
-            envelope,
-            ExecutionOutcome(
-                ok=True,
-                phase_history=tuple(history),
-                result_type=type(result).__name__,
-            ),
-        )
-        return result
-
-    async def run_async(
-        self,
-        envelope: ExecutionEnvelope,
-        handler: Callable[[], Awaitable[T]],
-    ) -> T:
-        history = self._preflight(envelope)
-        self._authorize_policy(envelope, history)
-        try:
-            history.append(ExecutionPhase.EXECUTING.value)
-            result = await handler()
-        except Exception as exc:
-            history.append(ExecutionPhase.FAILED.value)
-            self._record(
-                envelope,
-                ExecutionOutcome(
-                    ok=False,
-                    phase_history=tuple(history),
-                    error_type=type(exc).__name__,
-                    error_message=str(exc),
-                ),
-            )
-            raise
-
-        history.extend((ExecutionPhase.RECORDING.value, ExecutionPhase.COMPLETED.value))
-        self._record(
-            envelope,
-            ExecutionOutcome(
-                ok=True,
-                phase_history=tuple(history),
-                result_type=type(result).__name__,
-            ),
-        )
-        return result
-
-    def _preflight(self, envelope: ExecutionEnvelope) -> list[str]:
-        history = [ExecutionPhase.RECEIVED.value, ExecutionPhase.VALIDATING.value]
-        if not envelope.module:
-            raise ValueError("execution envelope module is required")
-        if not envelope.operation:
-            raise ValueError("execution envelope operation is required")
-        _json_safe(envelope.sanitized_payload())
-        history.append(ExecutionPhase.AUTHORIZING.value)
-        missing = set(envelope.required_permissions) - set(envelope.permissions)
-        if missing:
-            raise PermissionError(f"missing permissions: {sorted(missing)}")
-        return history
-
-    def _authorize_policy(self, envelope: ExecutionEnvelope, history: list[str]) -> None:
-        verdict = self._policy_verdict(envelope)
-        if not verdict or bool(verdict.get("effective_allowed", True)):
-            return
-
-        message = _policy_violation_message(envelope, verdict)
-        history.append(ExecutionPhase.FAILED.value)
-        self._record(
-            envelope,
-            ExecutionOutcome(
-                ok=False,
-                phase_history=tuple(history),
-                error_type=PolicyViolation.__name__,
-                error_message=message,
-            ),
-        )
-        raise PolicyViolation(message)
-
-    def _policy_verdict(self, envelope: ExecutionEnvelope) -> dict[str, Any] | None:
-        planner = getattr(self.runtime, "plan_legacy_command", None)
-        policy_engine = getattr(self.runtime, "policy_engine", None)
-        evaluator = getattr(policy_engine, "evaluate", None)
-        if not callable(planner) or not callable(evaluator):
-            return None
-        try:
-            verdict = evaluator(envelope, planner(envelope))
-        except Exception as exc:  # pragma: no cover - defensive side channel
-            logger.warning("v2.4.0 policy evaluation failed for %s.%s: %s", envelope.module, envelope.operation, exc)
-            return None
-        if isinstance(verdict, Mapping):
-            return dict(verdict)
-        return None
-
-    def _record(self, envelope: ExecutionEnvelope, outcome: ExecutionOutcome) -> None:
-        recorder = getattr(self.runtime, "record_execution_event", None)
-        if not callable(recorder):
-            return
-        try:
-            recorder(envelope, outcome)
-        except Exception as exc:  # pragma: no cover - defensive side channel
-            logger.warning("v2.4.0 execution event record failed for %s.%s: %s", envelope.module, envelope.operation, exc)
 
 
 _SENSITIVE_PARTS = (
@@ -230,15 +74,3 @@ def _is_sensitive_key(key: str) -> bool:
 
 def _json_safe(value: Any) -> Any:
     return json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False, default=str))
-
-
-def _policy_violation_message(envelope: ExecutionEnvelope, verdict: Mapping[str, Any]) -> str:
-    missing = ", ".join(str(item) for item in verdict.get("missing_permissions", ()))
-    protected = ", ".join(str(item) for item in verdict.get("protected_surfaces", ()))
-    details: list[str] = []
-    if missing:
-        details.append(f"missing permissions: {missing}")
-    if protected:
-        details.append(f"protected surfaces: {protected}")
-    suffix = f" ({'; '.join(details)})" if details else ""
-    return f"policy denied {envelope.module}.{envelope.operation}{suffix}"

@@ -52,9 +52,15 @@ async def grow_core(content: str, test_data: bool = False) -> str:
     try:
         items = await rt.dehydrator.digest(content)
     except Exception as e:
+        # 这里原来把 detail 写死成字面量 "hidden"，于是**服务端自己的日志**
+        # 也看不到原因——真机上「长内容 grow 一直失败」卡了两天，卡的就是这个。
+        # 返回给客户端的仍然是 PublicToolError 的固定文案，一个字都没多给；
+        # 但落盘日志该说清楚哪儿错了，safe_error_detail 正是为这件事写的：
+        # 正文照给，先抹掉凭证。
         rt.logger.error(
-            "Diary digest failed / 日记整理失败: err_type=%s detail=hidden",
+            "Diary digest failed / 日记整理失败: err_type=%s detail=%s",
             type(e).__name__,
+            safe_error_detail(e),
         )
         raise llm_step_failed_error(
             "日记拆分",

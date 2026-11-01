@@ -19,6 +19,8 @@ from __future__ import annotations
 
 from datetime import datetime
 
+from utils import parse_iso_datetime
+
 from ombrebrain.storage.relation_store import (
     AUTO_MAX_LINKS_PER_BUCKET,
     AUTO_RELATED_MIN_SCORE,
@@ -51,8 +53,10 @@ def _created_at(meta: dict) -> datetime | None:
     if not raw:
         return None
     try:
-        return datetime.fromisoformat(raw.replace("Z", "+00:00").split("+")[0])
-    except ValueError:
+        # 原来是 .split("+")[0] 手工剥偏移——负偏移（-05:00）剥不掉，
+        # 剥出来的还是 aware，和 naive 的比较会炸。统一走 parse_iso_datetime。
+        return parse_iso_datetime(raw)
+    except (TypeError, ValueError):
         return None
 
 

@@ -32,6 +32,7 @@ from typing import Optional
 from utils import parse_bool
 
 from .. import _runtime as rt
+from errors import ToolInputError
 from .._common import (
     check_metadata_size,
     check_query_size,
@@ -86,6 +87,8 @@ async def dispatch(
     date_from: Optional[str] = "",
     date_to: Optional[str] = "",
     quotes: Optional[bool] = False,
+    mode: Optional[str] = "manual",
+    with_ids: Optional[bool] = False,
 ) -> str:
     # --- Null-safe coercion ---
     query = "" if query is None else str(query)
@@ -106,13 +109,18 @@ async def dispatch(
     date_from = "" if date_from is None else str(date_from)
     date_to = "" if date_to is None else str(date_to)
     quotes = parse_bool(quotes, default=False)
+    mode = "manual" if mode is None else str(mode)
+    with_ids = parse_bool(with_ids, default=False)
 
+    # 抛而不是 return：return 出去在 MCP 侧是 isError=False，模型会以为
+    # 「查过了，没结果」，然后据此得出「这件事没记过」——比报错糟得多。
+    # hold / anchor / trace 对同类失败一直是抛的，这里过去不是。
     query_err = check_query_size(query)
     if query_err:
-        return query_err
+        raise ToolInputError(query_err)
     metadata_err = check_metadata_size(domain=domain, tags=tags)
     if metadata_err:
-        return metadata_err
+        raise ToolInputError(metadata_err)
 
     # 3.6.0：日期区间在这里统一解析并校验一次，五条分支拿到同一对边界。
     # 此前只有 search 分支接了 date_from/date_to，`breath_advanced(date_to=...)`
@@ -139,7 +147,7 @@ async def dispatch(
 
     surfacing_cfg = rt.config.get("surfacing", {}) or {}
     default_results = int(surfacing_cfg.get("breath_max_results") or 20)
-    default_tokens = int(surfacing_cfg.get("breath_max_tokens") or 10000)
+    default_tokens = int(surfacing_cfg.get("breath_max_tokens") or 20000)
     if max_results <= 0:
         max_results = default_results
     if max_tokens <= 0:
@@ -217,4 +225,6 @@ async def dispatch(
         with_quotes=quotes,
         created_from=created_from,
         created_to=created_to,
+        mode=mode,
+        with_ids=with_ids,
     ), query))

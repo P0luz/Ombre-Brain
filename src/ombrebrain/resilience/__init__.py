@@ -6,7 +6,6 @@ from ombrebrain.resilience.recovery import (
     CrashRecoveryPlan,
     PathStep,
 )
-from ombrebrain.resilience.scanner import ResilienceFinding, ResilienceReport, V3ResilienceScanner
 
 __all__ = [
     "CrashRecoveryContract",
@@ -15,5 +14,4 @@ __all__ = [
     "PathStep",
     "ResilienceFinding",
     "ResilienceReport",
-    "V3ResilienceScanner",
 ]

@@ -39,7 +39,7 @@ import time
 import tempfile
 import uuid
 from contextlib import asynccontextmanager
-from datetime import date, datetime
+from datetime import datetime
 
 from ombrebrain.domain.plan_history import append_plan_change_log
 from ombrebrain.eventsourcing.footprint import FootprintSnapshot
@@ -318,7 +318,10 @@ from utils import (
     normalize_memory_title,
     parse_bool,
     parse_iso_datetime,
+    publish_new_file,
 )
+from ombrebrain.storage import bucket_paths as _bp
+from ombrebrain.storage import metadata_normalize as _mn
 from ombrebrain.storage.media_store import MediaStore
 from ombrebrain.retrieval.bucket_scoring import (
     calc_topic_score,
@@ -362,6 +365,11 @@ def _atomic_create_text(path: str, text: str) -> None:
     right behavior for updates but unsafe for creation races.  Build the full
     file beside the destination and publish it with a hard link: link creation
     is atomic and fails with ``FileExistsError`` instead of overwriting.
+
+    硬链接不是所有文件系统都支持（Termux/Android 的 FUSE 挂载、部分 NAS/SMB
+    卷）。``publish_new_file`` 在那种环境下退到 ``O_CREAT|O_EXCL``，仍然保住
+    「已存在就拒绝」这条——退成 ``os.replace`` 是不行的，那会把「创建」悄悄
+    变成「覆盖」。
     """
 
     target = os.path.abspath(path)
@@ -376,7 +384,7 @@ def _atomic_create_text(path: str, text: str) -> None:
             handle.write(text)
             handle.flush()
             os.fsync(handle.fileno())
-        os.link(temporary, target)
+        publish_new_file(temporary, target, text)
     finally:
         try:
             os.unlink(temporary)
@@ -866,94 +874,13 @@ class BucketManager:
                 "请拆分后存入，或调整 config.limits.max_bucket_bytes。"
             )
 
-    @classmethod
-    def _normalize_metadata_list(
-        cls,
-        values,
-        *,
-        max_items: int,
-        max_chars: int,
-    ) -> list[str]:
-        if values is None:
-            return []
-        if isinstance(values, str):
-            values = [values]
-        elif not isinstance(values, (list, tuple, set)):
-            values = [values]
-        normalized: list[str] = []
-        for value in values:
-            text = cls._sanitize_text(str(value)).strip()[:max_chars]
-            if text and text not in normalized:
-                normalized.append(text)
-            if len(normalized) >= max_items:
-                break
-        return normalized
+    _normalize_metadata_list = staticmethod(_mn._normalize_metadata_list)
 
-    @classmethod
-    def _normalize_meaning_item(cls, text) -> str:
-        """裁剪单条 meaning 文本；不是摘要，只做长度上限保护。"""
-        if not text:
-            return ""
-        return cls._sanitize_text(str(text)).strip()[:_MEANING_ITEM_MAX]
+    _normalize_meaning_item = staticmethod(_mn._normalize_meaning_item)
 
-    @classmethod
-    def _normalize_meaning_list(cls, values) -> list[str]:
-        """整体替换用：逐条裁剪 + 丢空条目 + 裁总数上限。
+    _normalize_meaning_list = staticmethod(_mn._normalize_meaning_list)
 
-        不去重：同一句话在不同时刻写下也是信息，去重会抹掉这个时间差。
-        """
-        if not values:
-            return []
-        if isinstance(values, str):
-            values = [values]
-        normalized: list[str] = []
-        for v in values:
-            item = cls._normalize_meaning_item(v)
-            if item:
-                normalized.append(item)
-            if len(normalized) >= _MEANING_LIST_MAX_ITEMS:
-                break
-        return normalized
-
-    @classmethod
-    def _normalize_media(cls, media) -> list[dict]:
-        """校验持久媒体元数据；path 必须已经由 MediaStore 稳定化。"""
-        if not media:
-            return []
-        if not isinstance(media, list):
-            media = [media]
-        normalized: list[dict] = []
-        for item in media:
-            if not isinstance(item, dict):
-                continue
-            path = cls._sanitize_text(str(item.get("path") or "")).strip()[:_MEDIA_PATH_MAX]
-            if not path:
-                continue
-            entry: dict = {"path": path}
-            title = item.get("title")
-            if title:
-                entry["title"] = cls._sanitize_text(str(title)).strip()[:_MEDIA_TITLE_MAX]
-            media_type = item.get("type")
-            if media_type:
-                entry["type"] = cls._sanitize_text(str(media_type)).strip()[:_MEDIA_TYPE_MAX]
-            note = item.get("note")
-            if note:
-                entry["note"] = cls._sanitize_text(str(note)).strip()[:_MEDIA_NOTE_MAX]
-            digest = str(item.get("sha256") or "").lower()
-            if re.fullmatch(r"[0-9a-f]{64}", digest):
-                entry["sha256"] = digest
-            try:
-                size = int(item.get("size"))
-            except (TypeError, ValueError, OverflowError):
-                size = -1
-            if size >= 0:
-                entry["size"] = size
-            if item.get("stored") is True:
-                entry["stored"] = True
-            normalized.append(entry)
-            if len(normalized) >= _MEDIA_MAX_ITEMS:
-                break
-        return normalized
+    _normalize_media = staticmethod(_mn._normalize_media)
 
     # ---------------------------------------------------------
     # Internal: keep embedding index in sync with markdown storage
@@ -1922,11 +1849,16 @@ class BucketManager:
         os.makedirs(target_dir, exist_ok=True)
         return str(safe_path(target_dir, os.path.basename(file_path)))
 
-    @staticmethod
-    def _same_path(left: str, right: str) -> bool:
-        return os.path.normcase(os.path.abspath(left)) == os.path.normcase(
-            os.path.abspath(right)
-        )
+    # 这两个被 tools / web 依赖。私有名被跨模块调用是自相矛盾的信号：
+    # 要么不该被外部用，要么就该是公开接口。这里选后者，旧名保留不动，
+    # 免得动到本文件内几十处调用点。
+    def archived_letter_rejection(self, metadata: dict):
+        return self._archived_letter_rejection(metadata)
+
+    def invalidate_bm25(self) -> None:
+        self._invalidate_bm25()
+
+    _same_path = staticmethod(_bp.same_path)
 
     def _commit_bucket_update(
         self,
@@ -2271,41 +2203,6 @@ class BucketManager:
                 meaning_changed=meaning_changed,
             )
         return committed
-
-    async def mutate_source_links(self, bucket_id: str, mutation: Any) -> Any:
-        """Atomically change evidence bindings only, including archived buckets.
-
-        The callback receives the loaded frontmatter post and returns
-        ``(changed, result)``.  This deliberately bypasses normal update()
-        lifecycle/recency behaviour while retaining the per-bucket write turn.
-        """
-        async with self._bucket_turn(bucket_id):
-            file_path = self._find_bucket_file(bucket_id)
-            if not file_path:
-                return None
-            try:
-                post = frontmatter.load(file_path)
-            except Exception:
-                return None
-            changed, result = mutation(post)
-            if changed:
-                _atomic_write_text(file_path, frontmatter.dumps(post))
-            return result
-
-    async def mutate_relation_links(self, bucket_id: str, mutation: Any) -> Any:
-        """Atomically change one Relation ledger only; never touch derived state."""
-        async with self._bucket_turn(bucket_id):
-            file_path = self._find_bucket_file(bucket_id)
-            if not file_path:
-                return None
-            try:
-                post = frontmatter.load(file_path)
-            except Exception:
-                return None
-            changed, result = mutation(post)
-            if changed:
-                _atomic_write_text(file_path, frontmatter.dumps(post))
-            return result
 
     async def mutate_relation_pair(
         self,
@@ -3012,18 +2909,7 @@ class BucketManager:
         )
         return result
 
-    @staticmethod
-    def _path_is_within(file_path: str, directory: str) -> bool:
-        """按解析后的绝对路径判断文件是否真实位于指定托管目录。"""
-        normalized_path = os.path.normcase(os.path.realpath(file_path))
-        normalized_directory = os.path.normcase(os.path.realpath(directory))
-        try:
-            return (
-                os.path.commonpath((normalized_path, normalized_directory))
-                == normalized_directory
-            )
-        except ValueError:
-            return False
+    _path_is_within = staticmethod(_bp.path_is_within)
 
     def _physical_bucket_sources(self, bucket_id: str) -> tuple[list[tuple[str, Any]], bool]:
         """绕过路径缓存，枚举同一 ID 的全部 Markdown 物理真源。
@@ -3050,27 +2936,9 @@ class BucketManager:
                 sources.append((file_path, post))
         return sources, unreadable_candidate
 
-    @staticmethod
-    def _has_strong_letter_marker(post: Any) -> bool:
-        """仅接受写信入口持久化的强来源标记，domain=letter 不足以授权。"""
-        if str(post.get("source_tool") or "").strip().casefold() == "letter":
-            return True
-        tags = post.get("tags") or []
-        if isinstance(tags, str):
-            tags = [part.strip() for part in tags.split(",")]
-        if not isinstance(tags, (list, tuple, set)):
-            return False
-        return any(str(tag).strip().casefold() == "__letter__" for tag in tags)
+    _has_strong_letter_marker = staticmethod(_bp.has_strong_letter_marker)
 
-    @staticmethod
-    def _has_ambiguous_letter_marker(post: Any) -> bool:
-        """识别仅有弱 Letter 线索的历史桶，供报告人工判断。"""
-        domains = post.get("domain") or []
-        if isinstance(domains, str):
-            domains = [domains]
-        if not isinstance(domains, (list, tuple, set)):
-            return False
-        return any(str(domain).strip().casefold() == "letter" for domain in domains)
+    _has_ambiguous_letter_marker = staticmethod(_bp.has_ambiguous_letter_marker)
 
     @staticmethod
     def _archived_letter_rejection(post: Any) -> str:
@@ -4122,27 +3990,7 @@ class BucketManager:
     # Internal: load bucket data from .md file
     # 内部：从 .md 文件加载桶数据
     # ---------------------------------------------------------
-    @staticmethod
-    def _sanitize_text(text: str) -> str:
-        """F-04 fix: 清除 NUL、危险控制字符和双向覆写符（Unicode bidi override / isolate）。
-
-        保留 \\n（LF）、\\r（CR）、\\t（Tab）。
-        清除范围：
-          U+0000~U+0008, U+000B, U+000C, U+000E~U+001F, U+007F（C0/C1 控制字符）
-          U+202A~U+202E 双向控制符（LRE / RLE / PDF / LRO / RLO）
-          U+2066~U+2069 双向隔离符（LRI / RLI / FSI / PDI）
-        Emoji 与 CJK 不受影响。
-        """
-        _ctrl_table = {
-            c: None
-            for c in list(range(0x00, 0x09))    # 0x00..0x08
-            + [0x0B, 0x0C]                       # VT, FF
-            + list(range(0x0E, 0x20))            # 0x0E..0x1F
-            + [0x7F]                             # DEL
-            + list(range(0x202A, 0x202F))        # bidi controls 0x202A..0x202E
-            + list(range(0x2066, 0x206A))        # bidi isolates 0x2066..0x2069
-        }
-        return str(text).translate(_ctrl_table)
+    _sanitize_text = staticmethod(_mn._sanitize_text)
 
     @staticmethod
     def _sanitize_quotes(value: Any) -> list[dict[str, str]]:
@@ -4201,110 +4049,52 @@ class BucketManager:
         return merged[:MAX_QUOTES], len(merged) - MAX_QUOTES
 
     @staticmethod
-    def _sanitize_float_field(value, default: float) -> float:
-        """从任意格式提取 float（兼容 'V0.9'、'[我的视角:V0.3]'、0.9 等老格式）"""
-        if isinstance(value, (int, float)):
+    def _sanitize_float_field(value, default: float, field: str = "", source: str = "") -> float:
+        """从任意格式提取 float（兼容 'V0.9'、'[我的视角:V0.3]'、0.9 等老格式）。
+
+        越界会钳制到 [0,1]，**并且说出来**——importance 一直会报 OB-W001，而这几个
+        字段过去是静默的。手改过桶文件的人无从知道自己写的 valence=99 变成了 1.0，
+        而 Markdown 可手改正是这套存储的卖点。
+
+        唯一的调用方在 `_load_bucket`，且外面套着 `if field in metadata`：能走到
+        这里就说明这个键**写在文件里**。所以取不出数字时回退到默认值也要报——
+        那不是「没写」，是「写了但读不懂」。
+        """
+        def _report(detail: str) -> float:
+            if field:
+                _ob_push_warning("OB-W001", f"{detail}（{source or 'load'}）")
+            return default
+
+        def _clamped(numeric: float) -> float:
+            out = max(0.0, min(1.0, numeric))
+            if out != numeric and field:
+                _ob_push_warning(
+                    "OB-W001",
+                    f"{field}={numeric} 超出 [0,1]，已修正为 {out}（{source or 'load'}）",
+                )
+            return out
+
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
             numeric = float(value)
             if not math.isfinite(numeric):
-                return default
-            return max(0.0, min(1.0, numeric))
+                return _report(f"{field}={value!r} 不是有限数，回退为 {default}")
+            return _clamped(numeric)
+        if value is None:
+            # 上游 _normalize_metadata_value 把 inf/nan 归一成了 None——
+            # 到这里已经看不出原值，但「这个键坏了」这件事必须留下来。
+            return _report(f"{field} 不是有效数值，回退为 {default}")
         try:
             nums = re.findall(r'[-+]?\d*\.?\d+', str(value))
             if not nums:
-                return default
+                return _report(f"{field}={value!r} 里没有数字，回退为 {default}")
             numeric = float(nums[0])
             if not math.isfinite(numeric):
-                return default
-            return max(0.0, min(1.0, numeric))
+                return _report(f"{field}={value!r} 不是有限数，回退为 {default}")
+            return _clamped(numeric)
         except Exception:
-            return default
+            return _report(f"{field}={value!r} 无法解析为数值，回退为 {default}")
 
-    @classmethod
-    def _normalize_metadata_value(
-        cls,
-        value,
-        *,
-        _depth: int = 0,
-        _seen: set[int] | None = None,
-        _budget: list[int] | None = None,
-    ):
-        """Return bounded, alias-free JSON-safe YAML metadata.
-
-        SafeLoader blocks object construction but still permits recursive and
-        exponentially shared aliases.  Reject repeated containers and cap the
-        expansion before rebuilding untrusted frontmatter into ordinary lists.
-        """
-        if _depth > _MAX_METADATA_DEPTH:
-            raise ValueError("bucket metadata exceeds nesting-depth limit")
-        if _seen is None:
-            _seen = set()
-        if _budget is None:
-            _budget = [_MAX_METADATA_NODES]
-        _budget[0] -= 1
-        if _budget[0] < 0:
-            raise ValueError("bucket metadata exceeds node limit")
-        if isinstance(value, datetime):
-            return value.isoformat()
-        if isinstance(value, date):
-            return value.isoformat()
-        if value is None or isinstance(value, (str, bool, int)):
-            return value
-        if isinstance(value, float):
-            # RFC 8259/JSON has no NaN or infinity.  Normalize YAML's .nan and
-            # .inf scalars to null; known numeric fields below then apply their
-            # documented defaults instead of poisoning dashboard responses.
-            return value if math.isfinite(value) else None
-        if isinstance(value, (bytes, bytearray, memoryview, set, frozenset)):
-            raise ValueError(
-                f"bucket metadata contains non-JSON-safe value: {type(value).__name__}"
-            )
-        if isinstance(value, dict):
-            identity = id(value)
-            if identity in _seen:
-                raise ValueError("bucket metadata contains recursive/shared aliases")
-            _seen.add(identity)
-            normalized: dict[str, Any] = {}
-            for key, item in value.items():
-                if isinstance(key, datetime):
-                    normalized_key = key.isoformat()
-                elif isinstance(key, date):
-                    normalized_key = key.isoformat()
-                elif key is None or isinstance(key, (str, bool, int)):
-                    normalized_key = str(key)
-                elif isinstance(key, float) and math.isfinite(key):
-                    normalized_key = str(key)
-                else:
-                    raise ValueError(
-                        "bucket metadata contains a non-JSON mapping key"
-                    )
-                if normalized_key in normalized:
-                    raise ValueError(
-                        "bucket metadata contains colliding normalized keys"
-                    )
-                normalized[normalized_key] = cls._normalize_metadata_value(
-                    item,
-                    _depth=_depth + 1,
-                    _seen=_seen,
-                    _budget=_budget,
-                )
-            return normalized
-        if isinstance(value, (list, tuple)):
-            identity = id(value)
-            if identity in _seen:
-                raise ValueError("bucket metadata contains recursive/shared aliases")
-            _seen.add(identity)
-            return [
-                cls._normalize_metadata_value(
-                    v,
-                    _depth=_depth + 1,
-                    _seen=_seen,
-                    _budget=_budget,
-                )
-                for v in value
-            ]
-        raise ValueError(
-            f"bucket metadata contains unsupported scalar: {type(value).__name__}"
-        )
+    _normalize_metadata_value = staticmethod(_mn._normalize_metadata_value)
 
     def _load_bucket(self, file_path: str) -> Optional[dict]:
         """
@@ -4331,7 +4121,9 @@ class BucketManager:
                 ("weight", 0.5),
             ):
                 if field in metadata:
-                    metadata[field] = self._sanitize_float_field(metadata[field], default)
+                    metadata[field] = self._sanitize_float_field(
+                        metadata[field], default, field, f"load:{Path(file_path).name}"
+                    )
             # YAML is an external input boundary (manual files, migration ZIP,
             # GitHub restore).  Never let arbitrary scalar strings reach JSON
             # consumers that treat these fields as numbers.
@@ -4355,7 +4147,9 @@ class BucketManager:
             return {
                 "id": post.get("id", Path(file_path).stem),
                 "metadata": metadata,
-                "content": post.content,
+                # 手改过的文件可能带控制字符/bidi 覆写。写入路径处处 _sanitize_text，
+                # 读取路径过去是直接透传的——而「文件可以手改」正是这套存储的卖点。
+                "content": self._sanitize_text(post.content),
                 "path": file_path,
             }
         except Exception as e:

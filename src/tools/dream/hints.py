@@ -42,6 +42,13 @@ from utils import parse_bool, strip_wikilinks
 # 相似 feel）才值得打断一次；避免同一批 feel 每场梦都刷同样的提示。
 _CRYSTAL_CLUSTER_MIN = 5
 
+# 每场梦最多给几条候选完整的碰撞材料。
+#
+# 不设上限时，一次梦要为所有未 promote 的候选各取一轮 embedding 并渲染整块；
+# 候选只增不减的话，这一段会无限膨胀，而预算是先到先得的——最后谁都拿不到。
+# 有了上限 + 「缺得最多的先来」的排序，名额才会在候选之间轮转。
+_MAX_SELF_CANDIDATES_PER_DREAM = 5
+
 # 对照池上限：正式 I 条目和其它候选永远全量参与碰撞，普通记忆只取最近这么多条。
 # get_embedding 每条一次 sqlite 查询，全库几千条会让 dream 明显变慢，而更老的
 # 记忆本来也很难说是「此刻还在场」的对照。
@@ -141,14 +148,28 @@ class SelfCandidate:
 class SelfReview:
     """dream 里的 I 候选段。
 
+    ``candidates`` 是**还缺见证**的候选，只有它们需要完整的碰撞材料。
+    ``ready`` 是见证已经攒够、只等模型去 promote 的，压成一行提醒就够——
+    再给它们完整块是纯浪费：一条 3/3 的候选再被见证一百次也不会有任何变化，
+    却会占着预算，把真正还缺见证的挤出去。
+
     ``rendered_ids`` 由 output.py 回写真正出现在最终文本中的候选（近期正文、
     候选主块或碰撞材料），dream 的 dispatch 只给它们记「被见证过一次」。
+    压成一行的 ``ready`` 不算见证——那不是「和材料摆在一起看过」。
+
+    ``pending_ids`` 是这场梦**考虑过**的全部待沉淀候选，不管有没有被渲染。
+    它和 ``rendered_ids`` 的差额就是「这场梦它在队列里，但没被看见」。两个数
+    分开记，才能回答「一条候选攒不到见证，是因为梦做得少，还是因为梦做了
+    但它从来没排到」——前者不是 bug，后者是。
     """
 
     candidates: list[SelfCandidate] = field(default_factory=list)
+    ready: list[SelfCandidate] = field(default_factory=list)
     vectors_available: bool = False
     threshold: int = I_PROMOTE_THRESHOLD
     rendered_ids: list[str] = field(default_factory=list)
+    starved: int = 0
+    pending_ids: list[str] = field(default_factory=list)
 
 
 def _timestamp_key(bucket: dict) -> str:
@@ -176,16 +197,54 @@ async def collect_self_candidates(all_buckets: list, window_hours: int) -> SelfR
     if not pending:
         return SelfReview()
 
-    pending.sort(key=lambda b: str((b.get("metadata") or {}).get("created") or ""))
+    # 在 `pending` 被下面的取舍改写之前先留一份全量 id：谁被展开是这场梦的
+    # 结果，谁在队列里是这场梦的事实，后者才是「它到底等了几场梦」的分母。
+    all_pending_ids = [
+        str(b.get("id") or "").strip() for b in pending if str(b.get("id") or "").strip()
+    ]
+
+    # 按「还差几次见证」排，不按 created。
+    #
+    # 原先是 created 升序（最旧在前）+ 无上限，而 output.py 逐条撞预算、撞满即丢
+    # 且不计见证。两件事合起来就是队首阻塞：最旧的永远排在前面吃预算，新写的候选
+    # 排在队尾，拿不到见证 → 永远转不了正 → 永远留在队列里继续挡着后面的。
+    #
+    # 攒够的（passes >= threshold）单独拆出去：它们只等模型去 promote，再给完整
+    # 碰撞材料是纯浪费，一行提醒就够。
+    threshold = I_PROMOTE_THRESHOLD
+    growing: list[dict] = []
+    ready: list[dict] = []
+    for bucket in pending:
+        if len(dream_dates(bucket.get("metadata") or {})) >= threshold:
+            ready.append(bucket)
+        else:
+            growing.append(bucket)
+
+    def _need_key(bucket: dict) -> tuple:
+        meta = bucket.get("metadata") or {}
+        dates = dream_dates(meta)
+        # 缺得最多的排最前；同样缺的，最久没被见证的先来——保证轮转，
+        # 不让固定几条把每场梦的名额包了。
+        return (len(dates), dates[-1] if dates else "", str(meta.get("created") or ""))
+
+    growing.sort(key=_need_key)
+    starved = max(0, len(growing) - _MAX_SELF_CANDIDATES_PER_DREAM)
+    growing = growing[:_MAX_SELF_CANDIDATES_PER_DREAM]
+    ready.sort(key=lambda b: str((b.get("metadata") or {}).get("created") or ""))
+
     review = SelfReview(
         candidates=[
-            SelfCandidate(
-                bucket=b,
-                passes=dream_dates(b.get("metadata") or {}),
-            )
-            for b in pending
-        ]
+            SelfCandidate(bucket=b, passes=dream_dates(b.get("metadata") or {}))
+            for b in growing
+        ],
+        ready=[
+            SelfCandidate(bucket=b, passes=dream_dates(b.get("metadata") or {}))
+            for b in ready
+        ],
+        starved=starved,
+        pending_ids=all_pending_ids,
     )
+    pending = growing
 
     if not (rt.embedding_engine and rt.embedding_engine.enabled):
         return review

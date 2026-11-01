@@ -31,6 +31,7 @@ import json
 import asyncio
 import hashlib
 import sqlite3
+import time
 import weakref
 import logging
 from typing import Optional
@@ -322,6 +323,12 @@ class Dehydrator:
         self.model = dehy_cfg.get("model", _DEFAULT_MODEL)
         self.base_url = dehy_cfg.get("base_url", _DEFAULT_BASE_URL)
         self.max_tokens = dehy_cfg.get("max_tokens", _DEFAULT_MAX_TOKENS)
+        # 日记拆条单独一个预算，而且可配：thinking 模型的 max_completion_tokens
+        # 包含推理 token，长内容下多少算够跟具体模型强相关，写死一个数注定有人
+        # 撞上。撞上时的表现是「短内容正常、长内容一直失败」。
+        self.digest_max_tokens = int(
+            positive_float(dehy_cfg.get("digest_max_tokens"), _DIGEST_MAX_TOKENS)
+        )
         self.temperature = dehy_cfg.get("temperature", _DEFAULT_TEMPERATURE)
         self.timeout_seconds = positive_float(dehy_cfg.get("timeout_seconds"), _API_TIMEOUT_SECONDS)
         # api_format: "openai_compat" (default) | "gemini" | "anthropic"
@@ -360,10 +367,15 @@ class Dehydrator:
         # --- 初始化 OpenAI 兼容客户端（仅 openai_compat 格式使用）---
         self.client: Optional[AsyncOpenAI] = None
         if self.api_available and self.api_format == "openai_compat":
+            # max_retries=0：重试归 _chat 那个循环管（_RETRY_MAX_ATTEMPTS 次，
+            # 指数退避，每次都写日志）。SDK 默认还会自己悄悄重试 2 次，两层叠起来
+            # 就是 3×3=9 次尝试 —— 服务器「收下请求但不回」时，一次 dehydrate()
+            # 能占满 9×timeout（默认 60s，即九分钟），而调用方是等在 MCP 那头的模型。
             self.client = AsyncOpenAI(
                 api_key=self.api_key,
                 base_url=self.base_url,
                 timeout=self.timeout_seconds,
+                max_retries=0,
             )
 
         # --- SQLite dehydration cache ---
@@ -383,20 +395,55 @@ class Dehydrator:
         self._cache_finalizer()
 
     def _init_cache_db(self) -> sqlite3.Connection:
-        """Open (or create) the dehydration cache DB; return a persistent connection."""
+        """打开（或新建）脱水缓存库；库文件坏掉时先隔离再重建。
+
+        这个缓存里没有任何真源数据——摘要丢了下次重新脱水就是了。而它在
+        `__init__` 里打开，`__init__` 又在 server.py 模块顶层执行：一个被断电
+        截断、被同步工具动过的 .db 会让 `sqlite3.DatabaseError` 穿到 import，
+        OB 起不来。用户为了一份缓存丢掉全部记忆的访问权，这笔账不划算。
+        """
         os.makedirs(os.path.dirname(self.cache_db_path), exist_ok=True)
+        try:
+            return self._open_cache_db()
+        except sqlite3.DatabaseError as exc:
+            if not os.path.exists(self.cache_db_path):
+                raise
+            quarantined = (
+                f"{self.cache_db_path}.corrupt-{time.strftime('%Y%m%d-%H%M%S')}"
+            )
+            os.replace(self.cache_db_path, quarantined)
+            for suffix in ("-wal", "-shm"):
+                try:
+                    os.unlink(self.cache_db_path + suffix)
+                except OSError:
+                    pass
+            logger.warning(
+                "脱水缓存损坏已隔离到 %s，已重建空库（%s: %s）",
+                os.path.basename(quarantined),
+                type(exc).__name__,
+                exc,
+            )
+            return self._open_cache_db()
+
+    def _open_cache_db(self) -> sqlite3.Connection:
         # check_same_thread=False is safe here: asyncio runs on one thread and all
         # cache calls are synchronous helper methods called from that same thread.
         conn = sqlite3.connect(self.cache_db_path, check_same_thread=False)
-        conn.execute("""
-            CREATE TABLE IF NOT EXISTS dehydration_cache (
-                content_hash TEXT PRIMARY KEY,
-                summary TEXT NOT NULL,
-                model TEXT NOT NULL,
-                created_at TEXT NOT NULL DEFAULT (datetime('now'))
-            )
-        """)
-        conn.commit()
+        try:
+            conn.execute("""
+                CREATE TABLE IF NOT EXISTS dehydration_cache (
+                    content_hash TEXT PRIMARY KEY,
+                    summary TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    created_at TEXT NOT NULL DEFAULT (datetime('now'))
+                )
+            """)
+            conn.commit()
+        except BaseException:
+            # sqlite3.connect 是惰性的，真正读文件的是上面这句。它失败时连接仍然
+            # 握着文件句柄——Windows 上不先关掉，隔离那一步会拿到 WinError 32。
+            conn.close()
+            raise
         return conn
 
     def _content_key(self, content: str) -> str:
@@ -545,7 +592,18 @@ class Dehydrator:
         )
         if not response.choices:
             return ""
-        return response.choices[0].message.content or ""
+        choice = response.choices[0]
+        # 供应商明说了「我是被 max_tokens 截断的」，这条信号原先被整个丢掉：
+        # 半截 JSON 一路走到「返回空结果」，日志里什么线索都没有。
+        # 真机上「短内容正常、长内容一直失败」查了两天，缺的就是这一行。
+        if getattr(choice, "finish_reason", "") == "length":
+            logger.warning(
+                "LLM output truncated by max_tokens / 输出被 max_tokens 截断："
+                "model=%s limit=%s。半截 JSON 会解析失败。",
+                self.model,
+                max_tokens if max_tokens is not None else self.max_tokens,
+            )
+        return choice.message.content or ""
 
     async def _chat_gemini(
         self,
@@ -1032,10 +1090,13 @@ class Dehydrator:
         # --- API digest (no local fallback) ---
         self._require_api()
         try:
-            result = await self._api_digest(content)
+            result, 诊断 = await self._api_digest_detailed(content)
             if result:
                 return result
-            raise RuntimeError("API 日记整理返回空结果")
+            # 原来这里一律报「API 日记整理返回空结果」。空返回和「给了东西但
+            # 解析不出来」是两种完全不同的毛病，塌缩成同一句话就查不下去了——
+            # 真机上「短内容正常、长内容一直失败」卡了两天，卡的就是这个。
+            raise RuntimeError(诊断)
         except RuntimeError:
             raise
         except Exception as e:
@@ -1049,7 +1110,15 @@ class Dehydrator:
         """
         Call LLM API for diary organization.
         调用 LLM API 执行日记整理。
+
+        失败一律返回空列表——这个契约不能变，调用方（含测试）按它写的。
+        想知道**为什么**空，用 `_api_digest_detailed`。
         """
+        items, _诊断 = await self._api_digest_detailed(content)
+        return items
+
+    async def _api_digest_detailed(self, content: str) -> tuple[list[dict], str]:
+        """同上，另外返回一句「空的话是为什么」，给 digest() 报错用。"""
         # 带行号喂进去：prompt 要它报 source_ranges，它就必须看得见行号。
         # 这样它**碰不到原文本身**——只能说「第几行」，原话由系统逐字去取。
         # 「LLM 禁止压缩原句」这条因此是结构性的，不靠它自觉。
@@ -1060,12 +1129,26 @@ class Dehydrator:
         raw = await self._chat(
             DIGEST_PROMPT + _perspective_rule(self.human),
             编号原文,
-            max_tokens=_DIGEST_MAX_TOKENS,
+            max_tokens=self.digest_max_tokens,
             temperature=_DIGEST_TEMPERATURE,
         )
         if not raw.strip():
-            return []
-        return self._parse_digest(raw)
+            # thinking 模型的 max_completion_tokens 是**包含推理 token** 的，
+            # 长输入下推理吃光预算就会返回空文本。
+            return [], (
+                f"模型没有返回任何内容（输入 {len(截断)} 字，max_tokens="
+                f"{self.digest_max_tokens}）。thinking 模型的预算含推理 token，"
+                "长内容下可能被推理吃光；可调大 dehydration.digest_max_tokens。"
+            )
+        items = self._parse_digest(raw)
+        if not items:
+            return [], (
+                f"模型返回了 {len(raw)} 字但解析不出条目（输入 {len(截断)} 字，"
+                f"max_tokens={self.digest_max_tokens}）。最常见的原因是输出被 "
+                "max_tokens 截断成半截 JSON——日志里紧邻的那条 warning 带原始输出"
+                "开头，看它是不是断在中间。"
+            )
+        return items, ""
 
     # ---------------------------------------------------------
     # Parse diary digest result with safety checks

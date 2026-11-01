@@ -93,3 +93,8 @@
 - `PASSWORD` → `OMBRE_DASHBOARD_PASSWORD`
 
 正式名称和旧名同时存在时，以正式名称为准。删除兼容名必须经过一次明确的主版本迁移，并在发布说明中写出截止版本，禁止在普通重构中删除。
+
+## Fork sidecar read compatibility
+
+- `OMBRE_MCP_SERVICE_TOKEN`: optional dedicated read token (at least 32 characters). Accepted only on the fork bucket-detail read route, with AI-side letter visibility. Unset disables this credential.
+- The existing `OMBRE_MCP_TOKEN` is accepted there only in token/hybrid mode and at least 32 characters. Dashboard mutation permissions are never granted.

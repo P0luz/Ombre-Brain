@@ -163,12 +163,31 @@ class TestNowIso:
         assert isinstance(parsed, datetime)
 
     def test_approximately_now(self):
-        from utils import now_iso
+        from utils import now_iso, parse_iso_datetime
         # now_iso() truncates to seconds; compare at second granularity
         before = datetime.now().replace(microsecond=0)
-        result = datetime.fromisoformat(now_iso())
+        result = parse_iso_datetime(now_iso())
         after = datetime.now().replace(microsecond=0)
         assert before <= result <= after
+
+    def test_carries_an_explicit_offset(self):
+        from utils import now_iso
+        assert datetime.fromisoformat(now_iso()).tzinfo is not None
+
+    def test_the_date_prefix_is_still_sliceable(self):
+        from utils import now_iso
+        assert now_iso()[:10] == datetime.now().strftime("%Y-%m-%d")
+
+    def test_legacy_naive_values_still_parse(self):
+        from utils import parse_iso_datetime
+        assert parse_iso_datetime("2026-08-17T17:34:17") == datetime(
+            2026, 8, 17, 17, 34, 17
+        )
+
+    def test_both_formats_compare_against_each_other(self):
+        from utils import now_iso, parse_iso_datetime
+        legacy = "2020-01-01T00:00:00"
+        assert parse_iso_datetime(legacy) < parse_iso_datetime(now_iso())
 
 
 class TestDeepMerge:

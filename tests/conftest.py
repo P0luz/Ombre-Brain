@@ -35,8 +35,71 @@ os.environ["OMBRE_BUCKETS_DIR"] = str(_TEST_BUCKETS)
 if not os.environ.get("OMBRE_EMBED_API_KEY"):
     os.environ["OMBRE_EMBED_API_KEY"] = "__test_dummy__"
 
+# 子进程崩溃不能把整场测试拖下水。
+#
+# Windows 上子进程的 traceback 按控制台代码页写 stderr（这台机器是 GBK）。
+# 用户名或路径里有中文，就会产生 UTF-8 解不开的字节；pytest 的捕获层按 UTF-8
+# 解，那个 IncrementalDecoder 一旦卡在这段字节上就再也解不出来，而它会被继续
+# 复用——**此后每个测试的 setup 和 teardown 各报一次 error**，整场剩下的测试
+# 全灭。实测抓到过一次：`1 failed, 332 passed, 97 skipped, 4911 errors`，
+# 4911 = 之后每个测试两条。
+#
+# 让子进程也说 UTF-8：崩溃就只是一条失败，而不是一场灾难。
+# 用 setdefault，外面显式配了就听外面的。
+os.environ.setdefault("PYTHONIOENCODING", "utf-8")
+
 # Ensure src/ is importable
 sys.path.insert(0, str(_REPO_ROOT / "src"))
+
+_MISSING = object()
+
+# 别让迁移工作区的清扫线程在测试进程里真的跑起来。
+#
+# 它是进程级 daemon，起来之后跑满整个 pytest 进程：每 60 秒醒一次，按当时读到的
+# `_PARSED_WORKSPACE_TTL_SECONDS` 去删所有已注册 engine 的未应用工作区。而
+# `test_migrate_job_state.py` 会把那个模块级常量 monkeypatch 成 10 秒——两件事
+# 撞上就是一次谁也复现不了的删除：线程按自己的节拍醒，和测试顺序无关，
+# 所以表现成低频、换种子也不稳定的偶发失败。
+#
+# 没有测试需要它真的在后台跑：要测过期的那条用例是直接调
+# `engine._expire_parsed_workspace(...)` 的。而且 migrate_engine 本身就为
+# 「起不来 daemon」留了惰性回退（status/reservation 调用里也会做同样的过期检查），
+# 所以关掉它不改变任何被测行为。
+try:
+    import migrate_engine as _migrate_engine
+
+    _migrate_engine._MIGRATE_SWEEPER_STARTED = True
+except Exception:  # pragma: no cover - 模块结构变了不该让整个套件起不来
+    pass
+
+
+@pytest.fixture(autouse=True)
+def _restore_tool_runtime():
+    """每个测试跑完，把 tools/_runtime 的全局装配还原。
+
+    二十多个测试文件直接写 `rt.embedding_engine = ...` 而不是走 monkeypatch，
+    于是它留给下一个测试。后果是**静默的**：dream 的 feel 段按融合分挑选，
+    向量可用时是 `0.7*向量 + 0.3*关键词`，不可用时关键词独自承担。继承到一个
+    「enabled 但查不出东西」的引擎，向量那路恒为 0，门槛就变成事实上的 1.67 倍，
+    整段 feel 无声消失——测试不报错，只是断言的东西不见了。
+
+    这不是假想：`test_feel_search_channel.py` 之后跟 `test_dream_prompt_boundary.py`，
+    两个文件两秒就能复现两条失败；随机序下命中率约五分之一。
+
+    在这里还原而不是去改那二十多个文件：装配是全局的，边界就该在 conftest，
+    而不是指望每个新测试都记得自己收拾。
+    """
+    from tools import _runtime as rt
+
+    # 全量快照，不挑名字：装配槽以后会增减，漏跟一个就是同一个静默 bug 再来一次。
+    # 从没被改过的（含 typing 那些 import）身份比较相等，还原是空操作。
+    before = dict(vars(rt))
+    yield
+    for name, value in before.items():
+        if getattr(rt, name, _MISSING) is not value:
+            setattr(rt, name, value)
+    for name in set(vars(rt)) - set(before):
+        delattr(rt, name)
 
 
 @pytest.fixture

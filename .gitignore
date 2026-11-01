@@ -76,3 +76,15 @@ kernel/rust/ombre-kernel/Cargo.lock
 # Local test protocols and generated smoke outputs — never publish.
 tmp_pas_docs_*/
 tmp_hnf1_pas_pair_smoke_*/
+
+# Kilo Code 的工作目录，含它自己开的 git worktree（整份代码的副本）。
+# git 本来就会跳过注册过的 worktree，ripgrep / ruff / pytest 实测也扫不到；
+# 写在这里是为了覆盖将来任何遵守 gitignore 的工具，并把「这不是本仓库的代码」
+# 这件事写明——按文件系统硬遍历的 grep -r / find 仍然会看到两份，
+# 分析脚本得自己排除。
+.kilo/
+
+# 覆盖率产物（CI 每次重新生成）
+coverage.xml
+.coverage
+htmlcov/

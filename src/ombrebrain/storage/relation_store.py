@@ -200,10 +200,6 @@ def reverse_relation_type(value: Any) -> str:
     return _REVERSE_RELATION_TYPES[normalize_relation_type(value)]
 
 
-def is_fixed_relation_type(value: Any) -> bool:
-    return normalize_relation_type(value) in _FIXED_RELATION_TYPES
-
-
 def normalize_relation_label(value: Any) -> str:
     if value is None:
         return ""

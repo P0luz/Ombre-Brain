@@ -63,7 +63,7 @@ _RECENT_WINDOW_DAYS = 7
 _PASSIVE_MIN_AGE_HOURS = 24
 _PIN_BUDGET_NOTICE = (
     "token 预算不足：核心准则 required≈{required} tokens（完整渲染核心准则总计），"
-    "limit={limit} tokens，omitted={omitted} 条；普通浮现已跳过（ordinary surfacing skipped）。"
+    "limit={limit} tokens，omitted={omitted} 条没能返回。"
 )
 
 
@@ -398,23 +398,27 @@ async def surface_default(
 
     dynamic_results = []
     dynamic_omitted = 0
-    if not pinned_omitted:
-        for b in candidates:
-            try:
-                score = rt.decay_engine.calculate_score(b["metadata"])
-                rendered, entry_tokens = render_stored_bucket(
-                    b,
-                    f"[权重:{score:.2f}] [bucket_id:{b['id']}]",
-                    _footprint(b),
-                )
-                if entry_tokens > token_budget:
-                    dynamic_omitted += 1
-                    continue
-                dynamic_results.append(rendered)
-                token_budget -= entry_tokens
-            except Exception as e:
-                rt.logger.warning(f"Failed to render surfaced bucket / 浮现渲染失败: {e}")
+    # 曾经这里是 `if not pinned_omitted:`——一条核心准则装不下，普通浮现
+    # 整个循环一次都不跑。那个门什么也没保护到：pinned 在上面已经先渲染完
+    # 并且先占了预算，而 _pin_budget_notice 在末尾是无条件追加的，加不加这个
+    # 门，「有准则没装下」这件事都会说出来。它唯一的作用是把「少了一条准则」
+    # 放大成「今天什么都想不起来」，而且每次对话都重演。
+    for b in candidates:
+        try:
+            score = rt.decay_engine.calculate_score(b["metadata"])
+            rendered, entry_tokens = render_stored_bucket(
+                b,
+                f"[权重:{score:.2f}] [bucket_id:{b['id']}]",
+                _footprint(b),
+            )
+            if entry_tokens > token_budget:
+                dynamic_omitted += 1
                 continue
+            dynamic_results.append(rendered)
+            token_budget -= entry_tokens
+        except Exception as e:
+            rt.logger.warning(f"Failed to render surfaced bucket / 浮现渲染失败: {e}")
+            continue
 
     if not pinned_results and not dynamic_results:
         if pinned_omitted:
@@ -480,7 +484,9 @@ async def surface_default(
                     cond_b = False
             if cond_a or cond_b:
                 passive_pool.append(b)
-        if passive_pool and not pinned_omitted and not dynamic_omitted:
+        # 只看 dynamic_omitted：普通浮现被挤掉才说明预算真的紧。
+        # pinned_omitted 说的是「有一条准则太大」，那和还剩多少预算是两件事。
+        if passive_pool and not dynamic_omitted:
             random.shuffle(passive_pool)
             for b in passive_pool[:2]:
                 try:
@@ -502,7 +508,7 @@ async def surface_default(
     # 设计意图：让已解决的记忆有小概率重新出现，制造"忽然想起"的温度。
     # 与无结果兜底逻辑并存；不替换主流程。
     dream_results: list[str] = []
-    if not pinned_omitted and not dynamic_omitted and random.random() < 0.03:
+    if not dynamic_omitted and random.random() < 0.03:
         try:
             shown_ids = {b["id"] for b in candidates}
             resolved_pool = [

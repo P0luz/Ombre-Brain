@@ -20,7 +20,7 @@ dispatch() 把这几步串起来，并给最终输出中实际出现的候选各
 
 from typing import Optional
 
-from ..i import record_dream_pass
+from ..i import record_dream_offer, record_dream_pass
 from .. import _runtime as rt
 from .candidates import collect_candidates
 from .hints import build_connection_hint, build_crystal_hint, collect_self_candidates
@@ -45,7 +45,13 @@ async def dispatch(
     except Exception as exc:
         rt.logger.warning(f"Dream self candidate collection failed: {exc}")
         self_review = None
-    has_self_candidates = bool(getattr(self_review, "candidates", None))
+    # `ready`（已攒够见证、只等 promote）也算「有东西要看」。
+    # 漏掉它的话，当所有候选都攒够时 dream 会在这里短路，那条
+    # 「这几条够了，等你决定」的提醒就永远出不来——而那正是它最该出现的时候。
+    has_self_candidates = bool(
+        getattr(self_review, "candidates", None)
+        or getattr(self_review, "ready", None)
+    )
     if not recent and not has_self_candidates:
         return f"过去 {window_hours} 小时内没有需要消化的新记忆。"
 
@@ -81,6 +87,16 @@ async def dispatch(
         except Exception as exc:
             # 记不上见证只是让候选多等一场梦，不该让整场 dream 失败。
             rt.logger.warning(f"Dream self candidate pass recording failed: {exc}")
+
+    # 队列里的每一条都记一次「这天有梦」——包括这次没排上的。
+    # 见证数回答「它被看见过几次」，这个数回答「它本可以被看见几次」，
+    # 差额才是「一直转不了正」到底卡在哪里。
+    offered_candidates = list(getattr(self_review, "pending_ids", None) or [])
+    if offered_candidates:
+        try:
+            await record_dream_offer(offered_candidates)
+        except Exception as exc:
+            rt.logger.warning(f"Dream self candidate offer recording failed: {exc}")
 
     if rt.fire_webhook:
         await rt.fire_webhook("dream", {"recent": len(recent), "chars": len(final_text)})

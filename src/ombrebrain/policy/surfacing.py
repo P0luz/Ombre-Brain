@@ -8,6 +8,14 @@ from typing import Iterable, Mapping, Any
 class SurfaceMode(str, Enum):
     SPONTANEOUS = "spontaneous"
     SEARCH = "search"
+    # 检索，但**不是模型自己决定要查的**：调用方（agent 框架 / hook）每轮
+    # 自动发起一次召回并注入上下文。
+    #
+    # 为什么要单独一档，而不是给检索加个 respect_dont_surface 开关：
+    # 「用户主动去查」和「系统每轮自动召回」的区别只存在于调用方，OB 侧看不出来。
+    # 那是一个**意图**，而意图是稳定的，标记清单不是——每多一个标记就多一个
+    # 布尔参数，最后会攒成一堆彼此无关的开关。声明意图，由这里决定吃哪些标记。
+    AUTOMATIC = "automatic"
     IMPORTANCE = "importance"
     DREAM = "dream"
 
@@ -96,6 +104,22 @@ class SurfacePolicyVM:
                 reasons.append("protected")
             if bucket_type in self.private_types:
                 reasons.append("private_type")
+        elif normalized_mode == SurfaceMode.AUTOMATIC:
+            # 自动召回 = SEARCH 的可见面，再吃两个「别主动拿给我」的标记。
+            #
+            # dont_surface 是「让它彻底安静下去」。每轮自动注入正是它要安静的
+            # 那个场合。
+            #
+            # digested 自己的定义就是「从默认/被动浮现及 dream 隐藏，但仍可通过
+            # **显式** query 找回」。每轮自动发起的召回按定义不是显式 query——
+            # 吃掉它是跟随这个标记既有的定义，不是在这里发明新策略。
+            #
+            # 不吃 pinned / permanent / anchor / protected：那几个管的是核心准则、
+            # 坐标系与防衰减。把它们从 agent 的上下文里静默拿掉，方向正好反了。
+            if _truthy(metadata.get("dont_surface")):
+                reasons.append("dont_surface")
+            if _truthy(metadata.get("digested")) and not _never_digested:
+                reasons.append("digested")
         elif normalized_mode == SurfaceMode.IMPORTANCE:
             if _truthy(metadata.get("dont_surface")):
                 reasons.append("dont_surface")

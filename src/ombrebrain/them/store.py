@@ -18,6 +18,8 @@ from dataclasses import replace
 import json
 import os
 from pathlib import Path
+from ombrebrain.storage.module_sqlite import connect_module_db, module_integrity_report
+
 import sqlite3
 import tempfile
 import threading
@@ -171,21 +173,12 @@ class ThemStore:
         return self.path.is_file()
 
     def _connect(self, *, create: bool = False) -> sqlite3.Connection:
-        if not self.path.exists() and not create:
-            raise FileNotFoundError(self.path)
-        if create:
-            self.root.mkdir(parents=True, exist_ok=True)
-        try:
-            connection = sqlite3.connect(str(self.path), timeout=30, isolation_level=None)
-            connection.row_factory = sqlite3.Row
-            connection.execute("PRAGMA foreign_keys=ON")
-            connection.execute("PRAGMA journal_mode=DELETE")
-            connection.execute("PRAGMA synchronous=FULL")
-            if create:
-                connection.executescript(_SCHEMA)
-            return connection
-        except sqlite3.Error as exc:
-            raise ThemStoreError("them state is unavailable") from exc
+        return connect_module_db(
+            self.path, self.root, _SCHEMA,
+            create=create,
+            error_factory=ThemStoreError,
+            unavailable_message="them state is unavailable",
+        )
 
     def get_state(self) -> ModuleState:
         try:
@@ -500,33 +493,6 @@ class ThemStore:
         return True
 
     def integrity_report(self) -> dict[str, Any]:
-        if not self.path.exists():
-            return {"ok": True, "exists": False, "enabled": False}
-        try:
-            with self._lock:
-                connection = self._connect()
-                try:
-                    check = connection.execute("PRAGMA quick_check").fetchone()
-                    # 表名来自下面这个**字面量元组**，不接受任何外部输入，
-                    # 没有注入面。改动这里之前先确认这一点仍然成立——
-                    # 一旦表名变成参数，这行 nosec 就会掩盖一个真的注入口。
-                    counts = {
-                        table: int(
-                            connection.execute(
-                                f"SELECT COUNT(*) FROM {table}"  # nosec B608
-                            ).fetchone()[0]
-                        )
-                        for table in ("persons", "claims")
-                    }
-                finally:
-                    connection.close()
-            state = self.get_state()
-            return {
-                "ok": bool(check and str(check[0]).lower() == "ok"),
-                "exists": True,
-                "enabled": state.enabled,
-                "state_revision": state.state_revision,
-                "counts": counts,
-            }
-        except Exception:
-            return {"ok": False, "exists": True, "enabled": False}
+        return module_integrity_report(
+            self.path, self._lock, self._connect, ("persons", "claims"), self.get_state
+        )

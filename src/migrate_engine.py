@@ -74,11 +74,24 @@ from ombrebrain.you.store import (
     validate_you_snapshot_bytes,
     validate_you_snapshot_file,
 )
+from ombrebrain.storage.vector_codec import decode_vector, encode_vector
 
 try:
-    from utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
+    from utils import (  # type: ignore
+        _win_long_path,
+        now_iso,
+        publish_new_file,
+        safe_path,
+        sanitize_name,
+    )
 except ImportError:  # pragma: no cover
-    from .utils import _win_long_path, now_iso, safe_path, sanitize_name  # type: ignore
+    from .utils import (  # type: ignore
+        _win_long_path,
+        now_iso,
+        publish_new_file,
+        safe_path,
+        sanitize_name,
+    )
 
 logger = logging.getLogger("ombre_brain.migrate")
 
@@ -1485,7 +1498,9 @@ class MigrateEngine:
             # Hard-linking a complete same-filesystem staging inode gives us
             # O_EXCL semantics on both POSIX and Windows; os.replace would
             # silently overwrite an unrelated file with the same filename.
-            os.link(temp_path_long, target_long)
+            # 硬链接不可用的文件系统（Termux/Android 的 FUSE、部分 NAS/SMB）走
+            # publish_new_file 里的 O_CREAT|O_EXCL 兜底，语义一样，不退化成覆盖。
+            publish_new_file(temp_path_long, target_long, rendered)
         finally:
             _safe_unlink(temp_path_long)
 
@@ -1856,7 +1871,25 @@ class MigrateEngine:
         value_type: Any,
         declared_size: Any,
         expected_dimension: int,
-    ) -> str | None:
+    ) -> str | bytes | None:
+        # BLOB 那条路不经过 _normalize_embedding_text——那个函数是给文本用的，
+        # 会把二进制向量判成非法然后返回 None，于是整包记忆的向量在迁移时被
+        # 静默丢光（向量能重建，但用户会莫名其妙地要重新跑一遍全量向量化）。
+        if isinstance(value, (bytes, bytearray, memoryview)):
+            if len(bytes(value)) > _MAX_EMBEDDING_CELL_BYTES:
+                return None
+            try:
+                parsed = decode_vector(value).tolist()
+            except (ValueError, TypeError):
+                return None
+            if (
+                not parsed
+                or len(parsed) > _MAX_EMBEDDING_DIMENSIONS
+                or (expected_dimension and len(parsed) != expected_dimension)
+            ):
+                return None
+            return encode_vector(parsed)
+
         payload = cls._normalize_embedding_text(
             value,
             value_type,

@@ -19,8 +19,11 @@ I 是「我写下关于我自己的认识」，而且只收沉淀下来的那部
 from .core import (  # noqa: F401
     I_CANDIDATE_TAG,
     I_PROMOTE_THRESHOLD,
+    disputing_candidates,
     dream_dates,
     i_core as dispatch,
     is_pending_candidate,
+    record_dream_offer,
     record_dream_pass,
+    superseded_by,
 )

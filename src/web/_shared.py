@@ -1,4 +1,4 @@
-﻿"""
+"""
 ========================================
 web/_shared.py — Dashboard/HTTP 层的共享依赖与鉴权工具
 ========================================
@@ -389,7 +389,7 @@ _MAX_ACTIVE_SESSIONS = 256
 _SESSION_TTL_SECONDS = 86400 * _DEFAULT_SESSION_TTL_DAYS
 _SESSION_TTL = _SESSION_TTL_SECONDS  # compatibility constant for older callers
 _MIN_SERVICE_TOKEN_LENGTH = 32
-_MIN_MCP_TOKEN_LENGTH = 8  # MCP tokens are validated by the MCP server itself; lower bar OK
+_MIN_MCP_TOKEN_LENGTH = 32
 
 
 def _session_ttl_seconds() -> int:
@@ -1125,7 +1125,8 @@ def _is_service_token_authenticated(request: Request) -> bool:
         str(os.environ.get("OMBRE_MCP_TOKEN", "") or "").strip()
         or str(config.get("mcp_token", "") or "").strip()
     )
-    if len(mcp_token) >= _MIN_MCP_TOKEN_LENGTH:
+    if (str(config.get("mcp_auth_mode", "oauth")).strip().lower() in {"token", "hybrid"}
+            and len(mcp_token) >= _MIN_MCP_TOKEN_LENGTH):
         configured_tokens.append(mcp_token)
 
     if not configured_tokens:
@@ -1133,7 +1134,7 @@ def _is_service_token_authenticated(request: Request) -> bool:
 
     # compare_digest leaks length, so only compare against tokens of equal length.
     for configured in configured_tokens:
-        if len(candidate) == len(configured) and hmac.compare_digest(candidate, configured):
+        if len(candidate) == len(configured) and hmac.compare_digest(candidate.encode("utf-8"), configured.encode("utf-8")):
             return True
     return False
 

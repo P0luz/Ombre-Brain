@@ -18,6 +18,11 @@ from starlette.responses import Response
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from tools._common import check_query_size
 from tools.plan.core import letter_lock_state
+from ombrebrain.retrieval.bucket_scoring import (
+    calc_emotion_score,
+    calc_time_score,
+    calc_topic_score,
+)
 from . import _shared as sh
 
 logger = sh.logger
@@ -417,9 +422,9 @@ def register(mcp) -> None:
                 meta = bucket.get("metadata", {})
                 bid = bucket["id"]
                 try:
-                    topic = sh.bucket_mgr._calc_topic_score(query, bucket) if query else 0.0
-                    emotion = sh.bucket_mgr._calc_emotion_score(q_valence if q_valence is not None else 0.5, q_arousal if q_arousal is not None else 0.5, meta)
-                    time_s = sh.bucket_mgr._calc_time_score(meta)
+                    topic = calc_topic_score(query, bucket, content_weight=sh.bucket_mgr.content_weight) if query else 0.0
+                    emotion = calc_emotion_score(q_valence if q_valence is not None else 0.5, q_arousal if q_arousal is not None else 0.5, meta)
+                    time_s = calc_time_score(meta)
                     imp = max(1, min(10, int(meta.get("importance") or 5))) / 10.0
 
                     raw_total = (
