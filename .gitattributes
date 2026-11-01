@@ -4,11 +4,6 @@
 *.sh text eol=lf
 entrypoint.sh text eol=lf
 
-# Dashboard 热更新使用 GitHub 自动生成的源码归档。Git clone 仍保留可编辑的
-# 约束文件，但归档只携带带 hash 的发布锁，避免旧更新器把源约束文字调整误判成
-# 已安装依赖发生变化。
-# 此兼容仅在 requirements.lock.txt 规范化 SHA-256 保持为下列值时安全：
-# fdb24053349d8e18a55c3a5afbab8b92cc31d94b69e52359b350ab96b79001c9。
-# 修改发布锁前必须移除此规则并提供显式依赖迁移；
-# tests/test_update_source_gate.py 会强制校验该不变式。
-/requirements.txt export-ignore
+# Security dependency upgrades require an explicit image rebuild or locked pip
+# install. Include both dependency manifests in archives so legacy updaters do
+# not mistake this release for a code-only update. See docs/DEPENDENCY_SECURITY_20261102.md.
