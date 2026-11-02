@@ -338,7 +338,10 @@ def main():
     if len(sys.argv) != 2 or sys.argv[1] not in SERVICES:
         raise ValueError('service_not_allowed')
     service = sys.argv[1]
-    item = metadata(sys.stdin.buffer)
+    # A daemon may wait for URL refresh while main exits. An unbuffered fd
+    # avoids holding sys.stdin's buffered-reader lock during interpreter exit.
+    stream = os.fdopen(os.dup(sys.stdin.fileno()), 'rb', buffering=0)
+    item = metadata(stream)
     if item['action'] == 'check':
         print(json.dumps({'ready': COMPOSE.is_file(), 'service': service, 'protocol': 1}))
         return
@@ -347,7 +350,7 @@ def main():
         def refresh_locations():
             while True:
                 try:
-                    renewed = metadata(sys.stdin.buffer)
+                    renewed = metadata(stream)
                     # A refresh may only replace the signed URL for this exact
                     # artifact. Content hash/size/commit remain immutable.
                     if {k: v for k, v in renewed.items() if k != 'url'} != {k: v for k, v in item.items() if k != 'url'}:
@@ -358,7 +361,7 @@ def main():
         threading.Thread(target=refresh_locations, daemon=True).start()
     with (BASE / 'deployment.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        print(json.dumps(deploy(service, item, sys.stdin.buffer, locations)))
+        print(json.dumps(deploy(service, item, stream, locations)))
 
 
 if __name__ == '__main__':
