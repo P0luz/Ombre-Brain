@@ -219,9 +219,14 @@ def register(mcp) -> None:
 
     @mcp.custom_route("/api/bucket/{bucket_id}", methods=["GET"])
     async def api_bucket_detail(request: Request) -> Response:
-        """Get full raw bucket content plus display-only derived text by ID."""
+        """Get full raw bucket content plus display-only derived text by ID.
+
+        A trusted sidecar may use its service token on this exact read route so
+        Xinchao can inspect bucket types using AI-side letter visibility. Dashboard sessions remain valid,
+        while all bucket mutation routes keep requiring Dashboard auth.
+        """
         from starlette.responses import JSONResponse
-        err = sh._require_auth(request)
+        err = sh._require_service_or_dashboard_auth(request)
         if err:
             return err
         bucket_id = request.path_params["bucket_id"]
@@ -229,9 +234,12 @@ def register(mcp) -> None:
         if not bucket:
             return JSONResponse({"error": "not found"}, status_code=404)
         meta = bucket.get("metadata", {})
-        lock_state = letter_lock_state(bucket, "human")
+        # Bearer credentials never inherit human Dashboard visibility, even
+        # when a request also carries a session cookie.
+        caller_side = "ai" if sh._is_service_token_authenticated(request) else "human"
+        lock_state = letter_lock_state(bucket, caller_side)
         if lock_state["locked"]:
-            safe_letter = safe_letter_metadata(bucket, "human")
+            safe_letter = safe_letter_metadata(bucket, caller_side)
             return JSONResponse({
                 "id": bucket["id"],
                 "metadata": {

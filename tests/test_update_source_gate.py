@@ -98,15 +98,23 @@ def test_ci_lock_verification_freezes_package_index_snapshot():
 
     assert step.count("uv pip compile ") == 2
     assert "--upgrade" not in step
-    assert "--exclude-newer" not in step, (
+    assert "--exclude-newer " not in step, (
         "cutoff 必须通过环境变量传入，避免 uv 把参数写进 lock 头部造成纯文本漂移"
     )
+    overrides = re.findall(r"--exclude-newer-package ([a-z]+)=([^\s]+)", step)
+    assert {package for package, _ in overrides} == {"mcp", "certifi", "pyjwt"}
+    assert len(overrides) == 6, "both locks must use the same three package snapshots"
+    for package in {"mcp", "certifi", "pyjwt"}:
+        dates = [date for name, date in overrides if name == package]
+        assert len(set(dates)) == 1
+        assert dates[0].endswith("Z")
+        assert cutoff <= datetime.fromisoformat(dates[0][:-1] + "+00:00") <= datetime.now(timezone.utc)
     reset_command = "rm -f requirements.lock.txt requirements-dev.lock.txt"
     assert reset_command in step, "lock 校验必须从空输出重建，不能依赖已有 pin 偏好"
     assert step.index(reset_command) < step.index("uv pip compile ")
 
 
-def test_release_archive_omits_loose_requirements_but_keeps_lock():
+def test_security_release_archive_includes_both_dependency_manifests():
     repo_root = Path(meta.__file__).resolve().parents[2]
     attributes = (repo_root / ".gitattributes").read_text(encoding="utf-8")
     active_rules = {
@@ -115,7 +123,7 @@ def test_release_archive_omits_loose_requirements_but_keeps_lock():
         if line.strip() and not line.lstrip().startswith("#")
     }
 
-    assert "/requirements.txt export-ignore" in active_rules
+    assert "/requirements.txt export-ignore" not in active_rules
     assert "/requirements.lock.txt export-ignore" not in active_rules
     assert "COPY requirements.lock.txt ./" in (repo_root / "Dockerfile").read_text(
         encoding="utf-8"
@@ -124,6 +132,11 @@ def test_release_archive_omits_loose_requirements_but_keeps_lock():
 
 def test_legacy_archive_compatibility_requires_284_release_lock():
     """requirements.lock.txt 内容钉死的绊线：任何改动都必须是一次清醒决定，不能顺手改掉。
+
+    2026-11-02：明确升级 mcp / pyjwt / certifi 三项安全依赖；其余包版本不变。
+    删除 requirements.txt 的 export-ignore，使旧更新器也能检测到依赖变化。
+    本次必须重建镜像或显式安装 hash 锁，不允许把代码热更新当作修复完成。
+    迁移步骤与实际版本验证记录在 docs/DEPENDENCY_SECURITY_20261102.md。
 
     2026-08-09：为修复 cryptography==49.0.0 的 PYSEC-2026-3552（无 fix 版本可选，
     只能升级到 50.0.0），推进了 CI 的 UV_EXCLUDE_NEWER 快照并重新生成了两份锁，
@@ -151,7 +164,7 @@ def test_legacy_archive_compatibility_requires_284_release_lock():
     normalized = lock_bytes.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
 
     assert hashlib.sha256(normalized).hexdigest() == (
-        "ae0255bd41e5ceb45694244017a9b0b2dc1e4c445ab027cec1f7183ad969700a"
+        "57d16c50026f3526ba9ecdf59ea33ccb65164e2cff48cb50acf5688ce99e6e52"
     ), (
         "requirements.lock.txt 已变化：确认这次变化是否会影响还没升级过的旧版"
         "热更新器（尤其 v2.8.4 之前、缺少 lock 感知回退逻辑的实例），评估后再把"
@@ -303,7 +316,7 @@ def test_runtime_lock_probe_accepts_repository_release_lock_syntax(monkeypatch):
     lock = (repo_root / "requirements.lock.txt").read_bytes()
 
     assert meta._runtime_satisfies_locked_versions(lock) is True
-    assert b"mcp==1.29.0" in captured["content"]
+    assert b"mcp==1.30.0" in captured["content"]
 
 
 def test_runtime_lock_probe_nonzero_result_fails_closed_and_cleans_temp(

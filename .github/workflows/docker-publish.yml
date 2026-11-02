@@ -20,6 +20,8 @@ on:
 
 jobs:
   build-and-push:
+    # This workflow publishes the upstream owner's Docker Hub image.
+    if: github.repository == 'P0luz/Ombre-Brain'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7

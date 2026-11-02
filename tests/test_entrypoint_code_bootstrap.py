@@ -85,6 +85,21 @@ def test_same_version_changed_image_reseeds_but_unchanged_image_preserves_hot_up
     assert "代码指纹" in rebuilt.stdout
 
 
+def test_dependency_only_rebuild_refreshes_persisted_lock_at_same_version(tmp_path):
+    image = tmp_path / "image"
+    code = tmp_path / "code" / "_app"
+    data = tmp_path / "data"
+    _prepare_image(image)
+    first = _run(image, code, data)
+    assert first.returncode == 0, first.stdout + first.stderr
+    (image / "requirements.lock.txt").write_text("package==2\n", encoding="utf-8")
+    rebuilt = _run(image, code, data)
+    assert rebuilt.returncode == 0, rebuilt.stdout + rebuilt.stderr
+    assert (code / "requirements.lock.txt").read_text(encoding="utf-8") == "package==2\n"
+    assert (code / "_prev" / "requirements.lock.txt").read_text(encoding="utf-8") == "package==1\n"
+    assert "reason=image-fingerprint-changed" in rebuilt.stdout
+
+
 def test_non_active_legacy_data_app_is_reported_without_deletion(tmp_path):
     image = tmp_path / "image"
     code = tmp_path / "code" / "_app"

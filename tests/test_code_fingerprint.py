@@ -3,6 +3,19 @@ from pathlib import Path
 from ombrebrain.maintenance.code_fingerprint import fingerprint_code_tree
 
 
+def test_dependency_only_change_updates_image_fingerprint(tmp_path):
+    (tmp_path / "src").mkdir()
+    (tmp_path / "frontend").mkdir()
+    (tmp_path / "src" / "server.py").write_text("pass\n", encoding="utf-8")
+    legacy = fingerprint_code_tree(tmp_path)
+    lock = tmp_path / "requirements.lock.txt"
+    lock.write_text("mcp==1.29.0\n", encoding="utf-8")
+    before = fingerprint_code_tree(tmp_path)
+    lock.write_text("mcp==1.30.0\n", encoding="utf-8")
+    assert before != legacy
+    assert fingerprint_code_tree(tmp_path) != before
+
+
 def _tree(root: Path) -> None:
     (root / "src").mkdir(parents=True)
     (root / "frontend").mkdir()
