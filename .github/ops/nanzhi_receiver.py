@@ -210,22 +210,30 @@ def wait_ready(compose, service, seconds=120):
 
 
 def rehearsal(doc, service, image, job):
-    svc = copy.deepcopy(doc['services'][service])
-    svc.update(image=image, restart='no', ports=[], networks=['isolated'])
-    svc.pop('depends_on', None)
-    for key in ('DREAM_ENABLED', 'MODEL_ENABLED', 'BARK_ENABLED', 'BRIDGE_ENABLED', 'OMBRE_WRITE_ENABLED'):
-        if key in svc['environment']:
-            svc['environment'][key] = 'false'
-    for index, mount in enumerate(svc['volumes']):
-        source = Path(mount['source']).resolve()
-        if not source.is_relative_to(PRODUCTION):
-            raise ValueError('unexpected_volume')
-        if mount.get('read_only'):
-            continue
-        dest = job / ('test-data-' + str(index))
-        snapshot(source, dest)
-        mount['source'] = str(dest)
-    test = {'name': 'nanzhi-deploy-check', 'services': {service: svc}, 'networks': {'isolated': {'internal': True}}}
+    # Xinchao discovers OB proxy tools during tools/list. Provide an isolated
+    # copy of its actual dependency, never let a smoke test reach production OB.
+    names = [service] + (['ombre-brain'] if service == 'xinchao-nian' else [])
+    test_services = {}
+    for name in names:
+        svc = copy.deepcopy(doc['services'][name])
+        svc.update(restart='no', ports=[], networks=['isolated'])
+        if name == service:
+            svc['image'] = image
+        svc.pop('depends_on', None)
+        for key in ('DREAM_ENABLED', 'MODEL_ENABLED', 'BARK_ENABLED', 'BRIDGE_ENABLED', 'OMBRE_WRITE_ENABLED'):
+            if key in svc['environment']:
+                svc['environment'][key] = 'false'
+        for index, mount in enumerate(svc['volumes']):
+            source = Path(mount['source']).resolve()
+            if not source.is_relative_to(PRODUCTION):
+                raise ValueError('unexpected_volume')
+            if mount.get('read_only'):
+                continue
+            dest = job / ('test-data-' + name + '-' + str(index))
+            snapshot(source, dest)
+            mount['source'] = str(dest)
+        test_services[name] = svc
+    test = {'name': 'nanzhi-deploy-check', 'services': test_services, 'networks': {'isolated': {'internal': True}}}
     path = job / 'test-compose.json'
     path.write_text(json.dumps(test))
     cmd = ['docker', 'compose', '-f', str(path)]
@@ -250,7 +258,20 @@ def deploy(service, item, stream):
             raise RuntimeError('insufficient_disk_space')
         archive = job / 'image.tar.gz'
         record('receiving')
+        cached = False
         if item['action'] == 'deploy_url':
+            for previous in (BASE / 'runs').glob('*-' + service + '-' + item['commit'][:12] + '/image.tar.gz'):
+                if previous == archive or previous.stat().st_size != item['bytes']:
+                    continue
+                with previous.open('rb') as source:
+                    if hashlib.file_digest(source, 'sha256').hexdigest() != item['sha256']:
+                        continue
+                archive.hardlink_to(previous)
+                cached = True
+                break
+        if cached:
+            status['verified_cached_archive'] = True
+        elif item['action'] == 'deploy_url':
             download_artifact(archive, item)
         else:
             receive(stream, archive, item)
