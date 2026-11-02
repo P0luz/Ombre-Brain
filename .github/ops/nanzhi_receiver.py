@@ -104,7 +104,7 @@ def download_artifact(dest, item):
                     if attempt == 2:
                         raise RuntimeError('artifact_range_download_failed') from None
                     time.sleep(2)
-        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=16) as pool:
             list(pool.map(part, ranges))
     finally:
         os.close(fd)

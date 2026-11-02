@@ -68,7 +68,7 @@ def main():
             try:
                 proc.stdin.write((json.dumps(header) + '\n').encode())
                 proc.stdin.close()
-                status = proc.wait(timeout=1200)
+                status = proc.wait(timeout=1920)
             except BaseException:
                 proc.kill()
                 proc.wait()
