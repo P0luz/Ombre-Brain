@@ -1,6 +1,7 @@
 name: Tests
 
 on:
+  workflow_dispatch:
   push:
     branches: [main, testing, 'fix/security-*']
     paths-ignore:
@@ -105,7 +106,7 @@ jobs:
           docker run -d --name ob-ci-llm --network ob-ci-net \
             -v "$PWD:/workspace:ro" -w /workspace python:3.12-slim \
             python tests/mcp_llm_stub.py
-          docker build -t ombre-brain-ci:local .
+          docker build --label org.opencontainers.image.revision="$GITHUB_SHA" -t ombre-brain-ci:local .
           docker run -d --name ob-ci-app --network ob-ci-net \
             -p 127.0.0.1:18084:8000 \
             -v ob-ci-data:/app/buckets \
@@ -144,9 +145,50 @@ jobs:
           python -m pytest tests/test_web_api_docker_integration.py -q
           --timeout=120
 
+
+      - name: Export tested deployment image
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        run: |
+          docker tag ombre-brain-ci:local nanzhi/ombre-brain:github-${{ github.sha }}
+          docker save nanzhi/ombre-brain:github-${{ github.sha }} | gzip -1 > image.tar.gz
+
+      - name: Preserve tested image for deployment
+        if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+        uses: actions/upload-artifact@v4
+        with:
+          name: nanzhi-image-${{ github.sha }}
+          path: image.tar.gz
+          compression-level: 0
+          retention-days: 3
+
       - name: Clean Docker MCP stack
         if: always()
         run: |
           docker rm -f ob-ci-app ob-ci-llm || true
           docker volume rm ob-ci-data || true
           docker network rm ob-ci-net || true
+
+  deploy-tencent:
+    name: Deploy tested image to Tencent
+    needs: test
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+    concurrency:
+      group: nanzhi-production-ombre-brain
+      cancel-in-progress: false
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          name: nanzhi-image-${{ github.sha }}
+      - name: Deploy with service-scoped key and pinned host identity
+        env:
+          GH_TOKEN: ${{ github.token }}
+          NANZHI_DEPLOY_KEY: ${{ secrets.NANZHI_DEPLOY_KEY }}
+        run: python .github/scripts/nanzhi_deploy.py ombre-brain "${{ github.sha }}" image.tar.gz
