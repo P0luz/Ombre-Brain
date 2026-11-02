@@ -1,4 +1,4 @@
-"""import_memory.py 回归测试 —— 找茬会话（2026-07-15）发现的四个问题。
+"""import_memory.py 回归测试 —— 覆盖历史导入的断点续传、分块与持久化边界。
 
 1. preserve_raw 断点续传重复导入：进度只在整个 chunk 处理完才落盘，崩溃
    重启后同一个 chunk 会被重新提取一遍；preserve_raw 分支原来完全跳过去重。
@@ -7,6 +7,7 @@
 3. 单次提取正文被固定按 12000 字符截断，远小于 chunk 自身 ~10000 token
    的目标预算（对英文/混合内容而言），且不留任何痕迹。
 4. ImportState.save() 无 fsync/长路径前缀（见 utils.atomic_write_text 用法）。
+5. #137：失败 chunk 推进 processed 后，Resume 不能静默跳过未完成工作。
 """
 import hashlib
 import json
@@ -379,6 +380,124 @@ async def test_import_terminal_status_reflects_chunk_failures(
 
     assert result["status"] == expected_status
     assert result["chunks_failed"] == outcomes.count(False)
+
+
+@pytest.mark.asyncio
+async def test_resume_retries_failed_chunk_before_advancing(tmp_path, monkeypatch):
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path), "human": "用户"},
+        FakeBucketManager(),
+        FakeDehydrator(),
+    )
+    engine._chunks = [
+        {"content": "chunk-0"},
+        {"content": "chunk-1"},
+    ]
+    engine.state.reset("history.txt", "hash", 2, job_id="job")
+    calls: list[str] = []
+    chunk0_attempts = 0
+
+    async def process(chunk, _preserve_raw):
+        nonlocal chunk0_attempts
+        name = chunk["content"]
+        calls.append(name)
+        if name == "chunk-0":
+            chunk0_attempts += 1
+            if chunk0_attempts == 1:
+                # 模拟 chunk 0 失败期间用户点击 Pause：本轮会在进入 chunk 1 前暂停。
+                engine._paused = True
+                return False
+        return True
+
+    monkeypatch.setattr(engine, "_process_single_chunk", process)
+
+    first = await engine._process_chunks(False)
+
+    assert first["status"] == "paused"
+    assert first["processed"] == 1
+    assert first["chunks_failed"] == 1
+    assert first["failed_chunk_indices"] == [0]
+    assert calls == ["chunk-0"]
+
+    # Resume：必须先补跑失败的 chunk 0，再从主游标继续 chunk 1。
+    engine._paused = False
+    resumed = await engine._process_chunks(False)
+
+    assert calls == ["chunk-0", "chunk-0", "chunk-1"]
+    assert resumed["processed"] == 2
+    assert resumed["chunks_failed"] == 0
+    assert resumed["failed_chunk_indices"] == []
+    assert resumed["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_failed_chunk_retry_does_not_double_count_failure(tmp_path, monkeypatch):
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path), "human": "用户"},
+        FakeBucketManager(),
+        FakeDehydrator(),
+    )
+    engine._chunks = [
+        {"content": "chunk-0"},
+        {"content": "chunk-1"},
+    ]
+    engine.state.reset("history.txt", "hash", 2, job_id="job")
+    engine.state.data.update({
+        "processed": 1,
+        "chunks_failed": 1,
+        "failed_chunk_indices": [0],
+        "status": "paused",
+    })
+
+    async def process(chunk, _preserve_raw):
+        return chunk["content"] != "chunk-0"
+
+    monkeypatch.setattr(engine, "_process_single_chunk", process)
+
+    result = await engine._process_chunks(False)
+
+    assert result["processed"] == 2
+    assert result["chunks_failed"] == 1
+    assert result["failed_chunk_indices"] == [0]
+    assert result["status"] == "partial"
+
+
+@pytest.mark.asyncio
+async def test_resume_keeps_failure_state_consistent_when_later_chunk_fails(
+    tmp_path, monkeypatch
+):
+    engine = ImportEngine(
+        {"buckets_dir": str(tmp_path), "human": "用户"},
+        FakeBucketManager(),
+        FakeDehydrator(),
+    )
+    engine._chunks = [
+        {"content": "chunk-0"},
+        {"content": "chunk-1"},
+        {"content": "chunk-2"},
+    ]
+    engine.state.reset("history.txt", "hash", 3, job_id="job")
+    engine.state.data.update({
+        "processed": 1,
+        "chunks_failed": 1,
+        "failed_chunk_indices": [0],
+        "status": "paused",
+    })
+    calls: list[str] = []
+
+    async def process(chunk, _preserve_raw):
+        calls.append(chunk["content"])
+        return chunk["content"] != "chunk-1"
+
+    monkeypatch.setattr(engine, "_process_single_chunk", process)
+
+    result = await engine._process_chunks(False)
+
+    assert calls == ["chunk-0", "chunk-1", "chunk-2"]
+    assert result["processed"] == 3
+    assert result["chunks_failed"] == 1
+    assert result["failed_chunk_indices"] == [1]
+    assert result["status"] == "partial"
 
 
 @pytest.mark.asyncio
