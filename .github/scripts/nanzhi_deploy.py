@@ -7,6 +7,7 @@ import re
 import subprocess
 import sys
 import tempfile
+import threading
 import urllib.request
 import urllib.error
 import urllib.parse
@@ -40,18 +41,20 @@ def main():
     request = urllib.request.Request(artifact['archive_download_url'], headers={
         'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json',
     })
-    try:
-        urllib.request.build_opener(NoRedirect()).open(request, timeout=30)
-        raise RuntimeError('Expected signed artifact download location')
-    except urllib.error.HTTPError as exc:
-        if exc.code != 302:
-            raise RuntimeError('Could not obtain artifact download location') from None
-        location = exc.headers['Location']
-    parsed = urllib.parse.urlsplit(location)
-    if parsed.scheme != 'https' or not (parsed.hostname or '').endswith('.blob.core.windows.net'):
-        raise RuntimeError('Unexpected artifact storage host')
+    def signed_location():
+        try:
+            urllib.request.build_opener(NoRedirect()).open(request, timeout=30)
+            raise RuntimeError('Expected signed artifact download location')
+        except urllib.error.HTTPError as exc:
+            if exc.code != 302:
+                raise RuntimeError('Could not obtain artifact download location') from None
+            location = exc.headers['Location']
+        parsed = urllib.parse.urlsplit(location)
+        if parsed.scheme != 'https' or not (parsed.hostname or '').endswith('.blob.core.windows.net'):
+            raise RuntimeError('Unexpected artifact storage host')
+        return location
     header = {'action': 'deploy_url', 'commit': commit, 'bytes': image.stat().st_size, 'sha256': digest,
-              'url': location, 'artifact_bytes': artifact['size_in_bytes']}
+              'url': signed_location(), 'artifact_bytes': artifact['size_in_bytes']}
     known_hosts = Path(__file__).resolve().parent.parent / 'nanzhi-known-hosts'
     with tempfile.TemporaryDirectory(prefix='nanzhi-deploy-') as folder:
         key = Path(folder) / 'key'
@@ -65,14 +68,32 @@ def main():
             '-o', 'ConnectTimeout=20', 'nanzhi-deploy@49.234.39.128',
         ]
         with subprocess.Popen(cmd, stdin=subprocess.PIPE) as proc:
+            stop_refresh = threading.Event()
+            def refresh_url():
+                # Artifact URLs expire in ten minutes. Refresh the same artifact
+                # without transmitting the GitHub credential to the server.
+                while not stop_refresh.wait(180):
+                    try:
+                        renewed = dict(header, url=signed_location())
+                        proc.stdin.write((json.dumps(renewed) + '\n').encode())
+                        proc.stdin.flush()
+                    except (BrokenPipeError, ValueError):
+                        return
+                    except Exception:
+                        # The existing URL remains usable; retry well before expiry.
+                        if stop_refresh.wait(15):
+                            return
             try:
                 proc.stdin.write((json.dumps(header) + '\n').encode())
-                proc.stdin.close()
+                proc.stdin.flush()
+                threading.Thread(target=refresh_url, daemon=True).start()
                 status = proc.wait(timeout=1920)
             except BaseException:
                 proc.kill()
                 proc.wait()
                 raise
+            finally:
+                stop_refresh.set()
         if status:
             raise SystemExit(status)
 

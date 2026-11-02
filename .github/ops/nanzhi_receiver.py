@@ -14,6 +14,7 @@ import sqlite3
 import subprocess
 import sys
 import tarfile
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -75,7 +76,7 @@ def receive(stream, dest, item):
         raise ValueError('archive_integrity_failed')
 
 
-def download_artifact(dest, item):
+def download_artifact(dest, item, locations=None):
     """Bounded parallel HTTPS ranges tolerate slow cross-region single flows."""
     bundle = dest.with_name('artifact.zip')
     size = item['artifact_bytes']
@@ -91,7 +92,7 @@ def download_artifact(dest, item):
             start, end = bounds
             for attempt in range(3):
                 try:
-                    req = urllib.request.Request(item['url'], headers={'Range': f'bytes={start}-{end}'})
+                    req = urllib.request.Request((locations or item)['url'], headers={'Range': f'bytes={start}-{end}'})
                     with urllib.request.build_opener(NoRedirect()).open(req, timeout=90) as response:
                         if response.status != 206 or response.headers.get('Content-Range') != f'bytes {start}-{end}/{size}':
                             raise ValueError('invalid_artifact_range')
@@ -244,7 +245,7 @@ def rehearsal(doc, service, image, job):
         call(cmd + ['down', '--timeout', '60'], timeout=150)
 
 
-def deploy(service, item, stream):
+def deploy(service, item, stream, locations=None):
     job = BASE / 'runs' / (time.strftime('%Y%m%dT%H%M%SZ', time.gmtime()) + '-' + service + '-' + item['commit'][:12])
     job.mkdir(mode=0o700)
     status = {'service': service, 'commit': item['commit'], 'phase': 'receiving'}
@@ -272,7 +273,7 @@ def deploy(service, item, stream):
         if cached:
             status['verified_cached_archive'] = True
         elif item['action'] == 'deploy_url':
-            download_artifact(archive, item)
+            download_artifact(archive, item, locations)
         else:
             receive(stream, archive, item)
         image = 'nanzhi/' + service + ':github-' + item['commit']
@@ -341,9 +342,23 @@ def main():
     if item['action'] == 'check':
         print(json.dumps({'ready': COMPOSE.is_file(), 'service': service, 'protocol': 1}))
         return
+    locations = {'url': item.get('url')}
+    if item['action'] == 'deploy_url':
+        def refresh_locations():
+            while True:
+                try:
+                    renewed = metadata(sys.stdin.buffer)
+                    # A refresh may only replace the signed URL for this exact
+                    # artifact. Content hash/size/commit remain immutable.
+                    if {k: v for k, v in renewed.items() if k != 'url'} != {k: v for k, v in item.items() if k != 'url'}:
+                        return
+                    locations['url'] = renewed['url']
+                except Exception:
+                    return
+        threading.Thread(target=refresh_locations, daemon=True).start()
     with (BASE / 'deployment.lock').open('a') as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
-        print(json.dumps(deploy(service, item, sys.stdin.buffer)))
+        print(json.dumps(deploy(service, item, sys.stdin.buffer, locations)))
 
 
 if __name__ == '__main__':
