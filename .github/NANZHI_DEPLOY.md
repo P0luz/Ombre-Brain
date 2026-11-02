@@ -1,8 +1,8 @@
 # Tencent production deployment
 
-Only `main` push or a manual workflow run on `main` can deploy. Pull requests and other branches never receive the deployment job. The deployment job depends on the existing complete test jobs and transfers the exact image built in that run; it does not rebuild on the server.
+Only `main` push or a manual workflow run on `main` can deploy. Pull requests and other branches never receive the deployment job. The deployment job depends on the existing complete test jobs and downloads the exact image built in that run through a short-lived signed GitHub artifact URL; it does not rebuild on the server.
 
-The client skips a queued commit if `main` has advanced. SSH checks the committed host public key. Each repository has a separate `NANZHI_DEPLOY_KEY` secret, forced to the matching service; it cannot run a shell, forward ports, or deploy another service. Application tokens and data remain on the server.
+The client skips a queued commit if `main` has advanced. SSH checks the committed host public key and sends only the deployment instruction. The server downloads bounded parallel HTTPS ranges from GitHub artifact storage and verifies the final image SHA256; the GitHub token stays in Actions. Each repository has a separate `NANZHI_DEPLOY_KEY` secret, forced to the matching service; it cannot run a shell, forward ports, or deploy another service. Application tokens and data remain on the server.
 
 The root-owned receiver on the server verifies archive digest, size, platform, tag, and revision label. It serializes updates, makes isolated data copies with SQLite online backups, and verifies health, invalid-token rejection, authenticated MCP initialization and tool discovery with external network access disabled. Failure at this stage leaves the running production service unchanged.
 

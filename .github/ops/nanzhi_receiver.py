@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Forced SSH receiver. Each key is bound to one service by authorized_keys."""
 import copy
+import concurrent.futures
 import fcntl
 import hashlib
 import json
@@ -8,11 +9,15 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import sqlite3
 import subprocess
 import sys
 import tarfile
 import time
+import urllib.parse
+import urllib.request
+import zipfile
 
 BASE = Path('/opt/nanzhi-deploy')
 PRODUCTION = Path('/opt/nanzhi-production')
@@ -30,13 +35,21 @@ def call(args, timeout=180, **kwargs):
 
 
 def metadata(stream):
-    line = stream.readline(1025)
-    if len(line) > 1024 or not line.endswith(b'\n'):
+    line = stream.readline(8193)
+    if len(line) > 8192 or not line.endswith(b'\n'):
         raise ValueError('invalid_header_length')
     item = json.loads(line)
     if item == {'action': 'check'}:
         return item
-    if set(item) != {'action', 'commit', 'bytes', 'sha256'} or item['action'] != 'deploy':
+    fields = {'action', 'commit', 'bytes', 'sha256'}
+    if item.get('action') == 'deploy_url':
+        fields |= {'url', 'artifact_bytes'}
+        url = urllib.parse.urlsplit(item.get('url', ''))
+        if url.scheme != 'https' or not (url.hostname or '').endswith('.blob.core.windows.net') or url.username or url.password or url.port not in (None, 443):
+            raise ValueError('untrusted_artifact_url')
+        if type(item.get('artifact_bytes')) is not int or not 0 < item['artifact_bytes'] <= MAX_ARCHIVE:
+            raise ValueError('invalid_artifact_size')
+    if set(item) != fields or item['action'] not in ('deploy', 'deploy_url'):
         raise ValueError('invalid_action')
     if not re.fullmatch('[0-9a-f]{40}', item['commit']):
         raise ValueError('invalid_commit')
@@ -60,6 +73,52 @@ def receive(stream, dest, item):
             remaining -= len(block)
     if stream.read(1) or digest.hexdigest() != item['sha256']:
         raise ValueError('archive_integrity_failed')
+
+
+def download_artifact(dest, item):
+    """Bounded parallel HTTPS ranges tolerate slow cross-region single flows."""
+    bundle = dest.with_name('artifact.zip')
+    size = item['artifact_bytes']
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+    fd = os.open(bundle, os.O_CREAT | os.O_EXCL | os.O_RDWR, 0o600)
+    try:
+        os.ftruncate(fd, size)
+        block = 2 * 1024**2
+        ranges = [(start, min(start + block, size) - 1) for start in range(0, size, block)]
+        def part(bounds):
+            start, end = bounds
+            for attempt in range(3):
+                try:
+                    req = urllib.request.Request(item['url'], headers={'Range': f'bytes={start}-{end}'})
+                    with urllib.request.build_opener(NoRedirect()).open(req, timeout=90) as response:
+                        if response.status != 206 or response.headers.get('Content-Range') != f'bytes {start}-{end}/{size}':
+                            raise ValueError('invalid_artifact_range')
+                        data = response.read(end - start + 2)
+                    if len(data) != end - start + 1:
+                        raise ValueError('truncated_artifact_range')
+                    os.pwrite(fd, data, start)
+                    return
+                except Exception:
+                    if attempt == 2:
+                        raise RuntimeError('artifact_range_download_failed') from None
+                    time.sleep(2)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+            list(pool.map(part, ranges))
+    finally:
+        os.close(fd)
+    with zipfile.ZipFile(bundle) as archive:
+        if archive.namelist() != ['image.tar.gz'] or archive.getinfo('image.tar.gz').file_size != item['bytes']:
+            raise ValueError('unexpected_artifact_contents')
+        digest = hashlib.sha256()
+        with archive.open('image.tar.gz') as source, dest.open('xb') as output:
+            while data := source.read(1024 * 1024):
+                output.write(data)
+                digest.update(data)
+    if digest.hexdigest() != item['sha256']:
+        raise ValueError('artifact_digest_mismatch')
+    bundle.unlink()
 
 
 def snapshot(source, dest):
@@ -190,7 +249,11 @@ def deploy(service, item, stream):
         if shutil.disk_usage(BASE).free < max(5 * 1024**3, item['bytes'] * 4):
             raise RuntimeError('insufficient_disk_space')
         archive = job / 'image.tar.gz'
-        receive(stream, archive, item)
+        record('receiving')
+        if item['action'] == 'deploy_url':
+            download_artifact(archive, item)
+        else:
+            receive(stream, archive, item)
         image = 'nanzhi/' + service + ':github-' + item['commit']
         with tarfile.open(archive, 'r:gz') as tar:
             manifest = json.load(tar.extractfile('manifest.json'))
@@ -249,6 +312,7 @@ def deploy(service, item, stream):
 
 def main():
     os.umask(0o077)
+    signal.alarm(30 * 60)
     if len(sys.argv) != 2 or sys.argv[1] not in SERVICES:
         raise ValueError('service_not_allowed')
     service = sys.argv[1]

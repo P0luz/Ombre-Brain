@@ -7,6 +7,9 @@ import re
 import subprocess
 import sys
 import tempfile
+import urllib.request
+import urllib.error
+import urllib.parse
 
 
 def main():
@@ -24,7 +27,31 @@ def main():
     image = Path(filename)
     with image.open('rb') as source:
         digest = hashlib.file_digest(source, 'sha256').hexdigest()
-    header = {'action': 'deploy', 'commit': commit, 'bytes': image.stat().st_size, 'sha256': digest}
+    artifacts = json.loads(subprocess.check_output([
+        'gh', 'api', 'repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions/runs/' + os.environ['GITHUB_RUN_ID'] + '/artifacts',
+    ], text=True))['artifacts']
+    artifact = next(a for a in artifacts if a['name'] == 'nanzhi-image-' + commit and not a['expired'])
+    api_url = urllib.parse.urlsplit(artifact['archive_download_url'])
+    if api_url.scheme != 'https' or api_url.netloc != 'api.github.com' or not api_url.path.startswith('/repos/' + os.environ['GITHUB_REPOSITORY'] + '/actions/artifacts/'):
+        raise RuntimeError('Unexpected artifact API URL')
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, *args, **kwargs):
+            return None
+    request = urllib.request.Request(artifact['archive_download_url'], headers={
+        'Authorization': 'Bearer ' + os.environ['GH_TOKEN'], 'Accept': 'application/vnd.github+json',
+    })
+    try:
+        urllib.request.build_opener(NoRedirect()).open(request, timeout=30)
+        raise RuntimeError('Expected signed artifact download location')
+    except urllib.error.HTTPError as exc:
+        if exc.code != 302:
+            raise RuntimeError('Could not obtain artifact download location') from None
+        location = exc.headers['Location']
+    parsed = urllib.parse.urlsplit(location)
+    if parsed.scheme != 'https' or not (parsed.hostname or '').endswith('.blob.core.windows.net'):
+        raise RuntimeError('Unexpected artifact storage host')
+    header = {'action': 'deploy_url', 'commit': commit, 'bytes': image.stat().st_size, 'sha256': digest,
+              'url': location, 'artifact_bytes': artifact['size_in_bytes']}
     known_hosts = Path(__file__).resolve().parent.parent / 'nanzhi-known-hosts'
     with tempfile.TemporaryDirectory(prefix='nanzhi-deploy-') as folder:
         key = Path(folder) / 'key'
@@ -40,9 +67,6 @@ def main():
         with subprocess.Popen(cmd, stdin=subprocess.PIPE) as proc:
             try:
                 proc.stdin.write((json.dumps(header) + '\n').encode())
-                with image.open('rb') as source:
-                    while chunk := source.read(1024 * 1024):
-                        proc.stdin.write(chunk)
                 proc.stdin.close()
                 status = proc.wait(timeout=1200)
             except BaseException:
