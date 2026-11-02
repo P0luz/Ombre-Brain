@@ -810,6 +810,7 @@ class ImportState:
             "memories_skipped": 0,
             "memories_raw": 0,
             "chunks_failed": 0,
+            "failed_chunk_indices": [],
             "errors": [],
             "status": "idle",  # idle | running | paused | completed | error
             "job_id": "",
@@ -859,6 +860,7 @@ class ImportState:
             "memories_skipped": 0,
             "memories_raw": 0,
             "chunks_failed": 0,
+            "failed_chunk_indices": [],
             "errors": [],
             "status": "running",
             "job_id": job_id,
@@ -1164,9 +1166,54 @@ class ImportEngine:
             self.release_start_reservation(job_id)
 
     async def _process_chunks(self, preserve_raw: bool) -> dict:
-        """从当前进度开始处理分块。"""
+        """从当前进度开始处理分块；续传时先补跑之前失败的分块。"""
         start_idx = self.state.data["processed"]
         await self._prime_exact_content_hashes()
+
+        # processed 表示主游标已经尝试到哪里；失败分块单独持久化，Resume 时
+        # 必须先补跑它们，否则单靠 processed 会从失败位置之后继续，静默漏块。
+        raw_failed_indices = self.state.data.get("failed_chunk_indices", [])
+        failed_indices: list[int] = []
+        for value in raw_failed_indices if isinstance(raw_failed_indices, list) else []:
+            if isinstance(value, int) and 0 <= value < len(self._chunks) and value not in failed_indices:
+                failed_indices.append(value)
+        self.state.data["failed_chunk_indices"] = failed_indices
+
+        async def process_chunk(index: int) -> bool:
+            chunk = self._chunks[index]
+            try:
+                return await self._process_single_chunk(chunk, preserve_raw)
+            except Exception as e:
+                err_msg = f"分块 {index} 处理失败（{type(e).__name__}）"
+                logger.warning(
+                    "Import chunk failed: index=%s err_type=%s detail=hidden",
+                    index,
+                    type(e).__name__,
+                )
+                if len(self.state.data["errors"]) < _STATE_ERR_LOG_MAX:
+                    self.state.data["errors"].append(err_msg)
+                return False
+
+        # Resume 先重试历史失败分块。成功后解除失败标记；再次失败则保留，
+        # 但不重复增加 chunks_failed。
+        for failed_index in list(failed_indices):
+            if self._paused:
+                self.state.data["status"] = "paused"
+                self.state.save()
+                logger.info(
+                    f"Import paused before retrying failed chunk "
+                    f"{failed_index}/{len(self._chunks)}"
+                )
+                return self.state.to_dict()
+
+            chunk_ok = await process_chunk(failed_index)
+            if chunk_ok:
+                failed_indices.remove(failed_index)
+                self.state.data["failed_chunk_indices"] = failed_indices
+                self.state.data["chunks_failed"] = max(
+                    0, int(self.state.data.get("chunks_failed", 0)) - 1
+                )
+            self.state.save()
 
         for i in range(start_idx, len(self._chunks)):
             if self._paused:
@@ -1175,26 +1222,17 @@ class ImportEngine:
                 logger.info(f"Import paused at chunk {i}/{len(self._chunks)}")
                 return self.state.to_dict()
 
-            chunk = self._chunks[i]
-            try:
-                chunk_ok = await self._process_single_chunk(chunk, preserve_raw)
-            except Exception as e:
-                chunk_ok = False
-                err_msg = f"分块 {i} 处理失败（{type(e).__name__}）"
-                logger.warning(
-                    "Import chunk failed: index=%s err_type=%s detail=hidden",
-                    i,
-                    type(e).__name__,
-                )
-                if len(self.state.data["errors"]) < _STATE_ERR_LOG_MAX:
-                    self.state.data["errors"].append(err_msg)
+            chunk_ok = await process_chunk(i)
             if not chunk_ok:
-                self.state.data["chunks_failed"] = int(
-                    self.state.data.get("chunks_failed", 0)
-                ) + 1
+                if i not in failed_indices:
+                    failed_indices.append(i)
+                    self.state.data["failed_chunk_indices"] = failed_indices
+                    self.state.data["chunks_failed"] = int(
+                        self.state.data.get("chunks_failed", 0)
+                    ) + 1
 
             self.state.data["processed"] = i + 1
-            # 每处理一个分块就保存进度
+            # 每处理一个分块就保存进度；失败索引与主游标一起原子持久化。
             self.state.save()
 
         failed_chunks = int(self.state.data.get("chunks_failed", 0))
