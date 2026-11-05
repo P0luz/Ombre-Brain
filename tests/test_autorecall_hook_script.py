@@ -74,6 +74,8 @@ def test_prompt_posts_and_emits_additional_context(server):
     assert path == "/autorecall/prompt" and token == "tok"
     script = body.pop("script")  # 钩子脚本自身的内容摘要，OB 用它判断脚本是否过期
     assert len(script) == 12 and int(script, 16) >= 0
+    spec = body.pop("injection")
+    assert spec["version"] == 2 and spec["mode"] == "hook" and spec["request_id"] == "p1"
     assert body == {"session_id": "s", "prompt": "还记得火锅吗", "prompt_id": "p1", "cwd": "/w", "client": "claude"}
     assert json.loads(out) == {"hookSpecificOutput": {
         "hookEventName": "UserPromptSubmit", "additionalContext": "记忆：周五吃了火锅"}}
@@ -85,6 +87,7 @@ def test_session_start_and_empty_context_prints_nothing(server):
     assert code == 0 and out == ""
     body = dict(_Recorder.calls[0][2])
     assert len(body.pop("script")) == 12
+    assert body.pop("injection")["delivered"] == []
     assert body == {"session_id": "s", "source": "compact", "cwd": "", "client": "claude"}
 
 
@@ -273,3 +276,112 @@ def test_relay_upstream_error_does_not_spawn_second_relay(tmp_path):
         assert json.loads(state.read_text())["port"] == httpd.server_address[1]
     finally:
         httpd.shutdown()
+
+
+def test_v2_output_receipts_survive_process_restart_and_reset_on_compact(server, tmp_path):
+    env = {"OB_RELAY_STATE": str(tmp_path / "relay.json")}
+    _Recorder.reply = {"protocol": 2, "context": "记忆内容", "receipt_id": "a" * 64}
+    payload = {"session_id": "s", "prompt_id": "p1", "prompt": "记得吗"}
+    assert "记忆内容" in _run("prompt", payload, server, extra_env=env)[1]
+    _run("prompt", {**payload, "prompt_id": "p2"}, server, extra_env=env)
+    assert _Recorder.calls[1][2]["injection"]["delivered"] == ["a" * 64]
+    old_epoch = _Recorder.calls[1][2]["injection"]["epoch"]
+    _Recorder.reply = {"protocol": 2, "context": ""}
+    _run("session-start", {"session_id": "s", "source": "compact"}, server, extra_env=env)
+    spec = _Recorder.calls[-1][2]["injection"]
+    assert spec["epoch"] != old_epoch and spec["delivered"] == []
+    _run("prompt", {**payload, "prompt_id": "p3"}, server, extra_env=env)
+    assert _Recorder.calls[-1][2]["injection"]["delivered"] == []
+    files = list((tmp_path / "injections").glob("*.json"))
+    assert len(files) == 1 and "记忆内容" not in files[0].read_text()
+    assert files[0].stat().st_mode & 0o777 == 0o600
+
+
+def test_v2_concurrent_process_receipts_are_merged(tmp_path):
+    path = tmp_path / "receipt.json"
+    path.write_text(json.dumps({"epoch": "e", "delivered": []}))
+    worker = '''
+import importlib.util, json, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("hook", sys.argv[1])
+hook = importlib.util.module_from_spec(spec); spec.loader.exec_module(hook)
+path, name = Path(sys.argv[2]), sys.argv[3]
+original = hook._write_delivery
+def slow_write(*args):
+    time.sleep(0.2)
+    original(*args)
+hook._write_delivery = slow_write
+(path.parent / name).touch()
+deadline = time.monotonic() + 5
+while not (path.parent / "go").exists():
+    assert time.monotonic() < deadline
+    time.sleep(0.01)
+hook._delivery_output((path, {"epoch": "e"}), {"protocol": 2, "receipt_id": name * 64})
+'''
+    env = {**os.environ, "OB_RELAY_STATE": str(tmp_path / "relay.json")}
+    processes = [subprocess.Popen([sys.executable, "-c", worker, str(SCRIPT), str(path), name], env=env)
+                 for name in ("a", "b")]
+    try:
+        deadline = time.monotonic() + 5
+        while not all((tmp_path / name).exists() for name in ("a", "b")):
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        (tmp_path / "go").touch()
+        for process in processes:
+            assert process.wait(timeout=5) == 0
+        assert set(json.loads(path.read_text())["delivered"]) == {"a" * 64, "b" * 64}
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait()
+
+
+def test_v2_compact_discards_late_receipt_and_request_keeps_current_receipts(tmp_path, monkeypatch):
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("hook", SCRIPT)
+    hook = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(hook)
+    monkeypatch.setenv("OB_RELAY_STATE", str(tmp_path / "relay.json"))
+    payload = {"session_id": "s", "client": "claude", "cwd": "/work"}
+    old = hook._delivery_request(dict(payload), "prompt")
+    current = hook._delivery_request({**payload, "source": "compact"}, "session-start")
+    assert old[1]["epoch"] != current[1]["epoch"]
+    hook._delivery_output(current, {"protocol": 2, "receipt_id": "b" * 64})
+    hook._delivery_output(old, {"protocol": 2, "receipt_id": "a" * 64})
+    read = hook._delivery_request(dict(payload), "prompt")
+    assert read[1]["delivered"] == ["b" * 64]
+    # 普通 prompt 只读回执，不再把之前读取的整份状态重写回去。
+    monkeypatch.setattr(hook, "_write_delivery", lambda *args: pytest.fail("普通请求不应重写回执"))
+    assert hook._delivery_request(dict(payload), "prompt")[1] == read[1]
+
+
+def test_v2_receipt_lock_is_released_when_process_exits(tmp_path):
+    worker = '''
+import importlib.util, sys, time
+from pathlib import Path
+spec = importlib.util.spec_from_file_location("hook", sys.argv[1])
+hook = importlib.util.module_from_spec(spec); spec.loader.exec_module(hook)
+with hook._delivery_lock(Path(sys.argv[2])):
+    (Path(sys.argv[2]) / "ready").touch()
+    time.sleep(30)
+'''
+    process = subprocess.Popen([sys.executable, "-c", worker, str(SCRIPT), str(tmp_path)])
+    try:
+        deadline = time.monotonic() + 5
+        while not (tmp_path / "ready").exists():
+            assert time.monotonic() < deadline
+            time.sleep(0.01)
+        process.kill()
+        process.wait(timeout=5)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("hook", SCRIPT)
+        hook = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(hook)
+        with hook._delivery_lock(tmp_path):
+            pass
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()

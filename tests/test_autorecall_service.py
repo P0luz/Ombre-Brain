@@ -402,3 +402,343 @@ def test_snapshot_validator(tmp_path):
     conn.close()
     with pytest.raises(Exception):
         validate_transcript_snapshot_file(bad)
+
+
+def _gateway_request(history, roles=None, **extra):
+    import hashlib
+    return {"session_id": "gateway-test", "cwd": "/work", "client": "gateway", "prompt": "还记得火锅吗",
+            "injection": {"version": 2, "mode": "gateway", "history": [hashlib.sha256(x.encode()).hexdigest() for x in history],
+                          "roles": roles or ["user" if i % 2 == 0 else "assistant" for i in range(len(history))],
+                          "policy": "a" * 64}, **extra}
+
+
+def _hook_request(key, delivered=(), epoch="first", **extra):
+    return {"session_id": "hook-test", "cwd": "/work", "client": "claude", "prompt_id": key,
+            "prompt": "还记得火锅吗", "injection": {"version": 2, "mode": "hook", "epoch": epoch,
+            "request_id": key, "delivered": list(delivered)}, **extra}
+
+
+@pytest.mark.asyncio
+async def test_v2_gateway_replay_dedupe_trim_and_restart(tmp_path):
+    svc = _svc(tmp_path, [_b("hotpot", "重庆火锅")], agree_top=0, restore_rounds=0)
+    first = await svc.prepare_injection(_gateway_request(["u1"]), "prompt")
+    assert "重庆火锅" in first["context"]
+    second = await svc.prepare_injection(_gateway_request(["u1", "a1", "u2"]), "prompt")
+    assert second["context"] == ""
+    assert second["placements"][0]["context"] == first["context"]
+    svc = _svc(tmp_path, [_b("hotpot", "已经改写的火锅")], agree_top=0, restore_rounds=0)
+    retry = await svc.prepare_injection(_gateway_request(["u1"]), "prompt")
+    assert retry["context"] == first["context"]  # 重启和记忆改版都不能改写重试快照。
+    cropped = await svc.prepare_injection(_gateway_request(["u2", "a2", "u3"]), "prompt")
+    assert "已经改写的火锅" in cropped["context"]  # 旧注入已退出实际窗口。
+    assert cropped["placements"][0]["context"] == ""
+
+
+@pytest.mark.asyncio
+async def test_v2_tool_continuation_replays_without_storing_prompt(tmp_path):
+    svc = _svc(tmp_path, [_b("hotpot", "重庆火锅")], agree_top=0)
+    first = await svc.prepare_injection(_gateway_request(["u"]), "prompt")
+    count = svc.store.counts()
+    out = await svc.prepare_injection(_gateway_request(["u", "call", "result"], ["user", "assistant", "tool"]), "prompt")
+    assert out["placements"][0]["context"] == first["context"]
+    assert svc.store.counts() == count
+
+
+@pytest.mark.asyncio
+async def test_v2_hook_only_delivered_receipts_cover_and_compact_releases(tmp_path):
+    svc = _svc(tmp_path, [_b("hotpot", "重庆火锅")], agree_top=0)
+    first = await svc.prepare_injection(_hook_request("p1"), "prompt")
+    lost = await svc.prepare_injection(_hook_request("p2"), "prompt")
+    assert "重庆火锅" in lost["context"]  # p1 没有回执，不能假定已经送到。
+    assert (await svc.prepare_injection(_hook_request("p3", [first["receipt_id"]]), "prompt"))["context"] == ""
+    assert "重庆火锅" in (await svc.prepare_injection(_hook_request("p4", [first["receipt_id"]], "after-compact"), "prompt"))["context"]
+    assert "重庆火锅" in (await svc.prepare_injection(_hook_request("p5", [first["receipt_id"]], cwd="/other"), "prompt"))["context"]
+    assert (await svc.prepare_injection(_hook_request("p1"), "prompt"))["context"] == first["context"]
+
+
+@pytest.mark.asyncio
+async def test_v2_changes_and_ambiguous_suffix_do_not_replay_wrong_branch(tmp_path):
+    svc = _svc(tmp_path, [_b("hotpot", "重庆火锅")], agree_top=0)
+    await svc.prepare_injection(_gateway_request(["old-root", "a", "same"]), "prompt")
+    svc.bucket_mgr.buckets["hotpot"]["content"] = "成都火锅"
+    await svc.prepare_injection(_gateway_request(["new-root", "b", "same"]), "prompt")
+    out = await svc.prepare_injection(_gateway_request(["same", "reply", "next"]), "prompt")
+    assert [p["index"] for p in out["placements"]] == [2]  # 无法辨别分支，不猜历史位置。
+    assert "成都火锅" in out["context"]
+
+
+@pytest.mark.asyncio
+async def test_v2_combined_budget_and_failed_save_dont_claim_delivery(tmp_path, monkeypatch):
+    from ombrebrain.autorecall.service import _units
+    async def dream():
+        return "梦😀" * 4000
+    svc = _svc(tmp_path, [_b("hotpot", "火锅😀" * 1000)], agree_top=0, dream=dream, max_chars=1000)
+    out = await svc.prepare_injection(_gateway_request(["u1"]), "prompt")
+    assert _units(out["context"]) <= 1000
+    original = svc.store.save_injection_state
+    def fail(*args):
+        raise OSError("disk full")
+    monkeypatch.setattr(svc.store, "save_injection_state", fail)
+    with pytest.raises(OSError):
+        await svc.prepare_injection(_hook_request("p1"), "prompt")
+    monkeypatch.setattr(svc.store, "save_injection_state", original)
+    assert "火锅" in (await svc.prepare_injection(_hook_request("p1"), "prompt"))["context"]
+
+
+def test_v2_snapshot_is_backup_compatible_and_rejects_stale_commit(tmp_path):
+    store = TranscriptStore(tmp_path)
+    state = store.injection_state("a")
+    store.save_injection_state("a", state)
+    validate_transcript_snapshot_file(store.path)
+    with pytest.raises(Exception, match="changed"):
+        store.save_injection_state("a", state)
+    assert store.injection_state("a")["revision"] == 1
+
+
+@pytest.mark.asyncio
+async def test_v2_concurrent_retry_and_new_memory_version(tmp_path):
+    svc = _svc(tmp_path, [_b("hotpot", "重庆火锅")], agree_top=0)
+    request = _hook_request("p1")
+    first, retry = await asyncio.gather(svc.prepare_injection(request, "prompt"), svc.prepare_injection(request, "prompt"))
+    assert first == retry and svc.store.counts()["turns"] == 1
+    svc.bucket_mgr.buckets["hotpot"]["metadata"]["last_active"] = "以后"
+    assert (await svc.prepare_injection(_hook_request("p2", [first["receipt_id"]]), "prompt"))["context"] == ""
+    svc.bucket_mgr.buckets["hotpot"]["content"] = "成都火锅"
+    changed = await svc.prepare_injection(_hook_request("p3", [first["receipt_id"]]), "prompt")
+    assert "成都火锅" in changed["context"] and "新版本" in changed["context"]
+    assert (await svc.prepare_injection(request, "prompt"))["context"] == first["context"]
+
+
+def test_v2_retention_does_not_delete_transcripts(tmp_path):
+    store = TranscriptStore(tmp_path)
+    store.append("s", [{"role": "user", "text": "需要保留的原文"}])
+    state = {"revision": 0, "records": [{"id": str(i), "context": "x" * 20000} for i in range(150)]}
+    store.save_injection_state("a", state)
+    saved = store.injection_state("a")
+    assert len(saved["records"]) < 128 and saved["records"][-1]["id"] == "149"
+    assert store.session_turns("s")[0]["text"] == "需要保留的原文"
+
+
+@pytest.mark.asyncio
+async def test_v2_independent_session_does_not_wait_for_slow_recall(tmp_path):
+    svc = _svc(tmp_path, restore_rounds=0)
+    entered, release = asyncio.Event(), asyncio.Event()
+    original = svc._prompt_content
+
+    async def slow(sid, *args, **kwargs):
+        if sid == "slow":
+            entered.set()
+            await release.wait()
+        return await original(sid, *args, **kwargs)
+
+    svc._prompt_content = slow
+    task = asyncio.create_task(svc.prepare_injection(_hook_request("p1", session_id="slow"), "prompt"))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        other = await asyncio.wait_for(svc.prepare_injection(_hook_request("p1", session_id="other"), "prompt"), 2)
+        assert other["protocol"] == 2 and not task.done()
+    finally:
+        release.set()
+        await task
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["gateway", "hook"])
+async def test_v2_failed_snapshot_returns_dream_quota(tmp_path, monkeypatch, mode):
+    async def dream():
+        return "尚未交付的今日回顾"
+
+    svc = _svc(tmp_path, dream=dream, restore_rounds=0)
+    request = _gateway_request(["u1"]) if mode == "gateway" else _hook_request("start", source="startup")
+    event = "prompt" if mode == "gateway" else "session-start"
+    original = svc.store.save_injection_state
+
+    def fail(*args):
+        raise OSError("模拟快照写盘失败")
+
+    monkeypatch.setattr(svc.store, "save_injection_state", fail)
+    with pytest.raises(OSError):
+        await svc.prepare_injection(request, event)
+    assert not svc.store.daily_used("dream_injected", "2026-10-14")
+    monkeypatch.setattr(svc.store, "save_injection_state", original)
+    result = await svc.prepare_injection(request, event)
+    assert "尚未交付的今日回顾" in result["context"]
+    assert svc.store.daily_used("dream_injected", "2026-10-14")
+    assert (await svc.prepare_injection(request, event))["context"] == result["context"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("fail_write", [False, True])
+async def test_v2_cancel_during_snapshot_waits_for_actual_commit(tmp_path, monkeypatch, fail_write):
+    import threading
+
+    async def dream():
+        return "取消时仍需保留的回顾"
+
+    svc = _svc(tmp_path, dream=dream, restore_rounds=0)
+    entered, release = threading.Event(), threading.Event()
+    original = svc.store.save_injection_state
+    request = _gateway_request(["u1"])
+
+    def blocked(*args):
+        entered.set()
+        assert release.wait(5)
+        if fail_write:
+            raise OSError("模拟取消后写盘失败")
+        return original(*args)
+
+    monkeypatch.setattr(svc.store, "save_injection_state", blocked)
+    task = asyncio.create_task(svc.prepare_injection(request, "prompt"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+    with pytest.raises((asyncio.CancelledError, OSError)):
+        await task
+    assert svc.store.daily_used("dream_injected", "2026-10-14") is (not fail_write)
+    monkeypatch.setattr(svc.store, "save_injection_state", original)
+    retry = await svc.prepare_injection(request, "prompt")
+    assert "取消时仍需保留的回顾" in retry["context"]
+    assert svc.store.daily_used("dream_injected", "2026-10-14")
+
+
+@pytest.mark.asyncio
+async def test_v2_cancel_during_dream_releases_own_quota(tmp_path):
+    entered = asyncio.Event()
+
+    async def dream():
+        entered.set()
+        await asyncio.Event().wait()
+
+    svc = _svc(tmp_path, dream=dream, restore_rounds=0)
+    task = asyncio.create_task(svc.prepare_injection(_gateway_request(["u1"]), "prompt"))
+    await asyncio.wait_for(entered.wait(), 2)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not svc.store.daily_used("dream_injected", "2026-10-14")
+
+
+@pytest.mark.asyncio
+async def test_v2_failed_other_session_does_not_release_successful_dream(tmp_path, monkeypatch):
+    async def dream():
+        return "已交付的回顾"
+
+    svc = _svc(tmp_path, dream=dream, restore_rounds=0)
+    await svc.prepare_injection(_gateway_request(["u1"]), "prompt")
+
+    def fail(*args):
+        raise OSError("另一会话写盘失败")
+
+    monkeypatch.setattr(svc.store, "save_injection_state", fail)
+    with pytest.raises(OSError):
+        await svc.prepare_injection(_gateway_request(["u2"], session_id="other"), "prompt")
+    assert svc.store.daily_used("dream_injected", "2026-10-14")
+
+
+@pytest.mark.asyncio
+async def test_v2_cancel_during_quota_claim_does_not_leak_quota(tmp_path, monkeypatch):
+    import threading
+
+    async def dream():
+        pytest.fail("已取消的请求不应继续生成 dream")
+
+    svc = _svc(tmp_path, dream=dream, restore_rounds=0)
+    entered, release = threading.Event(), threading.Event()
+    original = svc.store.claim_daily
+
+    def blocked(*args):
+        acquired = original(*args)
+        entered.set()
+        assert release.wait(5)
+        return acquired
+
+    monkeypatch.setattr(svc.store, "claim_daily", blocked)
+    task = asyncio.create_task(svc.prepare_injection(_gateway_request(["u1"]), "prompt"))
+    try:
+        assert await asyncio.to_thread(entered.wait, 2)
+        task.cancel()
+        await asyncio.sleep(0)
+    finally:
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not svc.store.daily_used("dream_injected", "2026-10-14")
+
+
+@pytest.mark.asyncio
+async def test_v2_empty_dream_does_not_consume_quota_with_saved_snapshot(tmp_path):
+    async def dream():
+        return ""
+
+    svc = _svc(tmp_path, dream=dream, restore_rounds=0)
+    result = await svc.prepare_injection(_gateway_request(["u1"]), "prompt")
+    assert result["receipt_id"]
+    assert not svc.store.daily_used("dream_injected", "2026-10-14")
+
+
+@pytest.mark.asyncio
+async def test_v2_empty_turns_preserve_live_snapshot_and_empty_retry(tmp_path):
+    svc = _svc(tmp_path, [_b("hotpot", "重庆火锅")], agree_top=0, restore_rounds=0,
+               dream_on_start=False, reminder_every=0)
+    history = []
+    for turn in range(130):
+        if history:
+            history.append(f"a{turn}")
+        history.append(f"u{turn}")
+        request = _gateway_request(list(history))
+        result = await svc.prepare_injection(request, "prompt")
+        if turn == 0:
+            first = result["context"]
+            assert "重庆火锅" in first
+        else:
+            assert result["context"] == "", f"第 {turn + 1} 轮重复注入"
+            assert result["placements"][0]["context"] == first
+        if turn == 100:
+            empty_retry = request
+    # 重启、记忆更新后重试旧的空结果，不能把新内容补进旧请求。
+    restarted = _svc(tmp_path, [_b("hotpot", "成都火锅")], agree_top=0)
+    assert (await restarted.prepare_injection(empty_retry, "prompt"))["context"] == ""
+
+
+def test_v2_compact_state_shares_prefixes_and_reads_legacy(tmp_path):
+    import hashlib
+    import json
+
+    store = TranscriptStore(tmp_path)
+    path = [hashlib.sha256(str(i).encode()).hexdigest() for i in range(200)]
+    records = [{"id": str(i), "context": "记忆" if i == 0 else "", "refs": ["m@v"] if i == 0 else [],
+                "path": path[:i + 1], "policy": "p"} for i in range(100)]
+    legacy = {"revision": 1, "records": records}
+    connection = store._connect(create=True)
+    connection.execute("INSERT INTO module_state VALUES (?, ?)", ("injection:v2:legacy", json.dumps(legacy)))
+    connection.close()
+    state = store.injection_state("legacy")
+    assert state == legacy
+    store.save_injection_state("legacy", state)
+    restored = TranscriptStore(tmp_path).injection_state("legacy")
+    assert restored["records"] == records
+    raw = store._read("SELECT value FROM module_state WHERE key = ?", ("injection:v2:legacy",))[0]["value"]
+    assert len(raw.encode()) < len(json.dumps(legacy).encode()) / 3
+    validate_transcript_snapshot_file(store.path)
+
+
+def test_v2_snapshot_and_empty_retry_limits_are_independent(tmp_path):
+    store = TranscriptStore(tmp_path)
+    live = {"id": "live", "context": "仍在窗口里的记忆", "refs": ["m@v"], "path": ["root"], "policy": "p"}
+    empty = [{"id": str(i), "context": "", "refs": [], "path": ["root", str(i)], "policy": "p"}
+             for i in range(300)]
+    store.save_injection_state("a", {"revision": 0, "records": [live, *empty]})
+    saved = store.injection_state("a")["records"]
+    assert saved[0] == live
+    assert len(saved) == 129 and saved[1]["id"] == "172" and saved[-1]["id"] == "299"
+
+
+def test_v2_compact_paths_keep_branches_distinct(tmp_path):
+    store = TranscriptStore(tmp_path)
+    records = [{"id": str(i), "context": "记忆", "refs": [], "policy": "p", "path": path}
+               for i, path in enumerate([["root", "a", "same"], ["root", "b", "same"], ["other", "a", "same"]])]
+    store.save_injection_state("branches", {"revision": 0, "records": records})
+    assert store.injection_state("branches")["records"] == records

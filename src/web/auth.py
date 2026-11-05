@@ -11,9 +11,14 @@ web/auth.py — Dashboard 鉴权相关 HTTP 路由
 """
 
 import asyncio
+import hashlib
 import ipaddress
+import math
 import os
+import sqlite3
 import threading
+import time
+from contextlib import closing
 
 from starlette.requests import Request
 from starlette.responses import Response
@@ -24,6 +29,34 @@ _MAX_PASSWORD_CHARS = 1024
 _MAX_SECURITY_QUESTION_CHARS = 500
 _MAX_SECURITY_ANSWER_CHARS = 1024
 _PASSWORD_WORK_MAX_CONCURRENCY = 2
+_RECOVERY_WINDOW_SECONDS = 900
+_RECOVERY_SOURCE_ATTEMPTS = 5
+_RECOVERY_TOTAL_ATTEMPTS = 20
+
+
+def _reserve_recovery_attempt(request) -> int:
+    """事务预占恢复额度；重启、并发和客户端断开都不能返还已用额度。"""
+    path = os.path.join(sh.config["buckets_dir"], ".recovery_limits.sqlite3")
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    fd = os.open(path, os.O_CREAT | os.O_RDWR, 0o600)
+    os.close(fd)
+    source = hashlib.sha256(sh._client_key(request).encode("utf-8")).hexdigest()
+    with closing(sqlite3.connect(path, timeout=2)) as db, db:
+        db.execute("BEGIN IMMEDIATE")
+        db.execute("CREATE TABLE IF NOT EXISTS attempts (source TEXT NOT NULL, at REAL NOT NULL)")
+        now = time.time()
+        db.execute("DELETE FROM attempts WHERE at <= ?", (now - _RECOVERY_WINDOW_SECONDS,))
+        rows = db.execute("SELECT source, at FROM attempts ORDER BY at").fetchall()
+        own = [at for key, at in rows if key == source]
+        waits = []
+        if len(own) >= _RECOVERY_SOURCE_ATTEMPTS:
+            waits.append(own[-_RECOVERY_SOURCE_ATTEMPTS] + _RECOVERY_WINDOW_SECONDS - now)
+        if len(rows) >= _RECOVERY_TOTAL_ATTEMPTS:
+            waits.append(rows[-_RECOVERY_TOTAL_ATTEMPTS][1] + _RECOVERY_WINDOW_SECONDS - now)
+        if waits:
+            return max(1, math.ceil(max(waits)))
+        db.execute("INSERT INTO attempts VALUES (?, ?)", (source, now))
+    return 0
 
 
 class _CrossLoopSemaphore:
@@ -436,7 +469,10 @@ def register(mcp) -> None:
             return JSONResponse({"error": "当前使用环境变量密码，无法通过安全问题重置"}, status_code=400)
         if not sh._load_auth_data().get("security_answer_hash"):
             return JSONResponse({"error": "未设置安全问题，无法使用急救模式"}, status_code=400)
-        retry = sh._login_retry_after(request)
+        try:
+            retry = await asyncio.to_thread(_reserve_recovery_attempt, request)
+        except Exception as e:
+            return _persistence_failure_response("recovery rate limit", e)
         if retry:
             return JSONResponse(
                 {"error": f"尝试过于频繁，请 {retry} 秒后再试"},
@@ -449,35 +485,18 @@ def register(mcp) -> None:
             return JSONResponse({"error": "Invalid JSON"}, status_code=400)
         body = _json_object(body)
         if body is None:
-            sh._record_login_failure(request)
             return JSONResponse({"error": "JSON body must be an object"}, status_code=400)
         answer = body.get("answer", "")
         new_pwd = body.get("new_password", "")
         if not isinstance(answer, str) or not isinstance(new_pwd, str):
-            sh._record_login_failure(request)
             return JSONResponse({"error": "恢复参数格式无效"}, status_code=400)
         new_pwd = new_pwd.strip()
         if len(answer) > _MAX_SECURITY_ANSWER_CHARS:
-            sh._record_login_failure(request)
             return JSONResponse({"error": "答案格式无效"}, status_code=400)
-        global_retry = sh._reserve_global_login_attempt()
-        if global_retry:
-            return JSONResponse(
-                {"error": f"登录服务繁忙，请 {global_retry} 秒后重试"},
-                status_code=429,
-                headers={"Retry-After": str(global_retry)},
-            )
-        verified, queued_retry = await _run_public_password_verification(
-            request, sh._verify_security_answer_for_rotation, answer
+        verified = await _run_password_work(
+            sh._verify_security_answer_for_rotation, answer
         )
-        if queued_retry:
-            return JSONResponse(
-                {"error": f"尝试过于频繁，请 {queued_retry} 秒后再试"},
-                status_code=429,
-                headers={"Retry-After": str(queued_retry)},
-            )
         if not verified:
-            sh._record_login_failure(request)
             return JSONResponse({"error": "答案不正确"}, status_code=401)
         if not 6 <= len(new_pwd) <= _MAX_PASSWORD_CHARS:
             return JSONResponse({"error": "新密码长度必须在 6-1024 位之间"}, status_code=400)
@@ -492,7 +511,6 @@ def register(mcp) -> None:
                 status_code=409,
                 headers={"Cache-Control": "no-store"},
             )
-        sh._record_login_success(request)
         resp = JSONResponse({"ok": True})
         sh._set_session_cookie(resp, token, request)
         return resp
@@ -527,6 +545,24 @@ def register(mcp) -> None:
         generation = sh._authenticated_credential_generation(request)
         if generation is None:
             return JSONResponse({"error": "Unauthorized"}, status_code=401)
+        current = body.get("current", "")
+        if not isinstance(current, str) or not current or len(current) > _MAX_PASSWORD_CHARS:
+            return JSONResponse({"error": "请提供当前密码"}, status_code=400)
+        retry = sh._login_retry_after(request) or sh._reserve_global_login_attempt()
+        if retry:
+            return JSONResponse({"error": "尝试过于频繁，请稍后再试"}, status_code=429,
+                                headers={"Retry-After": str(retry)})
+        proof, retry = await _run_public_password_verification(
+            request, sh._verify_password_for_rotation, current
+        )
+        if retry:
+            return JSONResponse({"error": "尝试过于频繁，请稍后再试"}, status_code=429,
+                                headers={"Retry-After": str(retry)})
+        if not proof:
+            sh._record_login_failure(request)
+            return JSONResponse({"error": "当前密码错误"}, status_code=401)
+        if proof.generation != generation:
+            return JSONResponse({"error": "凭据已变更，请重试"}, status_code=409)
         try:
             saved = await _run_password_work(
                 sh._save_security_qa,

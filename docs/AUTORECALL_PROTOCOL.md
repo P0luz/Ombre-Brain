@@ -50,9 +50,59 @@ Ombre Brain 的自动召回不绑定任何客户端。Claude Code 的钩子只�
 
 ## 自检与体检
 
-- `POST /autorecall/status`（同样的 token）→ `{"enabled", "seen": {事件: 最后到达时间}}`。
+- `POST /autorecall/status`（同样的 token）→ `{"enabled", "seen": {事件: 最后到达时间}, "injection_protocol": 2}`。
 - `session_id` 以 `ob-check-` 开头的请求只记「到过」，不存任何东西，可以拿来做连通性自检。
 - Dashboard 卡片显示每个事件最后到达的时间，断了会标红。
+
+## 4.1：注入快照与上下文去重
+
+此扩展借鉴巴别塔的历史快照和窗口覆盖机制，不改变 OB 的记忆真源、检索排序、MCP 工具或遗忘规则。
+不带 `injection` 的旧调用仍按上面的四接口工作；新版网关先查询 status，旧服务端仍走旧模式。
+
+### 网关模式
+
+`prompt` 额外带 `injection: {version: 2, mode: "gateway", history, roles, policy}`：
+
+- `history`：每条非 system/developer 消息的 SHA-256（规范 JSON：键排序、UTF-8、无额外空白）；包括工具调用和结果，最多 2000 条。正文和图片不随指纹发送。
+- `roles`：与 history 等长，取 user/assistant/tool。最后是 user 时携带当前 `prompt` 和 `prompt_id`；否则只重放，不新增召回或原文。
+- `policy`：所有 system/developer 消息及位置的同算法摘要。
+- 返回 `protocol: 2, context, receipt_id?, placements: [{index, context, receipt_id}]`。index 指向 history 的位置；网关只在该 user 消息前加参考块，不改 system，不裁剪客户端历史。
+
+完整前缀一致时重放原快照；客户端裁掉开头时，只允许唯一匹配的历史后缀重放。最新 user 不靠后缀猜重试，多分支重复文本有歧义时不恢复该历史位置。
+窗口内已重放的同版本记忆不再新增；退出窗口可重新召回。正文更新形成新版本，旧历史不改写。重试、服务端和网关重启均复用保留范围内的快照。
+请用 `X-OB-Session` 提供稳定且各会话独立的 ID；没有它只能按 system 和第一句推断，相同开头、裁剪首句或修改 system 时不能保证会话识别。该头不转发给模型商。
+
+首轮接续、dream、提醒和召回共用 `autorecall.max_chars`，沿用 UTF-16 计数（默认 9000，上限 10000），不是精确 token 预算。预算只限制本轮新增内容，已在历史里的快照不重新截断。首轮服务端沿用 session-start 超时，其他轮沿用 prompt 超时。
+
+### MCP + hook 模式
+
+Claude Code、Codex CLI、旧 Gemini CLI 的新版脚本在 session-start/prompt 带：
+`injection: {version: 2, mode: "hook", epoch, request_id, delivered: [receipt_id]}`。
+
+- epoch 是上下文阶段；startup/clear/compact 更换它，resume 保留。request_id 使用本轮 ID；没有 ID 的客户端仍用随机键，不能保证无 ID 事件的重投幂等。
+- 只有成功输出到 stdout 后，脚本才保存回执；下一次请求带回它。服务端准备结果不等于已交付，未带回执的快照不会压制另一轮召回。
+- 本机回执仅包含阶段与 ID，放在现有 hook 状态目录下的 `injections/`，0600、原子替换，最多 1000 份，每份最多 128 个 ID；不保存正文。按服务地址、凭据摘要、客户端、目录和会话隔离。
+- 4.1.2 起，目录内的 `.delivery.lock` 保护回执读改写和阶段重置，最多等待 1 秒，不跨网络调用持锁；进程退出由操作系统释放。锁文件保留以避免并发进程锁住不同文件；普通 prompt 不再重写整份回执。锁超时会记录错误并按现有失败路径降级，不能保证该次回执入账。
+- 回执只能证明脚本输出过；当前适配器不能确认宿主仍保留哪些消息。没有收到压缩事件、宿主另行裁剪或回滚历史时，不能提供精确窗口去重保证。
+- MCP 的 breath/breath_search 仍可主动重新读取，不受自动覆盖抑制。本轮不根据 token、工作目录或 MCP 连接猜测跨入口会话绑定。
+- Antigravity、Open WebUI Filter、通用 SDK 暂保留原协议，不宣称具备 v2 快照能力。
+
+同一段对话只指定一个自动入口：若走网关，在 Dashboard 关闭对应客户端的自动召回开关；若走 hook，则不再经过记忆网关。关闭客户端自动召回不关闭 MCP。
+
+### 持久化、失败与保留范围
+
+快照在现有 `.autorecall/transcript.sqlite3` 的 module_state 表保存，含实际注入正文、版本引用和历史指纹；旧备份可读，新备份沿用原模块校验。按客户端、作用域、会话、模式及阶段隔离。
+4.1.2 起，每份分别保留最多 128 条有正文的快照和 128 条空结果重试记录，共用约 2 MiB 上限；容量不足先淘汰空重试，再淘汰最早的正文。空重试只存请求身份、历史位置和策略指纹，不重复保存空正文与空引用。超过空重试保留范围的旧请求不保证仍返回原空结果。
+落盘历史采用共享前缀的节点表，读取时还原原有历史路径，分支和裁剪匹配规则不变。旧编码直接可读，下次保存时转换；已被旧版本淘汰的快照无法恢复。新编码的派生状态需由 4.1.2 或更新版本读取，降级前须保留兼容备份。
+整个注入状态仍最多 1000 份或 64 MiB（逻辑内容大小）；只淘汰派生状态，不删除原文和记忆。超出正文保留范围不保证旧快照重放，缺失覆盖时允许按相关性再次召回。
+快照写盘成功后才返回；并发提交比较版本，冲突返回失败，客户端可重试。OB 失联时网关继续转发原请求，这一轮可能缺少历史注入；不把这种降级称为缓存稳定。
+
+4.1.1 起，进程内按上述注入作用域串行准备快照，不同作用域的慢召回互不占用同一把锁；闲置锁自动回收。
+网关首轮及 hook 开窗请求记录自己领取的 dream 额度：快照写盘失败或请求取消且未保存时归还，成功保存后保留，重试读取原快照。取消协程不会停止 SQLite 线程，因此取消返回前须等待已经启动的额度或快照写入完成，再决定是否归还；不会释放其他请求领取的额度。
+此恢复保证覆盖可处理的异常和协程取消，不覆盖进程被强制终止或额度归还本身持续写盘失败；数据库格式保持不变。
+
+验证入口：`tests/test_autorecall_service.py`、`tests/test_autorecall_gateway.py`、`tests/test_autorecall_endpoints.py`、`tests/test_autorecall_hook_script.py`、`tests/test_autorecall_client_contracts.py`。
+本机可执行 `NO_PROXY=127.0.0.1,localhost no_proxy=127.0.0.1,localhost .venv/bin/pytest tests/test_autorecall*.py -q --tb=short`。测试使用临时库和模型/向量替身；真实供应商缓存命中率与客户端压缩行为须另行实测。
 
 ## 最小示例（Python）
 

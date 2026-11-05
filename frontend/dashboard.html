@@ -2722,6 +2722,7 @@
         <div style="font-weight:600;font-size:13px;margin-bottom:6px;">急救安全问题 <span class="en">Recovery Question</span></div>
         <div style="font-size:12px;color:var(--text-dim);margin-bottom:8px;">忘记密码时，凭此问题重置密码进入急救模式。</div>
         <div id="settings-qa-form">
+          <div class="config-row"><label>当前密码</label><input type="password" id="settings-qa-current" autocomplete="current-password" placeholder="保存密保前验证当前密码" /></div>
           <div class="config-row"><label>安全问题</label><input type="text" id="settings-qa-q" placeholder="例：我第一只猫叫什么" /></div>
           <div class="config-row"><label>答案</label><input type="text" id="settings-qa-a" placeholder="答案（不区分大小写）" /></div>
           <button class="btn-primary" onclick="saveSecurityQuestion()" title="保存急救问题 / Save security question" style="margin-top:4px;padding:0 14px;height:36px;display:inline-flex;align-items:center;gap:5px;"><i data-lucide="shield"></i> 保存 Save</button>
@@ -3831,7 +3832,7 @@ async function doSetup() {
   const a = (document.getElementById('auth-setup-a')?.value || '').trim();
   if (q && a) {
     try {
-      await fetch('/auth/security-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({question: q, answer: a}) });
+      await fetch('/auth/security-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({question: q, answer: a, current: p1.trim()}) });
     } catch (_) { /* 会话已经建立；可选安全问题保存失败不应卡住 Dashboard。 */ }
   }
   await finishDashboardAuthentication();
@@ -3924,13 +3925,16 @@ async function changePassword() {
 async function saveSecurityQuestion() {
   const q = document.getElementById('settings-qa-q').value.trim();
   const a = document.getElementById('settings-qa-a').value.trim();
+  const current = document.getElementById('settings-qa-current').value;
   const msgEl = document.getElementById('settings-qa-msg');
   if (!q || !a) { msgEl.style.color = 'var(--negative)'; msgEl.textContent = '问题和答案不能为空'; return; }
-  const resp = await authFetch('/auth/security-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({question: q, answer: a}) });
+  if (!current) { msgEl.style.color = 'var(--negative)'; msgEl.textContent = '请输入当前密码'; return; }
+  const resp = await fetch('/auth/security-question', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({question: q, answer: a, current}) });
   if (!resp) return;
   if (resp.ok) {
     msgEl.style.color = 'var(--accent)'; msgEl.textContent = '急救问题已保存';
     document.getElementById('settings-qa-a').value = '';
+    document.getElementById('settings-qa-current').value = '';
   } else {
     const d = await resp.json().catch(() => ({}));
     msgEl.style.color = 'var(--negative)'; msgEl.textContent = d.error || '保存失败';

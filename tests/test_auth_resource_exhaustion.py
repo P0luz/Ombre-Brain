@@ -35,7 +35,8 @@ class JsonRequest:
 
 
 @pytest.fixture(autouse=True)
-def clear_login_pressure_state():
+def clear_login_pressure_state(tmp_path, monkeypatch):
+    monkeypatch.setitem(sh.config, "buckets_dir", str(tmp_path))
     sh._login_failures.clear()
     sh._login_locked_until.clear()
     if hasattr(sh, "_login_source_lru"):
@@ -219,6 +220,7 @@ async def test_global_rate_limit_sheds_work_before_password_verification(
     monkeypatch.delenv("OMBRE_DASHBOARD_PASSWORD", raising=False)
     monkeypatch.setattr(auth_web.sh, "_login_retry_after", lambda _request: 0)
     monkeypatch.setattr(auth_web.sh, "_reserve_global_login_attempt", lambda: 17)
+    monkeypatch.setattr(auth_web, "_reserve_recovery_attempt", lambda _request: 17)
     monkeypatch.setattr(
         auth_web.sh,
         verifier_name,

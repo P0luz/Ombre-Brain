@@ -2,6 +2,9 @@ import hashlib
 import io
 import tarfile
 import zipfile
+import urllib.request
+import urllib.response
+from email.message import Message
 
 import pytest
 
@@ -10,6 +13,50 @@ import web.oauth as oauth_mod
 import web.ollama_local as ollama_mod
 from web import _shared as shared_web
 from web.request_limits import ManagementRequestBodyLimitMiddleware
+
+
+@pytest.mark.parametrize("target,allowed", [
+    ("https://objects.githubusercontent.com/package", True),
+    ("https://127.0.0.1/private", False),
+    ("https://evil.example/package", False),
+    ("http://github.com/package", False),
+    ("https://name:secret@github.com/package", False),
+])
+def test_download_checks_redirect_before_transport(monkeypatch, tmp_path, target, allowed):
+    calls = []
+    class Wire(urllib.request.HTTPSHandler):
+        def https_open(self, request):
+            calls.append(request.full_url)
+            headers = Message()
+            if len(calls) == 1:
+                headers["Location"] = target
+                response = urllib.response.addinfourl(io.BytesIO(b""), headers, request.full_url, 302)
+                response.msg = "Found"
+            else:
+                response = urllib.response.addinfourl(io.BytesIO(b"package"), headers, request.full_url, 200)
+                response.msg = "OK"
+            return response
+    builder = urllib.request.build_opener
+    monkeypatch.setattr(ollama_mod.urllib.request, "build_opener",
+                        lambda *handlers: builder(urllib.request.ProxyHandler({}), Wire(), *handlers))
+    monkeypatch.delenv("OMBRE_ALLOW_UNTRUSTED_MIRROR", raising=False)
+    dest = tmp_path / "package"
+    if allowed:
+        ollama_mod._download("https://github.com/start", str(dest))
+        assert dest.read_bytes() == b"package"
+        assert calls == ["https://github.com/start", target]
+    else:
+        with pytest.raises(ValueError):
+            ollama_mod._download("https://github.com/start", str(dest))
+        assert calls == ["https://github.com/start"]
+        assert not dest.exists()
+
+
+def test_custom_mirror_opt_in_does_not_allow_http(monkeypatch):
+    monkeypatch.setenv("OMBRE_ALLOW_UNTRUSTED_MIRROR", "1")
+    assert ollama_mod._validate_download_url("https://mirror.example/package")
+    with pytest.raises(ValueError, match="HTTPS"):
+        ollama_mod._validate_download_url("http://mirror.example/package")
 
 
 class DummyRequest:
@@ -261,8 +308,8 @@ def test_ollama_download_revalidates_redirect_target(monkeypatch, tmp_path):
     monkeypatch.delenv("OMBRE_ALLOW_UNTRUSTED_MIRROR", raising=False)
     monkeypatch.setattr(
         ollama_mod.urllib.request,
-        "urlopen",
-        lambda _request, timeout=0: _RedirectedResponse(),
+        "build_opener",
+        lambda *_handlers: type("Opener", (), {"open": lambda self, *args, **kwargs: _RedirectedResponse()})(),
     )
     dest = tmp_path / "OllamaSetup.exe"
 
@@ -292,8 +339,8 @@ def test_ollama_download_rejects_oversized_content_length(monkeypatch, tmp_path)
     monkeypatch.setattr(ollama_mod, "_MAX_DOWNLOAD_BYTES", 4)
     monkeypatch.setattr(
         ollama_mod.urllib.request,
-        "urlopen",
-        lambda _request, timeout=0: _OversizedResponse(),
+        "build_opener",
+        lambda *_handlers: type("Opener", (), {"open": lambda self, *args, **kwargs: _OversizedResponse()})(),
     )
     dest = tmp_path / "ollama.tar.zst"
 

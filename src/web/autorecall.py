@@ -142,6 +142,34 @@ def _messages(body: dict) -> list[dict]:
     return out
 
 
+def _injection(body: dict, event: str) -> bool:
+    """严格校验新协议；旧调用不带此字段，继续返回原来的 context。"""
+    if "injection" not in body:
+        return False
+    spec = body["injection"]
+    if not isinstance(spec, dict) or type(spec.get("version")) is not int or spec["version"] != 2 or spec.get("mode") not in ("gateway", "hook"):
+        raise ValueError("invalid injection protocol")
+    def strings(value, limit, width=64):
+        return isinstance(value, list) and len(value) <= limit and all(
+            isinstance(x, str) and len(x) == width and all(c in "0123456789abcdef" for c in x) for x in value
+        )
+    if spec["mode"] == "gateway":
+        history, roles = spec.get("history"), spec.get("roles")
+        if event != "prompt" or not strings(history, 2000) or not history:
+            raise ValueError("invalid gateway history")
+        if not isinstance(roles, list) or len(roles) != len(history) or any(
+            r not in ("user", "assistant", "tool") for r in roles
+        ) or not strings([spec.get("policy")], 1):
+            raise ValueError("invalid gateway roles or policy")
+    else:
+        if not strings(spec.get("delivered", []), 128):
+            raise ValueError("invalid delivery receipts")
+        for name in ("epoch", "request_id"):
+            if not isinstance(spec.get(name), str) or not 1 <= len(spec[name]) <= 200:
+                raise ValueError(f"invalid injection {name}")
+    return True
+
+
 _CLIENT_DIR = Path(__file__).resolve().parent.parent / "ombrebrain" / "autorecall" / "client"
 _CLIENT_FILES = frozenset({"install.py", "ob_hook.py", "ob_relay.py", "ob_client.py", "ob_client.mjs", "ob_gateway.py"})
 
@@ -319,7 +347,11 @@ def register(mcp) -> None:
         if body["session_id"].startswith(_CHECK_PREFIX):
             return JSONResponse({"check": "ok", "event": name}, headers=_NO_STORE)
         try:
-            result = await asyncio.wait_for(handler(service, body), timeout=_TIMEOUTS[name])
+            timeout = _TIMEOUTS[name]
+            spec = body.get("injection")
+            if name == "prompt" and isinstance(spec, dict) and spec.get("mode") == "gateway" and isinstance(spec.get("history"), list) and len(spec["history"]) == 1:
+                timeout = _TIMEOUTS["session-start"]  # 首轮合并接续/dream，沿用开窗超时。
+            result = await asyncio.wait_for(handler(service, body), timeout=timeout)
         except ValueError as exc:
             return JSONResponse({"error": str(exc)}, status_code=400, headers=_NO_STORE)
         except asyncio.TimeoutError:
@@ -343,16 +375,21 @@ def register(mcp) -> None:
         if service is None:
             return JSONResponse({"enabled": False, "seen": {}}, headers=_NO_STORE)
         health = await asyncio.to_thread(service.hook_health)
-        return JSONResponse({"enabled": service.settings["enabled"], "seen": health["seen"]}, headers=_NO_STORE)
+        return JSONResponse({"enabled": service.settings["enabled"], "seen": health["seen"],
+                             "injection_protocol": 2}, headers=_NO_STORE)
 
     def _cwd(body) -> str:
         return str(body.get("cwd") or "")[:1000]
 
     async def _session_start(service, body):
+        if _injection(body, "session-start"):
+            return await service.prepare_injection(body, "session-start")
         source = str(body.get("source") or "startup")
         return {"context": await service.on_session_start(body["session_id"], source, _cwd(body))}
 
     async def _prompt(service, body):
+        if _injection(body, "prompt"):
+            return await service.prepare_injection(body, "prompt")
         key = str(body.get("prompt_id") or "")[:200]
         return {"context": await service.on_prompt(
             body["session_id"], str(body.get("prompt") or "")[:20000],

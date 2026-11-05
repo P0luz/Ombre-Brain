@@ -17,6 +17,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
 import sqlite3
 import threading
@@ -168,6 +169,88 @@ class TranscriptStore:
                 connection.close()
 
     # ---------------- 写 ----------------
+
+    def injection_state(self, namespace: str) -> dict:
+        """注入快照沿用模块状态表，旧备份不需要迁移；它不是记忆真源。"""
+        rows = self._read("SELECT value FROM module_state WHERE key = ?", (f"injection:v2:{namespace}",))
+        state = json.loads(rows[0]["value"]) if rows else {"revision": 0, "records": []}
+        if state.get("encoding") != "prefix-v1":
+            return state
+        records = []
+        nodes = state["paths"]
+        for record in [*state["records"], *state["retries"]]:
+            restored = {"context": "", "refs": [], **record}
+            tail = restored.pop("tail")
+            path = []
+            while tail != -1:
+                if type(tail) is not int or not 0 <= tail < len(nodes):
+                    raise TranscriptStoreError("invalid injection path")
+                parent, fingerprint = nodes[tail]
+                if type(parent) is not int or not -1 <= parent < tail:
+                    raise TranscriptStoreError("invalid injection path parent")
+                path.append(fingerprint)
+                tail = parent
+            restored["path"] = list(reversed(path))
+            records.append(restored)
+        return {"revision": state["revision"], "records": records}
+
+    @staticmethod
+    def _encode_injection_state(revision: int, records: list, retries: list) -> str:
+        """快照和空重试分别保留；完整历史的相同前缀只写一次。"""
+        nodes, indices = [], {}
+
+        def pack(record, empty=False):
+            tail = -1
+            for fingerprint in record.get("path", []):
+                edge = (tail, fingerprint)
+                if edge not in indices:
+                    indices[edge] = len(nodes)
+                    nodes.append(edge)
+                tail = indices[edge]
+            omitted = {"path", "context", "refs"} if empty else {"path"}
+            return {**{k: v for k, v in record.items() if k not in omitted}, "tail": tail}
+
+        value = {"encoding": "prefix-v1", "revision": revision,
+                 "records": [pack(r) for r in records], "retries": [pack(r, True) for r in retries],
+                 "paths": nodes}
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+    def save_injection_state(self, namespace: str, state: dict) -> None:
+        """比较版本再提交，避免不同进程覆盖快照。只淘汰可重建的注入记录。"""
+        key = f"injection:v2:{namespace}"
+        with self._lock:
+            connection = self._connect(create=True)
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                row = connection.execute("SELECT value FROM module_state WHERE key = ?", (key,)).fetchone()
+                revision = json.loads(row["value"])["revision"] if row else 0
+                if revision != state["revision"]:
+                    raise TranscriptStoreError("injection state changed; retry request")
+                records = [r for r in state["records"] if r.get("context")][-128:]
+                retries = [r for r in state["records"] if not r.get("context")][-128:]
+                encoded = self._encode_injection_state(revision + 1, records, retries)
+                while len(encoded.encode()) > 2 * 1024 * 1024 and len(records) + len(retries) > 1:
+                    # 容量不足时先淘汰空重试；不能让空轮次挤走仍用于重放的正文。
+                    (retries if retries else records).pop(0)
+                    encoded = self._encode_injection_state(revision + 1, records, retries)
+                # 更新 rowid 作为最近写入顺序，仅涉及派生快照，不触碰原文。
+                connection.execute("DELETE FROM module_state WHERE key = ?", (key,))
+                connection.execute(
+                    "INSERT INTO module_state VALUES (?, ?)", (key, encoded),
+                )
+                rows = connection.execute("SELECT key, length(CAST(value AS BLOB)) AS size FROM module_state "
+                                          "WHERE key LIKE 'injection:v2:%' ORDER BY rowid DESC").fetchall()
+                used = 0
+                for index, entry in enumerate(rows):
+                    used += entry["size"]
+                    if index >= 1000 or used > 64 * 1024 * 1024:
+                        connection.execute("DELETE FROM module_state WHERE key = ?", (entry["key"],))
+                connection.execute("COMMIT")
+            except Exception:
+                connection.execute("ROLLBACK")
+                raise
+            finally:
+                connection.close()
 
     def append(self, session_id: str, messages: list[dict], cwd: str = "") -> dict[str, int]:
         """按顺序写一批消息：``{"key": uuid, "role": "user"|"assistant", "text": str, "at"?: ISO}``。

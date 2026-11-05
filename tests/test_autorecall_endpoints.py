@@ -145,3 +145,33 @@ async def test_rate_limit(monkeypatch, tmp_path):
     assert (await routes["prompt"](_Request(body))).status_code == 200
     assert (await routes["prompt"](_Request(body))).status_code == 200
     assert (await routes["prompt"](_Request(body))).status_code == 429
+
+
+@pytest.mark.asyncio
+async def test_v2_negotiation_delivery_and_legacy_backfill(monkeypatch, tmp_path):
+    routes, service = _routes(monkeypatch, tmp_path, buckets=[("hotpot", "重庆火锅")])
+    status = _json(await routes["status"](_Request({})))
+    assert status["injection_protocol"] == 2
+    spec = {"version": 2, "mode": "hook", "epoch": "e", "request_id": "p1", "delivered": []}
+    body = {"session_id": "s", "prompt_id": "p1", "prompt": "还记得火锅吗", "injection": spec}
+    first = _json(await routes["prompt"](_Request(body)))
+    assert "重庆火锅" in first["context"] and first["protocol"] == 2
+    assert _json(await routes["prompt"](_Request(body))) == first
+    body["prompt_id"] = "p2"
+    spec["delivered"] = [first["receipt_id"]]
+    assert _json(await routes["prompt"](_Request(body)))["context"] == ""
+    end = await routes["session-end"](_Request({"session_id": "s", "messages": [
+        {"key": "u:p1", "role": "user", "text": "还记得火锅吗"}]}))
+    assert _json(end)["added"] == 0
+    assert service.store.counts()["turns"] == 2
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("spec", [None, {}, {"version": 3}, {"version": 2, "mode": []},
+    {"version": 2, "mode": "gateway", "history": ["short"], "roles": ["user"], "policy": "a" * 64},
+    {"version": 2, "mode": "hook", "epoch": "e", "request_id": "r", "delivered": ["not-a-receipt"]}])
+async def test_v2_rejects_malformed_protocol(monkeypatch, tmp_path, spec):
+    routes, service = _routes(monkeypatch, tmp_path)
+    response = await routes["prompt"](_Request({"session_id": "s", "injection": spec}))
+    assert response.status_code == 400
+    assert service.store.counts()["turns"] == 0

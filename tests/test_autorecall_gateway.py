@@ -152,7 +152,7 @@ def test_new_chat_injects_start_and_recall_and_stores_reply(stack):
     assert _wait(lambda: "stop" in ob.names())
     stop = [c for c in ob.calls if c[0] == "stop"][0][1]
     assert stop["messages"][0]["text"] == "收到" and stop["cwd"] == "前端A"
-    assert ob.names()[:2] == ["session-start", "prompt"]
+    assert ob.names()[:3] == ["status", "session-start", "prompt"]
     assert all(c[2] == "tok" and c[1]["client"] == "gateway" for c in ob.calls)
 
 
@@ -173,7 +173,7 @@ def test_followup_turn_keeps_session_and_skips_session_start(stack):
     _post(url + "/v1/chat/completions", {"model": "m", "messages": first + [
         {"role": "assistant", "content": "收到"}, {"role": "user", "content": "再说一句"}]})
     assert ob.names().count("session-start") == 1
-    sids = {c[1]["session_id"] for c in ob.calls}
+    sids = {c[1]["session_id"] for c in ob.calls if c[0] != "status"}
     assert len(sids) == 1
     assert "[接续] 上次聊到猫" in up.requests[-1][1]["messages"][0]["content"]  # 接续每轮都带着
 
@@ -284,3 +284,73 @@ def test_truncated_stream_is_not_stored():
     finally:
         for s in (ob.server, up, server):
             s.shutdown()
+
+
+@pytest.fixture
+def v2_stack(tmp_path):
+    """真实自动召回服务和持久库 + 真 HTTP 网关；模型商使用测试替身。"""
+    import asyncio
+    from ombrebrain.autorecall import AutoRecallService
+    from web.autorecall import _injection
+    class Buckets:
+        async def list_all(self, include_archive=False):
+            return [{"id": "cat", "content": "猫叫阿树", "metadata": {"type": "dynamic"}}]
+    service = AutoRecallService(Buckets(), str(tmp_path), {"autorecall": {
+        "enabled": True, "agree_top": 0, "restore_rounds": 0, "dream_on_start": False}})
+    class LocalOB:
+        scope = "test"
+        def post(self, path, payload, timeout):
+            if path == "status":
+                return {"injection_protocol": 2, "enabled": True}
+            body = {**payload, "cwd": self.scope, "client": "gateway"}
+            if path == "prompt":
+                assert _injection(body, path)
+                return asyncio.run(service.prepare_injection(body, path))
+            return asyncio.run(service.on_stop(body["session_id"], body["messages"], self.scope))
+    up = FakeUpstream()
+    gw = ob_gateway.Gateway(up.url + "/v1", LocalOB())
+    server, url = _serve(ob_gateway.make_handler(gw))
+    yield up, gw, url, service
+    server.shutdown()
+    up.server.shutdown()
+
+
+def test_v2_http_prefix_retry_tools_and_trim(v2_stack):
+    up, gw, url, service = v2_stack
+    header = {"X-OB-Session": "chat-one"}
+    first = [{"role": "system", "content": "固定系统"}, {"role": "user", "content": "记得阿树吗"}]
+    request = {"model": "m", "messages": first}
+    _post(url + "/v1/chat/completions", request, header)
+    sent1 = up.requests[-1][1]["messages"]
+    assert sent1[0] == first[0] and "猫叫阿树" in sent1[1]["content"]
+    assert first[1]["content"] == "记得阿树吗"
+    _post(url + "/v1/chat/completions", request, header)
+    assert up.requests[-1][1]["messages"] == sent1
+    history = first + [{"role": "assistant", "content": "收到"}, {"role": "user", "content": "之前阿树叫什么"}]
+    _post(url + "/v1/chat/completions", {"model": "m", "messages": history}, header)
+    sent2 = up.requests[-1][1]["messages"]
+    assert sent2[:2] == sent1 and sent2[-1] == history[-1]
+    tools = history + [{"role": "assistant", "content": None, "tool_calls": [
+        {"id": "c1", "type": "function", "function": {"name": "read", "arguments": "{}"}}]},
+        {"role": "tool", "content": "工具结果", "tool_call_id": "c1"}]
+    _post(url + "/v1/chat/completions", {"model": "m", "messages": tools}, header)
+    assert up.requests[-1][1]["messages"][:len(sent2)] == sent2
+    assert up.requests[-1][1]["messages"][-2:] == tools[-2:]
+    gw2 = ob_gateway.Gateway(up.url + "/v1", gw.ob)
+    assert gw2.prepare(request, "chat-one")[0]["messages"] == sent1
+    cropped = [first[0], history[-1], {"role": "assistant", "content": "答"}, {"role": "user", "content": "还记得阿树吗"}]
+    _post(url + "/v1/chat/completions", {"model": "m", "messages": cropped}, header)
+    assert up.requests[-1][1]["messages"][1] == cropped[1]
+    assert "猫叫阿树" in up.requests[-1][1]["messages"][-1]["content"]
+
+
+def test_v2_multimodal_and_model_failure_retry(v2_stack):
+    up, gw, url, _service = v2_stack
+    messages = [{"role": "user", "content": [{"type": "text", "text": "记得阿树吗"},
+        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA"}}]}]
+    with pytest.raises(urllib.error.HTTPError):
+        _post(url + "/v1/chat/completions", {"model": "bad", "messages": messages}, {"X-OB-Session": "multi"})
+    failed = up.requests[-1][1]["messages"]
+    sent, _ = gw.prepare({"model": "m", "messages": messages}, "multi")
+    assert sent["messages"] == failed
+    assert sent["messages"][0]["content"][1:] == messages[0]["content"]

@@ -10,6 +10,56 @@ ROOT = Path(__file__).resolve().parents[1]
 DASHBOARD = ROOT / "frontend" / "dashboard.html"
 
 
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is unavailable")
+def test_security_question_forms_send_current_password_and_clear_after_success():
+    setup = _dashboard_section("async function doSetup()", "function showLogin()")
+    settings = _dashboard_section("async function saveSecurityQuestion()", "// --- Cloudflare Tunnel ---")
+    script = r'''
+const elements = new Map();
+const document = {getElementById(id) {
+  if (!elements.has(id)) elements.set(id, {value:'', style:{}, textContent:''});
+  return elements.get(id);
+}};
+const calls = [];
+let ok = true;
+async function fetch(url, options) {
+  calls.push({url, body:JSON.parse(options.body)});
+  return {ok, json:async () => ({error:'当前密码错误'})};
+}
+function showAuthError(message) {throw Error(message);}
+async function finishDashboardAuthentication() {}
+''' + setup + settings + r'''
+(async () => {
+  for (const [id,value] of Object.entries({
+    'auth-setup-pwd':' setup-password ', 'auth-setup-pwd2':' setup-password ',
+    'auth-setup-q':'q', 'auth-setup-a':'a',
+    'settings-qa-q':'q', 'settings-qa-a':'a'
+  })) document.getElementById(id).value = value;
+  await doSetup();
+  await saveSecurityQuestion();
+  const missingCalls = calls.length;
+  document.getElementById('settings-qa-current').value = 'wrong';
+  ok = false;
+  await saveSecurityQuestion();
+  const failure = document.getElementById('settings-qa-msg').textContent;
+  document.getElementById('settings-qa-current').value = 'right';
+  ok = true;
+  await saveSecurityQuestion();
+  process.stdout.write(JSON.stringify({calls, missingCalls, failure,
+    current:document.getElementById('settings-qa-current').value,
+    answer:document.getElementById('settings-qa-a').value}));
+})().catch(error => {console.error(error); process.exit(1);});
+'''
+    result = json.loads(subprocess.run([shutil.which("node"), "-e", script],
+                                      check=True, capture_output=True, text=True).stdout)
+    assert result["missingCalls"] == 2
+    assert result["calls"][1]["body"]["current"] == "setup-password"
+    assert result["calls"][2]["body"]["current"] == "wrong"
+    assert result["calls"][3]["body"]["current"] == "right"
+    assert result["failure"] == "当前密码错误"
+    assert result["current"] == result["answer"] == ""
+
+
 def _dashboard_section(start_marker: str, end_marker: str) -> str:
     html = DASHBOARD.read_text(encoding="utf-8")
     start = html.index(start_marker)

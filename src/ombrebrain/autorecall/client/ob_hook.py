@@ -45,6 +45,7 @@ import subprocess
 import sys
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 import urllib.error
 import urllib.request
@@ -93,6 +94,114 @@ def _debug(message: str) -> None:
 def _state_dir() -> Path:
     custom = os.environ.get("OB_RELAY_STATE")
     return Path(custom).parent if custom else Path.home() / ".claude" / "hooks"
+
+
+@contextmanager
+def _delivery_lock(directory: Path):
+    """只锁本地读改写，不跨网络等待；进程退出后操作系统自动释放。"""
+    directory.mkdir(parents=True, exist_ok=True)
+    fd = os.open(str(directory / ".delivery.lock"), os.O_RDWR | os.O_CREAT, 0o600)
+    acquired = False
+    try:
+        if os.name == "nt":
+            import msvcrt
+            if os.fstat(fd).st_size == 0:
+                os.write(fd, b"\0")
+
+            def lock():
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+
+            def unlock():
+                os.lseek(fd, 0, os.SEEK_SET)
+                msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
+        else:
+            import fcntl
+
+            def lock():
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+            def unlock():
+                fcntl.flock(fd, fcntl.LOCK_UN)
+
+        deadline = time.monotonic() + 1
+        while True:
+            try:
+                lock()
+                acquired = True
+                break
+            except OSError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("receipt lock timed out")
+                time.sleep(0.01)
+        yield
+    finally:
+        try:
+            if acquired:
+                unlock()
+        finally:
+            os.close(fd)
+
+
+def _write_delivery(path: Path, value: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp = path.with_suffix(f".{uuid.uuid4().hex}.tmp")
+    try:
+        fd = os.open(str(temp), os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            json.dump(value, handle)
+        os.replace(temp, path)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _delivery_request(payload: dict, mode: str):
+    """本机只存阶段和回执 ID，不存注入正文；输出成功也不声称宿主永久保留了它。"""
+    identity = [os.environ.get("OB_URL", "http://127.0.0.1:18001").rstrip("/"),
+                os.environ.get("OB_HOOK_TOKEN", ""), payload.get("client"), payload.get("cwd"), payload["session_id"]]
+    key = hashlib.sha256(json.dumps(identity).encode()).hexdigest()
+    path = _state_dir() / "injections" / f"{key}.json"
+    with _delivery_lock(path.parent):
+        changed = False
+        try:
+            state = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(state, dict) or not isinstance(state.get("epoch"), str) or not isinstance(state.get("delivered"), list):
+                raise ValueError("invalid receipt state")
+        except (OSError, ValueError):
+            state = {"epoch": uuid.uuid4().hex, "delivered": []}
+            changed = True
+        if mode == "session-start" and payload.get("source") in ("startup", "clear", "compact"):
+            state = {"epoch": uuid.uuid4().hex, "delivered": []}
+            changed = True
+        if changed:
+            _write_delivery(path, state)
+        else:
+            path.touch()  # 只刷新活跃时间，不把读取到的旧回执重写回去。
+        files = sorted(path.parent.glob("*.json"), key=lambda p: p.stat().st_mtime, reverse=True)
+        for old in files[1000:]:
+            old.unlink(missing_ok=True)
+    payload["injection"] = {"version": 2, "mode": "hook", "epoch": state["epoch"],
+                            "request_id": payload.get("prompt_id") or state["epoch"],
+                            "delivered": state["delivered"][-128:]}
+    return path, state
+
+
+def _delivery_output(delivery, result: dict) -> None:
+    if not delivery or result.get("protocol") != 2:
+        return
+    receipt = result.get("receipt_id")
+    if not isinstance(receipt, str) or not re.fullmatch(r"[0-9a-f]{64}", receipt):
+        return
+    path, state = delivery
+    try:
+        with _delivery_lock(path.parent):
+            current = json.loads(path.read_text(encoding="utf-8"))
+            if current.get("epoch") != state["epoch"]:
+                return  # 压缩后的旧请求晚到，不能把旧覆盖带回新阶段。
+            current["delivered"] = list(dict.fromkeys([*current["delivered"], receipt]))[-128:]
+            _write_delivery(path, current)
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        report_error("receipt", f"回执保存失败，下轮可能重复召回：{type(exc).__name__}")
 
 
 def report_error(where: str, message: str) -> None:
@@ -665,6 +774,12 @@ def main() -> int:
 
     payload["client"] = client  # 面板上各家单独的开关和到达时间靠这个区分
     payload["script"] = _script_hash()
+    delivery = None
+    if mode in ("session-start", "prompt"):
+        try:
+            delivery = _delivery_request(payload, mode)
+        except OSError as exc:
+            report_error("receipt", f"无法保存上下文阶段：{type(exc).__name__}")
     pending = _pending_errors() if mode not in _NO_WAIT else []
     if pending:
         payload["client_errors"] = pending
@@ -689,7 +804,8 @@ def main() -> int:
     if context and mode in names:
         print(json.dumps({
             "hookSpecificOutput": {"hookEventName": names[mode], "additionalContext": context},
-        }, ensure_ascii=False))
+        }, ensure_ascii=False), flush=True)
+        _delivery_output(delivery, result)
     return 0
 
 

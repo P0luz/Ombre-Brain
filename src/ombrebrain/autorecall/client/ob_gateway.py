@@ -5,7 +5,7 @@
 把 base_url 从模型商换成这个网关，就有了和 Claude Code 钩子同样的自动召回：
 
     请求进来 → 新对话先取「上一段对话的接续 + 今日 dream」→ 用户这句存进 OB、唤醒词命中就带一条记忆
-             → 拼进 system 发给真正的模型 → 回复原样转发（流式一边转一边拼全文）→ 结束后把回复存进 OB
+             → 放到当轮用户消息前，历史按快照重放 → 回复原样转发 → 结束后把回复存进 OB
 
     python3 ob_gateway.py --upstream https://api.deepseek.com/v1 --ob http://127.0.0.1:18001
     # 客户端：base_url = http://127.0.0.1:18080/v1，API key 照填模型商的 key（原样透传，不落盘）
@@ -24,7 +24,8 @@ Gemini https://generativelanguage.googleapis.com/v1beta/openai 。只有 chat/co
 
 会话怎么认：OpenAI 接口是无状态的，网关按「作用域 + 第一条 system + 第一句用户发言」算会话 id；
 请求头 X-OB-Session 可以直接指定。只有一句用户发言的请求视为新对话（会取接续），其余视为续聊。
-工具调用轮（最后一条是 tool）不存不召回；只存文本，图片等非文本部分跳过。
+v2 的工具续轮重放已有注入，不新增召回；只存文本，图片等非文本部分跳过。
+服务端不支持 v2 时保留旧 system 注入；v2 快照保存在 OB，网关重启不影响保留范围内的重放。
 OB 不通、超时、关着：照常转发，不带记忆，错误打到 stderr——记忆出问题不能卡住对话。
 """
 
@@ -145,6 +146,7 @@ class Gateway:
         self._lock = threading.Lock()
         # 会话 id → {"start": 接续文本, "recalls": [最近几次召回]}。只在内存里，重启后续聊不再补接续。
         self._sessions: OrderedDict[str, dict] = OrderedDict()
+        self._protocol: int | None = None
 
     def _state(self, sid: str) -> dict:
         with self._lock:
@@ -155,6 +157,48 @@ class Gateway:
             return state
 
     def prepare(self, body: dict, session_header: str = "") -> tuple[dict, dict | None]:
+        if self._protocol is None:
+            status = self.ob.post("status", {}, self.recall_timeout)
+            if status:
+                self._protocol = 2 if status.get("injection_protocol") == 2 else 1
+        if self._protocol != 2:
+            return self._prepare_legacy(body, session_header)
+        messages = body.get("messages")
+        if not isinstance(messages, list) or not messages or not all(isinstance(m, dict) for m in messages):
+            return body, None
+        indices = [i for i, m in enumerate(messages) if m.get("role") not in ("system", "developer")]
+        if not indices or len(indices) > 2000:
+            return body, None
+        roles = [messages[i].get("role") for i in indices]
+        if any(r not in ("user", "assistant", "tool") for r in roles):
+            return body, None
+        def digest(value):
+            return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False,
+                                             separators=(",", ":")).encode()).hexdigest()
+        sid = ("gw-" + _sha(self.ob.scope, session_header.strip())) if session_header.strip() else session_id_for(self.ob.scope, messages)
+        history = [digest(messages[i]) for i in indices]
+        policy = digest([(i, m) for i, m in enumerate(messages) if m.get("role") in ("system", "developer")])
+        prompt_id = digest([policy, history])
+        text = text_of(messages[indices[-1]].get("content")) if roles[-1] == "user" else ""
+        payload = {"session_id": sid, "prompt_id": prompt_id, "prompt": text,
+                   "injection": {"version": 2, "mode": "gateway", "history": history,
+                                 "roles": roles, "policy": policy}}
+        result = self.ob.post("prompt", payload, max(self.recall_timeout, self.start_timeout) if len(history) == 1 else self.recall_timeout)
+        out = {**body, "messages": [dict(m) for m in messages]}
+        if result.get("protocol") == 2:
+            for placement in result.get("placements", []):
+                index, context = placement.get("index"), placement.get("context")
+                if not isinstance(index, int) or not 0 <= index < len(indices) or roles[index] != "user" or not isinstance(context, str) or not context:
+                    continue
+                message = out["messages"][indices[index]]
+                content = message.get("content")
+                # 只在原消息位置补回快照；正文/图片/工具轨迹不被重新排序或压缩。
+                message["content"] = ([{"type": "text", "text": context}, *content] if isinstance(content, list)
+                                      else f"{context}\n\n{content or ''}")
+        turn = {"session_id": sid, "prompt_id": result.get("receipt_id") or prompt_id} if roles[-1] == "user" else None
+        return out, turn
+
+    def _prepare_legacy(self, body: dict, session_header: str = "") -> tuple[dict, dict | None]:
         """返回 (改好的请求体, 本轮记录)。记录为 None 表示这轮不存（工具调用轮、没有用户发言）。"""
         messages = body.get("messages")
         if not isinstance(messages, list) or not messages or not isinstance(messages[-1], dict):
@@ -246,7 +290,7 @@ def make_handler(gw: Gateway):
             return auth == f"Bearer {gw.key}" or self.headers.get("x-api-key", "") == gw.key
 
         def _upstream_headers(self) -> dict:
-            headers = {k: v for k, v in self.headers.items() if k.lower() not in _HOP}
+            headers = {k: v for k, v in self.headers.items() if k.lower() not in _HOP | {"x-ob-session"}}
             headers["Accept-Encoding"] = "identity"
             if gw.upstream_key:  # 客户端带的是网关 key，换成模型商的
                 headers = {k: v for k, v in headers.items() if k.lower() not in ("authorization", "x-api-key")}

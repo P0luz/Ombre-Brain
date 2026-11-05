@@ -322,8 +322,8 @@ def _allow_untrusted_mirror() -> bool:
 
 def _validate_download_url(url: str) -> str:
     parsed = urllib.parse.urlparse(url)
-    if parsed.scheme not in ("http", "https") or not parsed.netloc:
-        raise ValueError("download URL must be http(s)")
+    if parsed.scheme != "https" or not parsed.hostname or parsed.username or parsed.password:
+        raise ValueError("download URL must be HTTPS without credentials")
     if not _host_is_trusted(parsed.hostname or ""):
         if not _allow_untrusted_mirror():
             raise ValueError(
@@ -335,12 +335,19 @@ def _validate_download_url(url: str) -> str:
     return url
 
 
+class _ValidatedDownloadRedirect(urllib.request.HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        # 必须先校验再交给 urllib，不能等目标收到请求后才检查响应 URL。
+        _validate_download_url(newurl)
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
 def _download(url: str, dest: str) -> None:
     """流式下载，进度写 _install_state['percent']。"""
     safe_url = _validate_download_url(url)
     req = urllib.request.Request(safe_url, headers={"User-Agent": "OmbreBrain-Setup"})
-    # URL scheme is validated above; urllib is used for streaming installer downloads.
-    with urllib.request.urlopen(req, timeout=60) as resp:  # nosec B310
+    opener = urllib.request.build_opener(_ValidatedDownloadRedirect())
+    with opener.open(req, timeout=60) as resp:
         _validate_download_url(resp.geturl())
         total = int(resp.headers.get("Content-Length") or 0)
         if total < 0 or total > _MAX_DOWNLOAD_BYTES:

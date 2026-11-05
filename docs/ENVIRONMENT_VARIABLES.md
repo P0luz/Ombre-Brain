@@ -57,7 +57,7 @@
 ## 更新与容器维护
 
 - `OMBRE_ALLOW_CUSTOM_UPDATE_REPO`：允许自定义更新仓库。
-- `OMBRE_ALLOW_UNTRUSTED_MIRROR`：允许未受信任镜像源。
+- `OMBRE_ALLOW_UNTRUSTED_MIRROR`：允许未受信任的 HTTPS 镜像主机；不允许 HTTP 降级，仍需通过固定发行产物哈希校验。
 - `OMBRE_UPDATE_ALLOW_PIP`：允许热更新在依赖清单变化时自动执行 `pip install`（安全加固 #2：默认关闭，自动装依赖会把"谁能点热更新"放大成任意 PyPI 包的执行面）。默认关闭时遇到依赖变化会在写入任何文件前直接拒绝更新（不会写文件再回滚）。Dashboard「热更新」面板里也有一个等效开关（写 `config.yaml` 的 `update.allow_pip_install`，立即生效不需要重启），效果与设置本变量相同，二者取其一即可，不用两个都配。
 - `OMBRE_FORCE_CODE_RESEED`：下次启动强制从镜像重播代码；使用后应移除。
 - `OMBRE_IMAGE_ROOT`：镜像内置代码根目录。

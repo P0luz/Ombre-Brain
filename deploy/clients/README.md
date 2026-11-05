@@ -3,6 +3,11 @@
 先在 Dashboard「设置 → 自动召回」打开开关，并设好 hook token（`OMBRE_HOOK_TOKEN` 或 config.yaml 的 `hooks.token`）。
 下面所有接法调用的都是同一套 OB 接口（[docs/AUTORECALL_PROTOCOL.md](../../docs/AUTORECALL_PROTOCOL.md)），存下来的原文、提醒、接续、唤醒召回规则完全一样。
 
+4.1 新增网关历史快照与 Claude Code / Codex CLI / 旧 Gemini CLI 的 hook 回执去重。升级服务端后重新下载网关或重跑 hook 安装。
+网关将动态记忆放在当轮消息前、按原位置重放；hook 按上下文阶段去重，MCP 继续负责主动查阅和写入。
+同一对话不要同时启用两个自动入口：走网关时，在自动召回设置中关闭对应客户端的开关；MCP 不受影响。
+能力和限制以[快照协议](../../docs/AUTORECALL_PROTOCOL.md#41注入快照与上下文去重)为准；下面的真机记录是旧链路记录，不代表 v2 已在所有客户端重新实测。
+
 挑哪种：
 
 - 用 Claude Code / Codex CLI / Gemini CLI → 装钩子（下面第 1 节）。

@@ -40,6 +40,7 @@ from collections.abc import Awaitable, Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
+from weakref import WeakValueDictionary
 
 from ombrebrain.policy.surfacing import SurfacePolicyVM
 from ombrebrain.storage.letter_lock import is_letter_bucket
@@ -47,6 +48,21 @@ from ombrebrain.storage.letter_lock import is_letter_bucket
 from .lexical import BM25Index
 from .privacy import redact
 from .transcript_store import MAX_LINKS_PER_BUCKET, TranscriptStore
+
+
+async def _settle_thread(function, *args):
+    """取消协程不能取消 SQLite 线程；先等实际结果，再传播取消，避免误回滚额度。"""
+    task = asyncio.create_task(asyncio.to_thread(function, *args))
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            cancelled = True
+    result = task.result()
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
 
 logger = logging.getLogger("ombre_brain.autorecall")
 
@@ -220,6 +236,7 @@ class AutoRecallService:
         self.names_fn = names_fn
         # 会话内已注入过的桶：同一个对话里同一条记忆只注入一次（照 supermemory 的做法）。
         self._injected: "OrderedDict[str, set[str]]" = OrderedDict()
+        self._injection_locks: WeakValueDictionary[str, asyncio.Lock] = WeakValueDictionary()
         self._names: frozenset[str] = frozenset()
         self._names_at = 0.0
 
@@ -415,9 +432,15 @@ class AutoRecallService:
     # ---------------- 钩子 ----------------
 
     async def on_prompt(self, session_id: str, prompt: str, key: str = "", cwd: str = "") -> str:
+        result = await self._prompt_content(session_id, prompt, key, cwd)
+        return result["context"]
+
+    async def _prompt_content(self, session_id: str, prompt: str, key: str, cwd: str,
+                              covered: set[str] | None = None, budget: int | None = None) -> dict:
         settings = self.settings
         if not settings["enabled"] or path_excluded(cwd, settings["exclude_paths"]):
-            return ""
+            return {"context": "", "refs": []}
+        limit = settings["max_chars"] if budget is None else max(0, min(budget, settings["max_chars"]))
         parts: list[str] = []
         if str(prompt or "").strip():
             try:
@@ -437,16 +460,117 @@ class AutoRecallService:
         except Exception as exc:
             logger.warning("autorecall recall failed: %s", type(exc).__name__)
             hits = []
-        already = self._injected.get(session_id, set())
-        hits = [b for b in hits if str(b.get("id")) not in already][:1]
+        already = self._injected.get(session_id, set()) if covered is None else covered
+        hits = [b for b in hits if (str(b.get("id")) if covered is None else self._memory_ref(b)) not in already][:1]
+        refs = []
         if hits:
-            self._injected.setdefault(session_id, set()).add(str(hits[0].get("id")))
-            self._injected.move_to_end(session_id)
-            while len(self._injected) > 1000:
-                self._injected.popitem(last=False)
-            room = settings["max_chars"] - _units("\n\n".join(parts)) - _units(_RECALL_HEADER) - 4
-            parts.append(_RECALL_HEADER + "\n" + self._render_bucket(hits[0], room))
-        return _wrap("\n\n".join(parts), settings["max_chars"])
+            ref = self._memory_ref(hits[0])
+            updated = covered is not None and any(r.rsplit("@", 1)[0] == ref.rsplit("@", 1)[0] for r in covered)
+            header = _RECALL_HEADER + ("\n[同一记忆已有更新，以下是新版本；历史消息保留当时的版本。]" if updated else "")
+            room = limit - _units("\n\n".join(parts)) - _units(header) - 4
+            room -= _units(CONTEXT_OPEN + CONTEXT_CLOSE) + 2
+            rendered = self._render_bucket(hits[0], room)
+            if room >= _units(rendered):
+                parts.append(header + "\n" + rendered)
+                refs.append(self._memory_ref(hits[0]))
+                if covered is None:
+                    self._injected.setdefault(session_id, set()).add(str(hits[0].get("id")))
+                    self._injected.move_to_end(session_id)
+                    while len(self._injected) > 1000:
+                        self._injected.popitem(last=False)
+        context = _wrap("\n\n".join(parts), limit) if limit > 100 else ""
+        return {"context": context, "refs": refs if context else []}
+
+    @staticmethod
+    def _memory_ref(bucket: dict) -> str:
+        """正文版本不包含 last_active 等每次访问都会变化的字段。"""
+        meta = bucket.get("metadata") or {}
+        raw = json.dumps([bucket.get("id"), bucket.get("content"), meta.get("name"), meta.get("created")],
+                         ensure_ascii=False, sort_keys=True, default=str)
+        return f"{bucket.get('id')}@{hashlib.sha256(raw.encode()).hexdigest()}"
+
+    async def prepare_injection(self, body: dict, event: str) -> dict:
+        """v2 注入：快照持久化后才交付；覆盖只认本次窗口或客户端已输出的回执。"""
+        spec = body["injection"]
+        mode = spec["mode"]
+        sid, cwd = body["session_id"], str(body.get("cwd") or "")[:1000]
+        if not self.settings["enabled"] or path_excluded(cwd, self.settings["exclude_paths"]):
+            return {"protocol": 2, "context": "", "placements": [], "disabled": True}
+        namespace = hashlib.sha256(json.dumps(
+            [normalize_client(body.get("client")), cwd, sid, mode, spec.get("epoch", "")],
+            ensure_ascii=False,
+        ).encode()).hexdigest()
+        # 版本比较负责跨进程冲突；进程内锁防止同一时刻把同一候选准备两次。
+        lock = self._injection_locks.setdefault(namespace, asyncio.Lock())
+        async with lock:
+            state = await asyncio.to_thread(self.store.injection_state, namespace)
+            records = state["records"]
+            history, roles = spec.get("history", []), spec.get("roles", [])
+            policy = spec.get("policy", "")
+            placements, covered = [], set()
+            if mode == "gateway":
+                for index, role in enumerate(roles):
+                    if role != "user":
+                        continue
+                    prefix = history[:index + 1]
+                    candidates = [r for r in records if r.get("policy") == policy and r.get("path") == prefix]
+                    # 裁剪后只能对齐历史轮；最新轮不能凭一句相同的“继续”冒充重试。
+                    if not candidates and index < len(history) - 1:
+                        candidates = [r for r in records if r.get("policy") == policy
+                                      and len(r.get("path", [])) > len(prefix)
+                                      and r["path"][-len(prefix):] == prefix]
+                    if len(candidates) != 1:
+                        continue
+                    record = candidates[0]
+                    placements.append({"index": index, "context": record["context"], "receipt_id": record["id"]})
+                    covered.update(record["refs"])
+                if not roles or roles[-1] != "user":
+                    return {"protocol": 2, "context": "", "placements": placements}
+                existing = next((p for p in placements if p["index"] == len(history) - 1), None)
+                if existing:
+                    return {"protocol": 2, **existing, "placements": placements}
+                identity = [policy, history]
+            else:
+                delivered = set(spec.get("delivered", []))
+                for record in records:
+                    if record["id"] in delivered:
+                        covered.update(record["refs"])
+                identity = [event, body.get("prompt_id") or spec["request_id"], body.get("prompt", ""), body.get("source", "")]
+            receipt_id = hashlib.sha256(json.dumps([namespace, identity], ensure_ascii=False).encode()).hexdigest()
+            old = next((r for r in records if r["id"] == receipt_id), None)
+            if old:
+                return {"protocol": 2, "context": old["context"], "receipt_id": receipt_id, "placements": placements}
+            start, committed = "", False
+            dream_claim: dict = {}
+            try:
+                if event == "session-start":
+                    start = await self.on_session_start(sid, str(body.get("source") or "startup"), cwd,
+                                                        dream_claim=dream_claim)
+                    result = {"context": "", "refs": []}
+                else:
+                    if mode == "gateway" and not records and len(history) == 1:
+                        start = await self.on_session_start(sid, "startup", cwd, dream_claim=dream_claim)
+                    room = self.settings["max_chars"] - _units(start) - (2 if start else 0)
+                    result = await self._prompt_content(
+                        sid, str(body.get("prompt") or "")[:20000],
+                        f"u:{str(body.get('prompt_id') or receipt_id)[:200]}", cwd, covered, room,
+                    )
+                context = "\n\n".join(x for x in (start, result["context"]) if x)
+                state["records"].append({"id": receipt_id, "context": context, "refs": result["refs"],
+                                         "path": history, "policy": policy})
+
+                def commit():
+                    nonlocal committed
+                    self.store.save_injection_state(namespace, state)
+                    committed = True
+
+                await _settle_thread(commit)
+            finally:
+                if dream_claim and (not committed or not dream_claim.get("ready")):
+                    await _settle_thread(self.store.release_daily, "dream_injected", dream_claim["day"])
+            if mode == "gateway":
+                placements.append({"index": len(history) - 1, "context": context, "receipt_id": receipt_id})
+            return {"protocol": 2, "context": context, "receipt_id": receipt_id, "placements": placements}
 
     async def on_stop(self, session_id: str, messages: list[dict], cwd: str = "") -> dict[str, int]:
         if not self.settings["enabled"] or path_excluded(cwd, self.settings["exclude_paths"]):
@@ -509,9 +633,15 @@ class AutoRecallService:
         lines.reverse()
         return _RESTORE_HEADER.format(n=max(1, rounds)) + "\n" + "\n".join(lines)
 
-    async def _todays_dream(self, today: str) -> str:
+    async def _todays_dream(self, today: str, claim: dict | None = None) -> str:
         """当天第一次开窗才跑；单独限时，跑失败 / 超时 / 返回失败文案都把额度还回去。"""
-        if not await asyncio.to_thread(self.store.claim_daily, "dream_injected", today):
+        def acquire():
+            acquired = self.store.claim_daily("dream_injected", today)
+            if acquired and claim is not None:
+                claim["day"] = today
+            return acquired
+
+        if not await _settle_thread(acquire):
             return ""
         text = ""
         try:
@@ -520,20 +650,25 @@ class AutoRecallService:
             if text in _DREAM_FAILURE_TEXTS:
                 text = ""
         except (Exception, asyncio.CancelledError) as exc:
+            if claim is not None and isinstance(exc, asyncio.CancelledError):
+                raise
             logger.warning("autorecall dream skipped: %s", type(exc).__name__)
             text = ""
         finally:
-            if not text:
-                await asyncio.to_thread(self.store.release_daily, "dream_injected", today)
+            if claim is None and not text:
+                await _settle_thread(self.store.release_daily, "dream_injected", today)
+            elif claim is not None:
+                claim["ready"] = bool(text)
         return text
 
-    async def on_session_start(self, session_id: str, source: str, cwd: str = "") -> str:
+    async def on_session_start(self, session_id: str, source: str, cwd: str = "", *, dream_claim: dict | None = None) -> str:
         settings = self.settings
         if not settings["enabled"] or source not in ("startup", "clear", "compact"):
             return ""
         if path_excluded(cwd, settings["exclude_paths"]):
             return ""
         budget = settings["max_chars"]
+        self._injected.pop(session_id, None)
         parts: list[str] = []
         # dream 只在开新窗口时领（压缩不算「开窗」）；当天已用过就不给它留预算，原文用满。
         today = self.today_fn()
@@ -554,7 +689,7 @@ class AutoRecallService:
                 if restore:
                     parts.append(restore)
         if dream_due:
-            dream_text = await self._todays_dream(today)
+            dream_text = await self._todays_dream(today, dream_claim)
             if dream_text:
                 room = budget - _units("\n\n".join(parts)) - _units(_DREAM_HEADER) - 4
                 parts.append(_DREAM_HEADER + "\n" + _clip(dream_text, room))
