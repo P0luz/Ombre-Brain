@@ -1283,6 +1283,7 @@ class ImportEngine:
                 self.state.data["api_calls"] += 1
             except Exception as e:
                 err_msg = (
+                    f"分块 {self.state.data['processed']} 处理失败："
                     f"LLM 提取失败（{type(e).__name__}）："
                     f"{_safe_import_error_detail(e)}"
                 )
@@ -1371,7 +1372,7 @@ class ImportEngine:
         )
 
         if not raw.strip():
-            return []
+            raise ValueError("模型返回空白响应，无法提取记忆。")
 
         return self._parse_extraction(raw)
 

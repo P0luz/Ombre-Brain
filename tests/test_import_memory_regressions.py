@@ -554,3 +554,57 @@ def test_import_state_save_uses_atomic_write_text(tmp_path, monkeypatch):
     saved_path, saved_text = calls[0]
     assert saved_path == os.path.join(str(tmp_path), "import_state.json")
     assert json.loads(saved_text)["source_file"] == "f.md"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("responses,expected_status,created", [
+    ([(False, None, "stop")], "error", 0),
+    ([(True, None, "stop")], "error", 0),
+    ([(True, "", "stop")], "error", 0),
+    ([(True, " \n\t", "stop")], "error", 0),
+    ([(True, "", "length")], "error", 0),
+    ([(True, "[]", "stop")], "completed", 0),
+    ([(True, '[{"content":"虚构的一条记忆"}]', "stop")], "completed", 1),
+    ([(True, "[]", "stop"), (True, "", "stop")], "partial", 0),
+], ids=["no-choices", "null", "empty", "whitespace", "length-empty",
+        "valid-empty-list", "one-memory", "partial"])
+async def test_import_model_response_outcomes(tmp_path, responses,
+                                              expected_status, created):
+    from types import SimpleNamespace as NS
+    from unittest.mock import AsyncMock
+    from dehydrator import Dehydrator
+
+    # Exercise real _chat/_chat_once normalization; only the provider is fake.
+    dehydrator = Dehydrator({"buckets_dir": str(tmp_path), "dehydration": {"api_key": ""}})
+    provider = AsyncMock(side_effect=[
+        NS(choices=[NS(message=NS(content=content), finish_reason=reason)] if choices else [])
+        for choices, content, reason in responses
+    ])
+    dehydrator.api_available = True
+    dehydrator.client = NS(chat=NS(completions=NS(create=provider)))
+    bucket_mgr = FakeBucketManager()
+    engine = ImportEngine({"buckets_dir": str(tmp_path)}, bucket_mgr, dehydrator)
+    source = "虚构输入正文，不应出现在错误里 api_key=sk-fictional-secret"
+    engine._chunks = [{"content": source} for _ in responses]
+    engine.state.reset("fiction.md", "hash", len(responses), job_id="job")
+
+    try:
+        result = await engine._process_chunks(False)
+    finally:
+        dehydrator.close()
+
+    failed = sum(not choices or not (content or "").strip()
+                 for choices, content, _ in responses)
+    assert result["status"] == expected_status
+    assert result["chunks_failed"] == failed
+    assert result["memories_created"] == created
+    assert len(bucket_mgr.created) == created
+    assert len(result["errors"]) == failed
+    assert all("模型返回空白响应，无法提取记忆。" in error
+               for error in result["errors"])
+    assert provider.await_count == len(responses)
+    for index, (choices, content, _) in enumerate(responses):
+        if not choices or not (content or "").strip():
+            assert any(f"分块 {index} 处理失败" in error for error in result["errors"])
+    assert source not in str(result["errors"])
+    assert "sk-fictional-secret" not in str(result["errors"])

@@ -23,28 +23,30 @@ merge_or_create，省一次 LLM 拆分调用。
 import asyncio
 import uuid
 
-try:
-    from errors import llm_step_failed_error
-except ImportError:  # pragma: no cover - 包内导入兜底
-    from ...errors import llm_step_failed_error  # type: ignore
-
 from .. import _runtime as rt
 from .._common import merge_or_create, check_duplicate_for, check_plan_resolution
 
 
 async def grow_shortpath(content: str, test_data: bool = False) -> str:
     rt.logger.info(f"grow short-content fast path: {len(content.strip())} chars")
+    metadata_fallback = False
     try:
         analysis = await rt.dehydrator.analyze(content, include_why=True)
     except Exception as e:
-        rt.logger.error(
+        metadata_fallback = True
+        rt.logger.warning(
             "grow short analysis failed: err_type=%s detail=hidden",
             type(e).__name__,
         )
-        raise llm_step_failed_error(
-            "打标",
-            api_available=getattr(rt.dehydrator, "api_available", True),
-        ) from e
+        # 与 hold / grow items 一致：打标失败不丢正文。
+        default_analysis = getattr(rt.dehydrator, "_default_analysis", None)
+        analysis = default_analysis() if callable(default_analysis) else {
+            "domain": ["未分类"],
+            "valence": 0.5,
+            "arousal": 0.3,
+            "tags": [],
+            "suggested_name": "",
+        }
     importance = analysis.get("importance", 5) if isinstance(analysis.get("importance"), int) else 5
     raw_why_remembered = analysis.get("why_remembered")
     why_remembered = (
@@ -82,4 +84,6 @@ async def grow_shortpath(content: str, test_data: bool = False) -> str:
     )
     if embed_warn:
         result += f"\n⚠️ {embed_warn}"
+    if metadata_fallback:
+        result += "\n⚠️ 打标 API 暂不可用：正文已逐字保存，未做任何压缩；元数据暂用本地中性值。"
     return result

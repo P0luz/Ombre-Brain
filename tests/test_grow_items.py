@@ -686,3 +686,85 @@ async def test_grow_digest_blames_key_only_when_api_unavailable(grow_rt):
 
     assert "OMBRE_COMPRESS_API_KEY" in caught.value.public_message
     assert "桶未创建" in caught.value.public_message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("length", [29, 30])
+@pytest.mark.parametrize("padding", ["", " \n"])
+@pytest.mark.parametrize("analysis_fails", [False, True])
+async def test_shortpath_boundary_and_verbatim_fallback(
+    grow_rt, monkeypatch, length, padding, analysis_fails
+):
+    from unittest.mock import AsyncMock
+    bucket_mgr, stub = grow_rt
+    content = padding + "虚" * length + padding
+    if analysis_fails:
+        monkeypatch.setattr(stub, "analyze", AsyncMock(side_effect=RuntimeError("fictional outage")))
+    if length == 30:
+        with pytest.raises(PublicToolError):
+            await dispatch(content=content, test_data=True)
+        assert await bucket_mgr.list_all(include_archive=False) == []
+        return
+
+    out = await dispatch(content=content, test_data=True)
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    assert len(buckets) == 1
+    assert buckets[0]["content"] == content.strip()
+    meta = buckets[0]["metadata"]
+    assert meta["source_tool"] == "grow"
+    assert meta["grow_batch_id"].startswith("g_")
+    assert meta["provenance"]["kind"] == "test"
+    if analysis_fails:
+        assert "打标 API 暂不可用：正文已逐字保存" in out
+        assert "元数据暂用本地中性值" in out
+        assert meta["domain"] == ["未分类"]
+        assert meta["valence"] == 0.5 and meta["arousal"] == 0.3
+        assert not meta.get("why_remembered")
+    else:
+        assert "打标 API 暂不可用" not in out
+        assert meta["domain"] == ["工作"]
+        assert meta["why_remembered"] == "这条短记忆会影响我后续的判断。"
+
+
+@pytest.mark.asyncio
+async def test_shortpath_fallback_merges_and_preserves_reason(grow_rt, monkeypatch):
+    from unittest.mock import AsyncMock
+    bucket_mgr, stub = grow_rt
+    content = "虚构短内容合并事件"
+    await grow_shortpath(content)
+    before = (await bucket_mgr.list_all(include_archive=False))[0]
+    monkeypatch.setattr(stub, "analyze", AsyncMock(side_effect=RuntimeError("fictional outage")))
+    out = await grow_shortpath(content)
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    assert "合并 →" in out and "元数据暂用本地中性值" in out
+    assert len(buckets) == 1
+    assert buckets[0]["content"] == content
+    assert buckets[0]["metadata"]["why_remembered"] == before["metadata"]["why_remembered"]
+
+
+@pytest.mark.asyncio
+async def test_shortpath_fallback_storage_failure_propagates(grow_rt, monkeypatch):
+    from unittest.mock import AsyncMock
+    bucket_mgr, stub = grow_rt
+    monkeypatch.setattr(stub, "analyze", AsyncMock(side_effect=RuntimeError("fictional outage")))
+    monkeypatch.setattr(bucket_mgr, "create", AsyncMock(side_effect=OSError("fictional disk failure")))
+    with pytest.raises(OSError, match="fictional disk failure"):
+        await grow_shortpath("虚构存储失败事件")
+    assert await bucket_mgr.list_all(include_archive=False) == []
+
+
+@pytest.mark.asyncio
+async def test_shortpath_fallback_reuses_default_analysis(grow_rt, monkeypatch):
+    from unittest.mock import AsyncMock, Mock
+    from dehydrator import Dehydrator
+    bucket_mgr, stub = grow_rt
+    defaults = Mock(return_value=Dehydrator._default_analysis(stub))
+    monkeypatch.setattr(stub, "_default_analysis", defaults, raising=False)
+    monkeypatch.setattr(stub, "analyze", AsyncMock(side_effect=TimeoutError("fictional outage")))
+    out = await grow_shortpath("虚构默认元数据事件")
+    defaults.assert_called_once_with()
+    buckets = await bucket_mgr.list_all(include_archive=False)
+    assert len(buckets) == 1
+    assert buckets[0]["content"] == "虚构默认元数据事件"
+    assert not buckets[0]["metadata"].get("why_remembered")
+    assert "元数据暂用本地中性值" in out
