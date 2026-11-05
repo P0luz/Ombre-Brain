@@ -123,7 +123,7 @@ Ombre-Brain/
 - **migrate_engine.py** — 完整记忆包导入：把 `/api/export` 产生的 zip 增量 merge 进当前系统；证据在任何桶写入前完成校验并按不可变语义安装；识别 ID 冲突（skip/overwrite/keep_both），兼容新旧 embedding schema。模型不一致或快照缺向量时写入耐久 outbox，不把网络调用放在恢复事务里。旧版无清单包可兼容导入并标记未验证；旧包缺被引用证据时保留事件桶但明确警告。
 - **ombrebrain/storage/vault_health.py** — Dashboard 与 `tools/check_buckets.py` 共用的只读健康检查：Markdown 解析、重复 ID、越界软链接、SQLite `quick_check`、孤儿向量、缺失且未进入 outbox 的向量。
 - **migration_engine.py** — embedding 后端切换（local ↔ api）时后台全量重算向量：先写 `embeddings.db.migrating`、跑完原子 swap；断点续传 + 失败跳过 + 进度文件供前端轮询。
-- **github_sync.py** — 把 `buckets_dir` 下的 `.md`、`_sources/src_<sha256>.source` 与可选 `.you/you.sqlite3` 事务快照经 GitHub Git Trees API 批量提交做云端备份（不传 embeddings.db）；备份前交叉检查全部 `source_refs`，并在清单标记引用闭包完整。恢复时先暂存并复核全部 blob、清单、证据哈希、UTF-8、引用闭包、`You` schema 与目标大小上限，再发布。支持手动 + 定时自动同步，路由在 `web/github.py`。原文和 `You` 派生状态都会进入仓库，运维必须使用可信私有仓库。
+- **github_sync.py** — 把 `buckets_dir` 下的 `.md`、`_sources/src_<sha256>.source` 与可选 `.you/you.sqlite3` 事务快照经 GitHub Git Trees API 批量提交做云端备份（不传 embeddings.db）；备份前交叉检查全部 `source_refs`，并在清单标记引用闭包完整。恢复时先暂存并复核全部 blob、清单、证据哈希、UTF-8、引用闭包、`You` schema 与目标大小上限，再发布。支持手动 + 定时自动同步，路由在 `web/github.py`。上传历史按 repo/branch/path_prefix 保存在 `<buckets_dir>/_github_sync_state.json`（不进入备份或桶列表），恢复时间单独记录。自动同步启动后先验证连接，再按最后上传成功时间计算到期：无历史或已到期立即补跑，失败后按同步间隔与 30 分钟中的较小值重试。原文和 `You` 派生状态都会进入仓库，运维必须使用可信私有仓库。
 - **reclassify_api.py** — 一次性脚本：把历史落在「未分类/」的桶重新 `analyze()` 打标并搬到正确 domain 目录，只改 frontmatter 与文件位置。
 - **errors.py** — OB 统一错误码（如 OB-W005 embedding 模型漂移、OB-Startup 系列），供各模块抛结构化异常。
 

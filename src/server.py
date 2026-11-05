@@ -287,6 +287,7 @@ github_sync_instance: GitHubSync | None = (
         branch=_gh_cfg.get("branch", "main"),
         path_prefix=_gh_cfg.get("path_prefix", "ombre"),
         max_source_bytes=_source_max_bytes,
+        state_dir=config.get("buckets_dir"),
     )
     if _gh_token and _gh_cfg.get("repo")
     else None
@@ -294,45 +295,50 @@ github_sync_instance: GitHubSync | None = (
 _github_auto_task: "asyncio.Task | None" = None  # 后台定时同步任务
 
 
-async def _github_sync_loop(interval_minutes: int) -> None:
-    """后台定时 GitHub 同步循环。只在 is_validated=True 后执行实际上传。"""
+async def _github_sync_loop(interval_minutes: int, *, now=None, sleep=None) -> None:
+    """按上次上传成功时间补跑；时钟和等待可注入以验证重启行为。"""
     import asyncio
+    import time
+    now = now or time.time
+    sleep = sleep or asyncio.sleep
+    interval = interval_minutes * 60
+    if interval <= 0:
+        return
+    retry_delay = min(interval, 30 * 60)
     logger.info(f"[github_sync] auto-sync loop started, interval={interval_minutes}min")
-    # 首次先做一次验证，确认连接可用
-    if _wsh.github_sync_instance and not _wsh.github_sync_instance.is_validated:
-        try:
-            result = await _wsh.github_sync_instance.validate()
-            if not result.get("ok"):
-                logger.warning(f"[github_sync] auto-sync: validate failed: {result.get('error')} — loop will retry next cycle")
-        except Exception as e:
-            logger.warning(f"[github_sync] auto-sync: validate exception: {e}")
     while True:
-        await asyncio.sleep(interval_minutes * 60)
-        inst = _wsh.github_sync_instance  # 读当前全局引用（config 更新可能替换实例）
+        inst = _wsh.github_sync_instance
         if inst is None:
-            logger.info("[github_sync] auto-sync: instance gone, stopping loop")
             return
-        if not inst.is_validated:
-            # 还没验证通过，先 validate
-            try:
-                res = await inst.validate()
-                if not res.get("ok"):
-                    logger.warning(f"[github_sync] auto-sync skipped (not validated): {res.get('error')}")
-                    continue
-            except Exception as e:
-                logger.warning(f"[github_sync] auto-sync validate failed: {e}")
-                continue
-        buckets_dir = config.get("buckets_dir", "")
-        if not buckets_dir:
-            continue
         try:
+            if not inst.is_validated:
+                result = await inst.validate()
+                if not result.get("ok"):
+                    inst.record_failure(result.get("error", "验证失败"))
+                    await sleep(retry_delay)
+                    continue
+            last_success = inst.status().get("last_sync")
+            if last_success:
+                remaining = datetime.fromisoformat(last_success).timestamp() + interval - now()
+                if remaining > 0:
+                    await sleep(remaining)
+                    # 等待期间可能手动同步成功，醒来后重新计算到期时间。
+                    continue
+            buckets_dir = config.get("buckets_dir", "")
+            if not buckets_dir:
+                await sleep(interval)
+                continue
             result = await inst.sync(buckets_dir)
             if result.get("ok"):
                 logger.info(f"[github_sync] auto-sync ok: {result.get('uploaded', 0)} files")
+                await sleep(interval)
             else:
-                logger.warning(f"[github_sync] auto-sync failed: {result.get('error')}")
-        except Exception as e:
-            logger.error(f"[github_sync] auto-sync exception: {e}")
+                logger.warning("[github_sync] auto-sync failed")
+                await sleep(retry_delay)
+        except Exception as exc:
+            inst.record_failure(exc)
+            logger.warning("[github_sync] auto-sync exception")
+            await sleep(retry_delay)
 
 
 def _restart_github_auto_task(interval_minutes: int) -> None:

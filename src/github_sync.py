@@ -39,7 +39,7 @@ from ombrebrain.them import (
     validate_them_snapshot_file,
 )
 from ombrebrain.you import YouStore, YouStoreError, validate_you_snapshot_file
-from utils import _win_long_path
+from utils import _win_long_path, atomic_write_text
 
 logger = logging.getLogger("ombre_brain.github_sync")
 
@@ -226,6 +226,7 @@ class GitHubSync:
         branch: str = "main",
         path_prefix: str = "ombre",
         max_source_bytes: int = 2 * 1024 * 1024,
+        state_dir: str | None = None,
     ):
         self.token = token
         self.repo = repo.strip()          # "owner/repo"
@@ -243,7 +244,9 @@ class GitHubSync:
             "X-GitHub-Api-Version": "2022-11-28",
         }
 
-        self.last_sync: str | None = None
+        self.last_success_at: str | None = None
+        self.last_attempt_at: str | None = None
+        self.last_restore_at: str | None = None
         self.last_status: str = "idle"   # idle | ok | error
         self.last_error: str = ""
         self.last_count: int = 0
@@ -254,6 +257,72 @@ class GitHubSync:
         # Manual and scheduled backups share one instance.  Serializing them
         # prevents two bounded jobs from adding up to an unbounded peak.
         self._sync_lock = asyncio.Lock()
+        self._state_file = os.path.join(state_dir, "_github_sync_state.json") if state_dir else None
+        self._load_state()
+
+    @property
+    def last_sync(self) -> str | None:
+        return self.last_success_at
+
+    def _target(self) -> dict[str, str]:
+        return {"repo": self.repo, "branch": self.branch, "path_prefix": self.path_prefix}
+
+    def _safe_error(self, error: object) -> str:
+        text = str(error)
+        if self.token:
+            text = text.replace(self.token, "[REDACTED]")
+        return text[:500]
+
+    def _load_state(self) -> None:
+        if not self._state_file:
+            return
+        try:
+            with open(_win_long_path(self._state_file), encoding="utf-8") as handle:
+                data = json.load(handle)
+            if not isinstance(data, dict) or data.get("target") != self._target():
+                return
+            for key in ("last_success_at", "last_attempt_at", "last_restore_at"):
+                value = data[key]
+                if value is not None:
+                    if not isinstance(value, str) or datetime.fromisoformat(value).tzinfo is None:
+                        return
+            if data["last_status"] not in ("idle", "ok", "error") or not isinstance(data["last_error"], str):
+                return
+            for key in ("file_count", "consecutive_failures"):
+                if type(data[key]) is not int or data[key] < 0:
+                    return
+            # 全部校验完成后才接纳，损坏记录不留下半份历史。
+            for key in ("last_success_at", "last_attempt_at", "last_restore_at", "last_status", "consecutive_failures"):
+                setattr(self, key, data[key])
+            self.last_error = self._safe_error(data["last_error"])
+            self.last_count = data["file_count"]
+        except (OSError, ValueError, TypeError, KeyError):
+            pass
+
+    def _save_state(self) -> None:
+        if not self._state_file:
+            return
+        try:
+            atomic_write_text(self._state_file, json.dumps({
+                "target": self._target(),
+                "last_success_at": self.last_success_at,
+                "last_attempt_at": self.last_attempt_at,
+                "last_restore_at": self.last_restore_at,
+                "last_status": self.last_status,
+                "last_error": self._safe_error(self.last_error),
+                "file_count": self.last_count,
+                "consecutive_failures": self.consecutive_failures,
+            }, ensure_ascii=False, indent=2))
+        except Exception as exc:
+            logger.warning("[github_sync] 状态写入失败: %s", self._safe_error(exc))
+
+    def record_failure(self, error: object) -> None:
+        """记录上传或自动验证失败，保留上次成功时间。"""
+        self.last_attempt_at = _now_iso()
+        self.last_status = "error"
+        self.last_error = self._safe_error(error)
+        self.consecutive_failures += 1
+        self._save_state()
 
     # --------------------------------------------------------
     # 公开接口
@@ -262,6 +331,7 @@ class GitHubSync:
     async def sync(self, buckets_dir: str) -> dict[str, Any]:
         """同步记忆、原文证据和可用的 You 快照到 GitHub。"""
         async with self._sync_lock:
+            self.last_attempt_at = _now_iso()
             try:
                 with tempfile.TemporaryDirectory(prefix="ombre-github-modules-") as temp_dir:
                     extra_paths: dict[str, str] = {}
@@ -282,23 +352,24 @@ class GitHubSync:
                     if not files:
                         self.last_status = "ok"
                         self.last_error = ""
-                        self.last_sync = _now_iso()
+                        self.last_success_at = _now_iso()
                         self.last_count = 0
+                        self.consecutive_failures = 0
                         return {"ok": True, "uploaded": 0, "message": "无可同步文件"}
 
                     count = await self._batch_commit(files)
-                self.last_sync = _now_iso()
+                self.last_success_at = _now_iso()
                 self.last_status = "ok"
                 self.last_error = ""
                 self.last_count = count
                 self.consecutive_failures = 0
                 return {"ok": True, "uploaded": count}
             except Exception as e:
-                self.last_status = "error"
-                self.last_error = str(e)
-                self.consecutive_failures += 1
-                logger.error(f"[github_sync] sync failed (连续 {self.consecutive_failures} 次): {e}")
-                return {"ok": False, "error": str(e)}
+                self.record_failure(e)
+                logger.error(f"[github_sync] sync failed (连续 {self.consecutive_failures} 次): {self.last_error}")
+                return {"ok": False, "error": self.last_error}
+            finally:
+                self._save_state()
 
     async def import_from_github(self, buckets_dir: str) -> dict[str, Any]:
         """从 GitHub 仓库恢复记忆和原文证据。
@@ -308,7 +379,11 @@ class GitHubSync:
         backfill 重建向量。带 path-traversal 防护（仓库内容不可信，防 ../ 逃逸）。
         """
         async with self._sync_lock:
-            return await self._import_from_github_locked(buckets_dir)
+            result = await self._import_from_github_locked(buckets_dir)
+            if result.get("ok"):
+                self.last_restore_at = _now_iso()
+                self._save_state()
+            return result
 
     async def _import_from_github_locked(self, buckets_dir: str) -> dict[str, Any]:
         """Serialized implementation shared with the backup lock."""
@@ -594,9 +669,7 @@ class GitHubSync:
                             skipped += 1
                             errors.append(f"{rel}: {exc}")
 
-                self.last_sync = _now_iso()
                 restore_ok = skipped == 0
-                self.last_status = "ok" if restore_ok else "error"
                 result = {
                     "ok": restore_ok,
                     "imported": imported,
@@ -617,8 +690,6 @@ class GitHubSync:
                 return result
         except Exception as e:
             logger.error(f"[github_sync] import failed: {e}")
-            self.last_status = "error"
-            self.last_error = str(e)
             if failure_context:
                 total = int(failure_context["total"])
                 return {
@@ -674,7 +745,9 @@ class GitHubSync:
             "repo": self.repo,
             "branch": self.branch,
             "path_prefix": self.path_prefix,
-            "last_sync": self.last_sync,
+            "last_sync": self.last_success_at,
+            "last_attempt_at": self.last_attempt_at,
+            "last_restore_at": self.last_restore_at,
             "last_status": self.last_status,
             "last_error": self.last_error,
             "last_count": self.last_count,

@@ -8019,7 +8019,7 @@ async function loadGithubStatus() {
       document.getElementById('gh-st-prefix').textContent = d.path_prefix || '（根目录）';
       var intervalLabels = {0:'关闭', 30:'每 30 分钟', 60:'每 1 小时', 360:'每 6 小时', 720:'每 12 小时', 1440:'每 24 小时'};
       document.getElementById('gh-st-interval').textContent = intervalLabels[autoMin] || (autoMin > 0 ? '每 ' + autoMin + ' 分钟' : '关闭');
-      document.getElementById('gh-st-time').textContent = d.last_sync ? new Date(d.last_sync).toLocaleString() : '从未';
+      document.getElementById('gh-st-time').textContent = d.last_sync ? new Date(d.last_sync).toLocaleString() : '暂无记录';
       document.getElementById('gh-st-status').innerHTML = ({idle:'待机', ok: _SV.ok+' 成功', error: _SV.err+' 失败'})[d.last_status] || esc(d.last_status);
       var errRow = document.getElementById('gh-st-error-row');
       if (d.last_error) {
