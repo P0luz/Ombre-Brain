@@ -208,6 +208,8 @@ async def surface_plans(max_tokens: int) -> str:
         )
         if omitted:
             out += f"\n\n另有 {omitted} 条 plan 因 token 预算不足未返回；正文未截断或摘要。"
+        if lines:
+            rt.surfacing_has_body.set(True)
         return out
     except Exception as e:
         rt.logger.error(f"Plan retrieval failed: {e}")
@@ -643,4 +645,5 @@ async def surface_default(
                 limit=max_tokens,
             )
         )
+    rt.surfacing_has_body.set(True)
     return "\n\n".join(parts)

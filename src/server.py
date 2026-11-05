@@ -60,7 +60,7 @@ from ombrebrain.security.deployment_profile import enforce_mcp_network_guard
 from ombrebrain.protocol.strict_schema import harden_registered_tools
 from import_memory import ImportEngine
 from migrate_engine import MigrateEngine
-from utils import get_tzinfo, get_version, load_config, setup_logging
+from utils import get_tzinfo, get_version, load_config, parse_bool, setup_logging
 
 # --- iter 2.1：MCP 工具实现已按代码路径拆分到 tools/ 子包 ---
 # 本文件只保留 MCP 注册 + 路由（HTTP custom_route）+ 共享辅助。
@@ -653,8 +653,13 @@ async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = N
     if op:
         _log_op_entry(op, args or {})
     begin_warnings()
+    body_token = _tools_runtime.surfacing_has_body.set(False)
     try:
-        result = await coro
+        try:
+            result = await coro
+            has_surface_body = _tools_runtime.surfacing_has_body.get()
+        finally:
+            _tools_runtime.surfacing_has_body.reset(body_token)
     except ToolInputError as e:
         # 唯一放行的异常：入参不合法、且工具在任何写入之前就停了。
         #
@@ -712,7 +717,14 @@ async def _with_notice(coro: Awaitable[str], op: str = "", args: dict | None = N
         extras = ""
     notice = _pop_deletion_notice()
     body = (notice + result) if notice else result
-    return body + extras if extras else body
+    output = body + extras if extras else body
+    # 只在 MCP 成功正文之后追加，不占正文预算；空结果、错误与 HTTP 均不走这里。
+    if has_surface_body and result and parse_bool((config.get("surfacing", {}) or {}).get("reuse_hint", True), default=True):
+        if op == "breath" and not (args or {}).get("query") and not (args or {}).get("catalog"):
+            output += "\nℹ️ 这份浮现已在本次对话历史里；同一对话中想找具体内容，用 breath_search 带关键词检索，不必再调 breath。"
+        elif op == "dream":
+            output += "\nℹ️ 这份 dream 结果已在本次对话历史里；同一对话中不必重复调用 dream。"
+    return output
 
 
 # =============================================================
@@ -784,7 +796,7 @@ async def breath(
     tags: Optional[str] = "",
     catalog: Optional[bool] = False,
 ) -> str:
-    """无参数,睁眼看看自己记得什么:返回权重最高、未解决且未标记 digested 的记忆 + 置顶核心准则。digested 从默认/被动浮现及 dream 隐藏，仍可由 breath_search(query=...) 显式找回。0 参数是刻意设计——claude.ai 按需加载工具时会跳过参数复杂的工具,拆成 0 参数才能保证每次对话自动浮现,不用手动触发。要按关键词找记忆用 breath_search(query=...);要用 catalog/tags/importance_min/valence/arousal/max_tokens 等高级模式用 breath_advanced(...)。domain=只在某个主题域里找(逗号分隔),max_results=最多返回几条——这两个 breath 也认,但 breath 的本意就是不带参数睁眼看看。"""
+    """无参数,睁眼看看自己记得什么:返回权重最高、未解决且未标记 digested 的记忆 + 置顶核心准则，末尾可能附一行本对话复用提示。digested 从默认/被动浮现及 dream 隐藏，仍可由 breath_search(query=...) 显式找回。0 参数是刻意设计——claude.ai 按需加载工具时会跳过参数复杂的工具,拆成 0 参数才能保证每次对话自动浮现,不用手动触发。要按关键词找记忆用 breath_search(query=...);要用 catalog/tags/importance_min/valence/arousal/max_tokens 等高级模式用 breath_advanced(...)。domain=只在某个主题域里找(逗号分隔),max_results=最多返回几条——这两个 breath 也认,但 breath 的本意就是不带参数睁眼看看。"""
     return await _with_notice(
         _t_breath.dispatch(
             query=query, max_tokens=max_tokens, domain=domain,
@@ -1169,7 +1181,7 @@ async def dream(
     window_hours: Optional[int] = 48,
 ) -> str:
     """读取最近 window_hours（默认 48h）内有变动的所有记忆桶,用于回顾与消化。
-    每个桶返回其在窗口内的最新内容（按 last_active 取）,完整正文不截断。
+    每个桶返回其在窗口内的最新内容（按 last_active 取）,完整正文不截断，末尾可能附一行本对话复用提示。
     可据此操作：放下的 → trace(resolved=1) 沉底；有沉淀的 → hold(feel=True, source_bucket=...) 记录；无沉淀则不操作。
     候选桶超过 40 时按 decay_engine.calculate_score() 排序取前 40，避免一次返回过多。"""
     return await _with_notice(

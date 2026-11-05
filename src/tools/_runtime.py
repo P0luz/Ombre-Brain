@@ -24,9 +24,13 @@ server.py（会循环 import）。
 ========================================
 """
 
+from contextvars import ContextVar
 from typing import Any, Awaitable, Callable, Optional
 
 from ombrebrain.app.execution import ExecutionEnvelope
+
+# 本调用确实生成了浮现正文；MCP 包装层读取并复原，HTTP 不消费此状态。
+surfacing_has_body: ContextVar[bool] = ContextVar("surfacing_has_body", default=False)
 
 # --- 共享对象引用，由 server.py 在启动时通过 init(...) 注入 ---
 config: Any = None

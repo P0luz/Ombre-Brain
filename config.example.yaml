@@ -220,6 +220,7 @@ matching:
 # Front-end Settings panel writes the same fields back here.
 # AI 调用 breath() 不显式传 max_* 时使用这些默认；前端「浮现默认参数」面板会回写到这里。
 surfacing:
+  reuse_hint: true              # MCP breath / dream 非空正文末尾附本对话复用提示；false 保持旧输出，热更新生效
   breath_max_results: 20          # 1-50, hard cap of buckets returned per breath
   breath_max_tokens: 20000        # 500-40000, total token cap per breath; must fit up to limits.max_pinned core rules first, then ordinary surfacing; 40000 is a safety ceiling, not the default
   feel_max_tokens: 15000          # 500-20000, full-text budget for feel history; older feels collapse to one-line summaries

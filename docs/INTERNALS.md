@@ -305,6 +305,8 @@ feel 桶自身：
 4. **浮现模式**（无 `query`；`breath()` 固定走这里）：pinned/显式 permanent 桶展示为「核心准则」+ 未解决桶按衰减分排序，**冷启动**（`activation_count==0 && importance>=8`）的桶最多 2 个插到最前；后续排序**有两条互斥路径**：当 `surfacing.sampling.enabled=true` 时走加权无放回采样（`top_k` / `sample_k` / `temperature` 控制；详见 §7.1），否则走原 Top-1 固定 + Top-2~20 随机洗牌；**再按 `surfacing.recent_slots`（默认 3）给近 7 天创建的桶补足预留位置**（3.6.0，见下）；按 `max_results` 硬截断。**排除 anchor 与 protected 桶**：anchor 是坐标系；protected 只防衰减，不进入核心准则、未解决、久未浮现或偶遇池。浮现**不调用** `touch()`。每条返回正文后附一行紧凑 `👣 Footprint`，只表达创建、补充、淡去、归档、恢复等有意义的变迁，不展示 touch/索引噪声。**末尾追加 `=== 久未浮现 ===` 段**：从久未激活的高重要度桶里随机抽 1～2 条，模拟「突然想起来」；3.6.0 起 **24 小时内新建的桶不进这个池**——`activation_count==0` 既可能是「很久没被想起」也可能是「还没来得及被想起」，判据本身分不出来，得靠年龄。3.6.0 起本模式也接 `date_from`/`date_to`（核心准则不受时间过滤影响：它们是准则，不是那段时间里发生的事）。
 5. **检索模式**（有 `query`；`breath_search()` 固定走这里）：每个 query 只生成一次查询向量，与 rapidfuzz/BM25 多维评分共同进入 `BucketManager.search()` → 过滤 `feel/plan/letter`，**pinned/permanent/protected 仍可被显式检索命中**：pinned/permanent 加 `📌 [核心准则]`，protected 加 `🛡️ [受保护记忆]` → 纯语义候选相似度 `>=0.65` 标 `[语义关联]`，且不能绕过 domain/tags/type 过滤 → **命中不 `touch()`**（3.6.0：检索与强化解耦，见 §2.1 数据流约束）。查询也会检索 archive；归档命中返回保留的 Markdown 原文与 Footprint，明确邀请模型判断是否值得再次回忆，并显示 `trace(bucket_id="...", restore=True)`。查询只发现、不自动恢复，也不 touch 归档桶。结果不足时保留设计上的自由联想，但 protected 不进入这一非命中随机通道。embedding 不可用时明确提示后继续关键词/BM25；桶一旦命中，返回层直接使用当前存储的完整 `content`，不调用 dehydrate、不剥除 wikilink、不截断或改写。**不过滤 anchor**（设计：主动检索时希望能找到坐标系桶）。catalog 同样保留 protected 并使用相同的受保护标记。
 
+MCP `breath` 的浮现正文（含 `domain` / `max_results` 形式）默认在最终返回末尾追加一行本对话复用提示，位于正文预算处理和通知之后，不挤占正文预算；`breath_search`、`breath_advanced`、`/breath-hook` 及其他 HTTP API 不追加。空结果、错误或鉴权拒绝不追加；`surfacing.reuse_hint: false` 保持旧输出逐字一致，可从 Dashboard 配置区热更新。
+
 #### 调用意图 `mode`（3.6.4）
 
 `breath_search` / `breath_advanced` 的 `mode` 声明**这次检索是谁发起的**，默认 `"manual"`（行为与 3.6.4 之前逐字一致）。
@@ -522,6 +524,7 @@ if text_match or semantic_match: 入选
 截断正文；用户可手动传更大的 `window_hours`，但软上限 40 仍生效；plan 历史不参与 token
 预算全量返回，feel 历史走 token 预算折叠。展示正文只做双链正则清理（不改磁盘原文），
 每条渲染出的桶下面附一行简洁 Footprint。
+MCP `dream` 非空结果默认在最终末尾追加一行本对话无需重复调用的说明，不占上述正文预算；同样由 `surfacing.reuse_hint` 控制，空结果和错误不追加。
 
 ### 3.7 `plan` — 登记待办
 
@@ -1457,6 +1460,7 @@ normalized = total / w_sum × 100   # 归一化到 0~100
 | `limits.max_mcp_request_bytes` | `4194304` | `/mcp` 请求体上限；0 禁用 |
 | `limits.max_management_request_bytes` | `4194304` | Dashboard/OAuth 普通写请求上限；导入上传使用独立上限；0 禁用 |
 | `bucket_type_defaults.{type}.{field}` | （空） | iter 1.9：按桶类型覆盖 importance/valence/arousal 默认值。例：`bucket_type_defaults.feel.importance: 5`。`bucket_manager.create()` 在不传入该字段时查此表 |
+| `surfacing.reuse_hint` | `true` | MCP breath 浮现 / dream 非空结果末尾的本对话复用提示；false 保持旧输出，支持 Dashboard 热更新 |
 | `surfacing.breath_max_tokens` | `20000` | 覆盖 `breath` 默认 max_tokens；必须先装得下 `limits.max_pinned` 条核心准则，余下才给普通浮现 |
 | `surfacing.breath_max_results` | `20` | 覆盖 `breath` 默认 max_results |
 | `surfacing.you_max_results` | `6` | You 读回最多返回几条认识（1～50）；模型传的 max_results 只能更少 |

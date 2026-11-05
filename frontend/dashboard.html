@@ -3118,6 +3118,8 @@
         <div style="font-weight:600;font-size:13px;margin-bottom:6px;">默认参数 <span class="en">Defaults</span><span style="font-weight:400;font-size:11px;color:var(--text-light);margin-left:6px;">（与「引擎」共用「保存」按钮）</span></div>
         <div class="config-row"><label>合并阈值</label><input type="number" id="cfg-merge" min="0" max="100" /></div>
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">0-100，越高越难合并相似桶</div>
+        <div class="config-row"><label>重复调用提示</label><select id="cfg-sf-reuse-hint"><option value="true">开启</option><option value="false">关闭</option></select></div>
+        <div class="config-hint">在 MCP breath / dream 正文末尾提示本对话可复用结果，保存后即时生效。</div>
         <div class="config-row"><label>breath 默认桶数</label><input type="number" id="cfg-sf-breath-results" min="1" max="50" /></div>
         <div style="margin-top:-4px;padding-left:122px;font-size:11px;color:var(--text-light);">1-50。AI 调用 breath() 不指定 max_results 时使用此默认值</div>
         <div class="config-row"><label>breath 默认 token</label><input type="number" id="cfg-sf-breath-tokens" min="500" max="40000" step="500" /></div>
@@ -8278,6 +8280,7 @@ async function loadConfig() {
         : '裸机部署：保存后<b>重启服务</b>即监听新端口（留空=默认 18001）。';
     }
     var sf = cfg.surfacing || {};
+    document.getElementById('cfg-sf-reuse-hint').value = sf.reuse_hint !== false ? 'true' : 'false';
     document.getElementById('cfg-sf-breath-results').value = sf.breath_max_results || 20;
     document.getElementById('cfg-sf-breath-tokens').value = sf.breath_max_tokens || 20000;
     document.getElementById('cfg-sf-feel-tokens').value = sf.feel_max_tokens || 15000;
@@ -8583,6 +8586,7 @@ async function saveConfig(persist) {
     },
     merge_threshold: Number.isFinite(mergeThreshold) ? mergeThreshold : 75,
     surfacing: {
+      reuse_hint: document.getElementById('cfg-sf-reuse-hint').value === 'true',
       breath_max_results: parseInt(document.getElementById('cfg-sf-breath-results').value) || 20,
       breath_max_tokens: parseInt(document.getElementById('cfg-sf-breath-tokens').value) || 20000,
       feel_max_tokens: parseInt(document.getElementById('cfg-sf-feel-tokens').value) || 15000,

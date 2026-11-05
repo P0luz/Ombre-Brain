@@ -308,6 +308,7 @@ def register(mcp) -> None:
                 ],
             },
             "surfacing": {
+                "reuse_hint": _parse_bool(sh.config.get("surfacing", {}).get("reuse_hint", True), default=True),
                 "breath_max_results": int(sh.config.get("surfacing", {}).get("breath_max_results") or 20),
                 "breath_max_tokens": int(sh.config.get("surfacing", {}).get("breath_max_tokens") or 20000),
                 "feel_max_tokens": int(sh.config.get("surfacing", {}).get("feel_max_tokens") or 15000),
@@ -486,8 +487,10 @@ def register(mcp) -> None:
                         )
                 timezone_value = raw_tz
 
-            surfacing_values: dict[str, int] = {}
+            surfacing_values: dict[str, int | bool] = {}
             surfacing_payload = body.get("surfacing") or {}
+            if "reuse_hint" in surfacing_payload:
+                surfacing_values["reuse_hint"] = _parse_bool(surfacing_payload["reuse_hint"], default=True)
             for key, low, high in (
                 ("breath_max_results", 1, 50),
                 ("breath_max_tokens", 500, 40000),

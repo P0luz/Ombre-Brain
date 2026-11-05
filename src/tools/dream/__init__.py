@@ -118,4 +118,6 @@ async def dispatch(
 
     if rt.fire_webhook:
         await rt.fire_webhook("dream", {"recent": len(recent), "chars": len(final_text)})
+    if final_text:
+        rt.surfacing_has_body.set(True)
     return final_text
