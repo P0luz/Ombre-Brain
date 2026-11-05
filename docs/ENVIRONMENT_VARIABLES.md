@@ -15,6 +15,7 @@
 - `OMBRE_EMBED_MODEL`：向量模型名。
 - `OMBRE_EMBED_FORMAT`：向量 API 格式。
 - `OMBRE_EMBED_TIMEOUT_SECONDS`：向量请求超时秒数。
+- `OMBRE_EMBED_ABANDON_AFTER_FAILURES`：覆盖 `embedding.abandon_after_failures`，默认 `10`，设为 `0` 永不放弃。只累计其他向量成功后本条仍失败的次数；全局失败持续自动退避重试，详见 [运维说明](OPERATIONS.md)。
 - `OMBRE_EMBED_BACKEND`：向量后端，例如 `api` 或 `local`。
 - `OMBRE_OLLAMA_URL`：本地 Ollama 地址。
 

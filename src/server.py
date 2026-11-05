@@ -1043,8 +1043,9 @@ async def trace(
     删除边界：delete=True 只会把 Markdown 移入 archive 并标记 deleted_at，不会
     物理抹除。hard_delete=True 仅用于清理创建时明确标记 test_data=True 的测试桶，
     必须单独提供非空 delete_reason；普通记忆和 plan 一律拒绝且不会顺带归档。
-    delete 与 hard_delete 不能同时使用。归档记忆只有在反思后决定值得再次回忆时，才单独调用
-    trace(bucket_id="...", restore=True) 恢复；若历史归档同时带有 protected/anchor，
+    delete 与 hard_delete 不能同时使用。归档记忆只有在反思后决定值得再次回忆时，才显式调用
+    trace(bucket_id="...", restore=True) 恢复；可同时传 resolved 和/或 importance 原子修改，
+    不指定则保留原值，低分记忆仍可能再次归档；若历史归档同时带有 protected/anchor，
     只能用 restore=True、protected=0、importance=1..10 原子解除冲突后恢复。
     检索命中不会自动恢复。只传需要修改的字段，-1 或空串表示不改。
 

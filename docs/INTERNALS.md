@@ -379,7 +379,7 @@ if text_match or semantic_match: 入选
 
 `FootprintSnapshot` 从兼容路径 `_ledger/events.jsonl` 读取 append-only 事件镜像并压缩展示；Markdown 正文仍是当前运行时的内容真源，Footprint 不复制正文，也不把 Ledger 提升为新的真源。旧存储名 `LedgerMirror` 保留用于兼容，面向模型的产品概念统一称为 Footprint。
 
-恢复是对归档状态的显式逆操作：`trace(bucket_id="...", restore=True)` 必须单独调用。`BucketManager.restore_archived()` 根据创建足迹恢复原 bucket type，清除 tombstone/deleted_at 等归档标记，把 Markdown 移回对应活跃目录，重建正文与 meaning 派生索引，并追加 `TraceRestored`。归档期间会保留历史 pinned 标记，但恢复提交会原子清除它，避免记忆静默重新占用 pinned 配额；importance 本身不设硬配额，恢复后原样保留。恢复还会在同一次原子提交里把 `last_active` 刷新为恢复时刻，避免低分桶在下一轮衰减中立即再次归档；但 `resolved`/`digested` 原样保留（包括衰减在归档 importance≤4 的久未激活桶前同一轮自动写入的 `resolved=True`），因此已结案（或已结案且已消化）、importance 偏低的桶即使刚恢复，分数仍可能低于归档阈值，下一轮衰减仍可能再次归档。历史档案若异常同时带有 protected 与 anchor，普通恢复会拒绝；调用 `trace(bucket_id="...", restore=True, protected=0, importance=1..10)` 可在同一事务中保留 anchor、解除保护并恢复。普通查询、无参 breath 和 Footprint 展示均没有恢复权限。
+恢复是对归档状态的显式逆操作：`trace(bucket_id="...", restore=True)` 可同时显式传 `resolved` 和/或 `importance`，与恢复原子生效；其他参数仍受恢复调用的互斥限制。`BucketManager.restore_archived()` 根据创建足迹恢复原 bucket type，清除 tombstone/deleted_at 等归档标记，把 Markdown 移回对应活跃目录，重建正文与 meaning 派生索引，并追加 `TraceRestored`。归档期间会保留历史 pinned 标记，但恢复提交会原子清除它，避免记忆静默重新占用 pinned 配额；importance 本身不设硬配额，未显式指定时恢复后原样保留（protected 仍锁定为 10）。恢复还会在同一次原子提交里把 `last_active` 刷新为恢复时刻，避免低分桶在下一轮衰减中立即再次归档；但未显式指定的 `resolved` 以及 `digested` 原样保留（包括衰减在归档 importance≤4 的久未激活桶前同一轮自动写入的 `resolved=True`），因此已结案（或已结案且已消化）、importance 偏低的桶即使刚恢复，分数仍可能低于归档阈值，下一轮衰减仍可能再次归档。恢复后的得分若仍低于当前归档阈值，返回结果会提示同时传 `resolved=0` 或提高 `importance`，也可恢复后用 `protected=1` 保护。历史档案若异常同时带有 protected 与 anchor，普通恢复会拒绝；调用 `trace(bucket_id="...", restore=True, protected=0, importance=1..10)` 可在同一事务中保留 anchor、解除保护并恢复。普通查询、无参 breath 和 Footprint 展示均没有恢复权限。
 
 ### 3.2 `hold` — 存储单条记忆
 

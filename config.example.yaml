@@ -182,9 +182,9 @@ embedding:
   retry_base_seconds: 5           # First retry delay after provider failure / 首次重试等待
   retry_max_seconds: 300          # Exponential-backoff ceiling / 指数退避上限
   circuit_failure_threshold: 3    # Consecutive failures before global pause / 连续失败几次后熔断
-  circuit_base_seconds: 30        # First global cooldown / 首次熔断冷却
-  circuit_max_seconds: 600        # Maximum global cooldown / 最长熔断冷却
-  abandon_after_failures: 0       # 0 = never; count only failures while other vectors succeed / 0 为永不放弃；只计供应商正常时这一条仍失败的次数
+  circuit_base_seconds: 300        # First global cooldown / 首次熔断冷却
+  circuit_max_seconds: 3600        # Maximum global cooldown / 最长熔断冷却
+  abandon_after_failures: 10       # 0 = never; count only failures while other vectors succeed / 0 为永不放弃；只计供应商正常时这一条仍失败的次数
   backend: "api"                  # 只支持 api（OpenAI 兼容端点）
   model: "gemini-embedding-001"   # 云端模型名（如 gemini-embedding-001）
   base_url: "https://generativelanguage.googleapis.com/v1beta/openai/"

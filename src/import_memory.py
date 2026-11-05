@@ -810,6 +810,7 @@ class ImportState:
             "memories_skipped": 0,
             "memories_raw": 0,
             "chunks_failed": 0,
+            "failed_chunk_indices": [],
             "errors": [],
             "status": "idle",  # idle | running | paused | completed | error
             "job_id": "",
@@ -824,6 +825,7 @@ class ImportState:
                 with open(self.state_file, "r", encoding="utf-8") as f:
                     saved = json.load(f)
                 self.data.update(saved)
+                self.data["failed_chunk_indices"] = saved.get("failed_chunk_indices", [])
                 return True
             except (json.JSONDecodeError, OSError):
                 return False
@@ -859,6 +861,7 @@ class ImportState:
             "memories_skipped": 0,
             "memories_raw": 0,
             "chunks_failed": 0,
+            "failed_chunk_indices": [],
             "errors": [],
             "status": "running",
             "job_id": job_id,
@@ -868,7 +871,10 @@ class ImportState:
 
     @property
     def can_resume(self) -> bool:
-        return self.data["status"] in ("paused", "running", "error") and self.data["processed"] < self.data["total_chunks"]
+        return self.data["status"] in ("paused", "running", "partial", "error") and (
+            self.data["processed"] < self.data["total_chunks"]
+            or bool(self.data["failed_chunk_indices"])
+        )
 
     def to_dict(self) -> dict:
         return dict(self.data)
@@ -1168,7 +1174,10 @@ class ImportEngine:
         start_idx = self.state.data["processed"]
         await self._prime_exact_content_hashes()
 
-        for i in range(start_idx, len(self._chunks)):
+        # Snapshot retries: a failed retry is left for the next resume.
+        failed_indices = self.state.data["failed_chunk_indices"]
+        indices = list(dict.fromkeys([*failed_indices, *range(start_idx, len(self._chunks))]))
+        for i in indices:
             if self._paused:
                 self.state.data["status"] = "paused"
                 self.state.save()
@@ -1188,12 +1197,18 @@ class ImportEngine:
                 )
                 if len(self.state.data["errors"]) < _STATE_ERR_LOG_MAX:
                     self.state.data["errors"].append(err_msg)
-            if not chunk_ok:
+            if chunk_ok and i in failed_indices:
+                failed_indices.remove(i)
+                self.state.data["chunks_failed"] = max(
+                    0, int(self.state.data.get("chunks_failed", 0)) - 1
+                )
+            elif not chunk_ok and i not in failed_indices:
+                failed_indices.append(i)
                 self.state.data["chunks_failed"] = int(
                     self.state.data.get("chunks_failed", 0)
                 ) + 1
 
-            self.state.data["processed"] = i + 1
+            self.state.data["processed"] = max(self.state.data["processed"], i + 1)
             # 每处理一个分块就保存进度
             self.state.save()
 

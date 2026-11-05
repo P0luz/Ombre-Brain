@@ -118,7 +118,7 @@ Dashboard 上，`You` 只有一枚总开关，认识、证据、历史一概不�
 `breath`、目录模式与 `dream` 的输出里仍会带上关系 hint，读取侧不受影响。
 **当前版本只保留存量关系数据的展示，自动建立尚未接线**；接线之前不会有新关系产生。
 
-归档记忆若经 `breath_search` 命中，会显示 `trace(bucket_id="...", restore=True)`。只有在判断它对当下有帮助、值得再次回忆后才调用；`restore=True` 必须单独使用，查询本身不会改变记忆状态。
+归档记忆若经 `breath_search` 命中，会显示 `trace(bucket_id="...", restore=True)`。只有在判断它对当下有帮助、值得再次回忆后才调用；`restore=True` 可同时显式传 `resolved` 和/或 `importance`，其他恢复约束见内部文档，查询本身不会改变记忆状态。
 
 > 给模型的完整使用约定（含示例、边界、返回提示）见 [docs/CLAUDE_PROMPT.md](docs/CLAUDE_PROMPT.md)；逐工具技术规格见 [docs/INTERNALS.md](docs/INTERNALS.md) §3。
 

@@ -7,8 +7,8 @@
     },
     {
       "path": "frontend/dashboard.html",
-      "sha256": "ea15ab3f0550a96c231329f3a5248a26ffd64d303a187b528ec0aa40fb6f29fb",
-      "size": 592873
+      "sha256": "316e06c016014b87f65aba1f6f3ae82141361393f767edb3c0c69a64a4200b83",
+      "size": 592901
     },
     {
       "path": "frontend/favicon.svg",
@@ -42,8 +42,8 @@
     },
     {
       "path": "src/bucket_manager.py",
-      "sha256": "e3616047df9d20c59b0b1774e518dfd5989c6e0f3800d7ecfaefa799be871bf3",
-      "size": 202573
+      "sha256": "04915dbd959c6c139f0400ff594d11bd476059c72fa47d6ea1617ab419a177d0",
+      "size": 202731
     },
     {
       "path": "src/decay_engine.py",
@@ -77,8 +77,8 @@
     },
     {
       "path": "src/import_memory.py",
-      "sha256": "9762d50f85c3d6762ca501e201bacf7a8895c1a86fe3dc73b632ab5217558775",
-      "size": 60838
+      "sha256": "6c5b93562ddfcfc21b16c86f8d5797256be773ef34914d978e48b63f22392365",
+      "size": 61644
     },
     {
       "path": "src/migrate_engine.py",
@@ -502,8 +502,8 @@
     },
     {
       "path": "src/ombrebrain/storage/embedding_outbox.py",
-      "sha256": "fd099a39e896665769a01dbc9cbd04244a0f770479aacaee28b6fdf033dbaeec",
-      "size": 56802
+      "sha256": "341f0cac9ed127ccae1de1490c7518d4963679bb5eac79b8710003548ab2229a",
+      "size": 58573
     },
     {
       "path": "src/ombrebrain/storage/letter_lock.py",
@@ -632,8 +632,8 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "19ad49b2729dcdfbaef331faf56e57651eee4d90a821f6d45a70355ac76c2693",
-      "size": 84591
+      "sha256": "f8fdd4f076ff034f43873b2b3a662b41f0c4708b4b94711e8fbad8988ebc26e7",
+      "size": 84715
     },
     {
       "path": "src/server_app.py",
@@ -832,8 +832,8 @@
     },
     {
       "path": "src/tools/trace/core.py",
-      "sha256": "964b6a697f116ebaf525f67c5b83f567d5ab3ddf2354927e7f0b830187d5118b",
-      "size": 38077
+      "sha256": "071b5f083871c696bbe6de0d14a1d1e7fef72f7df1b4afd23fcebb6d1d269498",
+      "size": 38819
     },
     {
       "path": "src/tools/you/__init__.py",
@@ -847,8 +847,8 @@
     },
     {
       "path": "src/utils.py",
-      "sha256": "f2d2282bb6113a15cefb4d8688a6d47fb6a6f52008e27ca739d37b64a2b06257",
-      "size": 54685
+      "sha256": "41d25af90b1dce70542c71776f58fb3ecda4e66f63021845909df98a261eaeb1",
+      "size": 54798
     },
     {
       "path": "src/web/__init__.py",
@@ -872,8 +872,8 @@
     },
     {
       "path": "src/web/buckets.py",
-      "sha256": "719672ec9fe0bbb9a4085ae0f726c94e507154cfb17aeee9729850d663332ace",
-      "size": 50658
+      "sha256": "7d2a59b3125dc82ad1fe78207538401ba278f74a841ff08c882e9d6cf5354f3b",
+      "size": 50745
     },
     {
       "path": "src/web/config_api.py",

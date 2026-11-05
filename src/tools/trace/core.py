@@ -302,9 +302,7 @@ async def trace_core(
         bool(domain),
         valence != -1,
         arousal != -1,
-        importance != -1 and not restore_unprotect,
         bool(tags),
-        resolved != -1,
         pinned != -1,
         protected != -1 and not restore_unprotect,
         digested != -1,
@@ -323,7 +321,7 @@ async def trace_core(
     ))
     if restore and restore_conflicts:
         raise ToolInputError("参数冲突：restore=True 必须单独调用，不能同时删除或修改记忆；"
-            "唯一例外是用 protected=0 与 importance=1..10 原子解除归档保护。"
+            "可同时显式传 resolved、importance，或用 protected=0 与 importance=1..10 原子解除归档保护。"
             "本次未恢复、未修改。")
     if restore:
         if not guarded_bucket:
@@ -373,11 +371,6 @@ async def trace_core(
         restored_importance = _safe_int(
             restore_meta.get("importance"), 0
         )
-        restored_target_importance = (
-            int(importance)
-            if restore_unprotect
-            else (10 if final_restore_protected else restored_importance)
-        )
         restore_snapshot = (
             restore_pinned,
             restore_protected,
@@ -389,7 +382,7 @@ async def trace_core(
             parse_bool(restore_meta.get("tombstone"), default=False),
         )
         importance_override = (
-            restored_target_importance if restore_unprotect else None
+            max(1, min(10, importance)) if importance != -1 else None
         )
         async with AsyncExitStack() as restore_stack:
             if final_restore_protected:
@@ -433,9 +426,24 @@ async def trace_core(
                 bucket_id,
                 importance_override=importance_override,
                 protected_override=False if restore_unprotect else None,
+                resolved_override=bool(resolved) if resolved in (0, 1) else None,
             )
         if result.get("ok"):
-            return f"已重新回忆并恢复记忆桶: {bucket_id}"
+            message = f"已重新回忆并恢复记忆桶: {bucket_id}"
+            restored = await rt.bucket_mgr.get(bucket_id)
+            if restored and rt.decay_engine:
+                meta = restored.get("metadata", {})
+                if (
+                    meta.get("type") not in ("permanent", "feel", "i", "plan", "letter")
+                    and not any(parse_bool(meta.get(key), default=False)
+                                for key in ("pinned", "protected", "anchor"))
+                    and not is_letter_bucket(restored)
+                    and rt.decay_engine.calculate_score(meta) < rt.decay_engine.threshold
+                ):
+                    message += ("；此记忆按当前衰减参数得分仍偏低，下次衰减可能再次归档；"
+                                "如需保留请同时传 resolved=0 或提高 importance，"
+                                "或恢复后用 protected=1。")
+            return message
         if result.get("error") == "not_archived":
             return f"记忆桶仍在日常记忆中，无需恢复: {bucket_id}"
         if result.get("error") == "not_found":

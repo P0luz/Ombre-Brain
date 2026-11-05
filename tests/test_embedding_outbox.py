@@ -25,6 +25,8 @@ def _config(tmp_path, **embedding):
             "background_indexing": True,
             "retry_base_seconds": 0.01,
             "retry_max_seconds": 0.02,
+            "circuit_base_seconds": 0.01,
+            "circuit_max_seconds": 0.02,
             **embedding,
         },
     }
@@ -709,13 +711,12 @@ async def test_poison_item_does_not_trip_circuit_or_block_other_items(tmp_path):
     try:
         await manager.create(content=poison_content)
 
-        # 毒药桶自己反复重试很多次（远超 circuit_failure_threshold=2），
-        # 熔断绝不能因此打开。
-        await _wait_for(lambda: len(engine.calls) >= 5, timeout=2.0)
-        assert outbox.status()["circuit"]["state"] == "closed"
-        assert outbox.status()["circuit"]["trips"] == 0
+        # A one-item all-failed round now backs off, but a new healthy item
+        # must still probe the provider immediately instead of waiting 5s.
+        await _wait_for(lambda: outbox.status()["circuit"]["state"] == "open")
+        assert len(engine.calls) == 1
 
-        # 熔断没开着，新写入的合法记忆必须正常被处理，不会陪毒药桶一起卡住。
+        # Newly queued work is not held behind the failed item's cooldown.
         good_id = await manager.create(content="一条完全正常的记忆")
         await _wait_for(
             lambda: any(bid == good_id for bid, _c in engine.calls), timeout=1.0
@@ -1342,8 +1343,8 @@ async def test_provider_wide_failure_never_abandons(tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_default_config_never_abandons_poison_item(tmp_path):
-    engine, manager, outbox, poison_id = await _abandoned_poison(tmp_path)
+async def test_explicit_zero_never_abandons_poison_item(tmp_path):
+    engine, manager, outbox, poison_id = await _abandoned_poison(tmp_path, abandon_after_failures=0)
 
     status = outbox.status()
     assert status["abandoned"] == 0

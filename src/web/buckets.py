@@ -252,6 +252,7 @@ def register(mcp) -> None:
                 "score": sh.decay_engine.calculate_score(meta),
                 "triggered_feels": [],
                 "letter_locked": True,
+                "can_pin": False,
             })
         # iter 1.9 D / iter 2.0 §10 U-04: 反向链——只扫 feel_dir，O(feel桶数) 而非全库扫描
         triggered_feels = []
@@ -271,6 +272,7 @@ def register(mcp) -> None:
             "score": sh.decay_engine.calculate_score(meta),
             "triggered_feels": triggered_feels,  # iter 1.9 D
             "letter_locked": False,
+            "can_pin": not is_letter_bucket(bucket),
             "deletion_request": (
                 sh.deletion_requests.status(str(bucket["id"]))
                 if sh.deletion_requests is not None else None

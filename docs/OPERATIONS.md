@@ -238,11 +238,11 @@ embedding:
   retry_base_seconds: 5
   retry_max_seconds: 300
   circuit_failure_threshold: 3
-  circuit_base_seconds: 30
-  circuit_max_seconds: 600
-  abandon_after_failures: 0
+  circuit_base_seconds: 300
+  circuit_max_seconds: 3600
+  abandon_after_failures: 10
 ```
 
-`abandon_after_failures` 默认 `0`，即永不放弃。设为正整数 N 后，某一条向量只有在「上次失败之后别的向量成功过、这一条仍失败」攒够 N 次时，才会被标成已放弃：不再后台重试，也不计入待处理数，Markdown 原文不受影响；Dashboard、错误面板和 `pulse` 会单独显示已放弃的条数。供应商整体故障（例如余额耗尽）期间没有成功的向量，不会累计。修改这条记忆的内容、点击「补齐缺失向量」或更换向量引擎，都会让已放弃的向量重新尝试。
+`abandon_after_failures` 默认 `10`，设为 `0` 可恢复永不放弃。设为正整数 N 后，某一条向量只有在「上次失败之后别的向量成功过、这一条仍失败」攒够 N 次时，才会被标成已放弃：不再后台重试，也不计入待处理数，Markdown 原文不受影响；Dashboard、错误面板和 `pulse` 会单独显示已放弃的条数。供应商整体故障（例如余额耗尽）期间没有成功的向量，不会累计罚点；整轮失败按 5、10、20、40、60 分钟退避，之后保持 60 分钟并继续自动重试，任何成功会重置退避。新入队内容可立即探测供应商，避免被单条毒数据阻塞。修改这条记忆的内容、点击「补齐缺失向量」或更换向量引擎，都会让已放弃的向量重新尝试。
 
 轮询设为 `0` 表示每次活跃桶列表读取都检查文件状态。生产环境一般保留 `1.0`，避免高频目录扫描。

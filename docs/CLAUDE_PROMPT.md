@@ -106,7 +106,7 @@
 | 局部内容写错了                 | `trace(id, old_str="逐字且唯一的原文片段", new_str="修正片段")` — 原子局部替换并重建 embedding；`new_str=""` 可删除片段 |
 | 整段正文都要重写               | `trace(id, content="完整新版本")` — 完整替换正文并重建 embedding，不能与 `old_str/new_str` 同传                         |
 | 放入删除档案                   | `trace(id, delete=True)` — 从日常召回中隐藏并清理 embedding；Markdown 仍保留在 `archive/`                               |
-| 从档案重新回忆                 | `trace(id, restore=True)` — 必须单独调用；恢复会刷新活跃时间，历史 pinned 不会被静默重新钉选                              |
+| 从档案重新回忆                 | `trace(id, restore=True)` — 可同时显式传 resolved/importance；恢复会刷新活跃时间，历史 pinned 不会被静默重新钉选                              |
 | 创建可清理的虚假测试桶         | `hold(content="...", test_data=True)` — 创建时写入不可后补的测试来源标记，且不会合并进真实记忆                            |
 | 永久删除虚假测试桶             | `trace(id, hard_delete=True, delete_reason="...")` — 仅限创建时已标记 `test_data=True` 的桶；真实记忆一律拒绝           |
 | 改 plan 状态                   | `trace(plan_id, status="resolved")` — 仅对 plan 桶                                                                        |

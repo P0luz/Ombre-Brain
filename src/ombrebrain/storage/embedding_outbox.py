@@ -30,11 +30,11 @@ _OUTBOX_LOCK_TIMEOUT_SECONDS = 30.0
 _DEFAULT_RETRY_BASE_SECONDS = 5.0
 _DEFAULT_RETRY_MAX_SECONDS = 300.0
 _DEFAULT_CIRCUIT_FAILURE_THRESHOLD = 3
-_DEFAULT_CIRCUIT_BASE_SECONDS = 30.0
-_DEFAULT_CIRCUIT_MAX_SECONDS = 600.0
+_DEFAULT_CIRCUIT_BASE_SECONDS = 300.0
+_DEFAULT_CIRCUIT_MAX_SECONDS = 3600.0
 # 0 = 永不放弃（旧行为）。大于 0 时，只有「别的向量成功过、这一条仍失败」的次数
 # 攒够这么多次，才把这一条分量标成已放弃。
-_DEFAULT_ABANDON_AFTER_FAILURES = 0
+_DEFAULT_ABANDON_AFTER_FAILURES = 10
 _ABANDONED_IDS_LIMIT = 20
 _IDLE_POLL_SECONDS = 30.0
 
@@ -269,6 +269,9 @@ class EmbeddingOutbox:
         # 两次失败之间序号涨过，说明供应商那段时间是好的，这次失败才记一次罚点。
         # 重启后第一次失败只打标不记罚，只会让放弃来得更晚（偏保守）。
         self._success_seq = 0
+        self._round_failed: set[tuple[str, str]] = set()
+        self._global_failure_rounds = 0
+        self._circuit_global = False
         self._failure_marks: dict[tuple[str, str], int] = {}
 
     @staticmethod
@@ -741,6 +744,9 @@ class EmbeddingOutbox:
         self._consecutive_failures = 0
         self._circuit_open_until = 0.0
         self._last_failure_bucket_id = ""
+        self._round_failed.clear()
+        self._global_failure_rounds = 0
+        self._circuit_global = False
 
     def retry_now(self) -> int:
         """Close the circuit and make every pending item immediately due.
@@ -955,7 +961,7 @@ class EmbeddingOutbox:
         engine = self.embedding_engine
         if not engine or not getattr(engine, "enabled", False):
             return False
-        if self._circuit_delay() > 0:
+        if self._circuit_delay() > 0 and not self._circuit_global:
             return False
         bucket_id, item, _delay = self._next_due()
         if not bucket_id or item is None:
@@ -980,7 +986,7 @@ class EmbeddingOutbox:
                 await self._wait(_IDLE_POLL_SECONDS)
                 continue
             circuit_delay = self._circuit_delay()
-            if circuit_delay > 0:
+            if circuit_delay > 0 and not self._circuit_global:
                 await self._wait(circuit_delay)
                 continue
             bucket_id, item, delay = self._next_due()
@@ -1211,6 +1217,7 @@ class EmbeddingOutbox:
     def _note_provider_success(self) -> None:
         with self._lock:
             self._success_seq += 1
+            self.reset_circuit()
 
     def _complete(self, bucket_id: str, digest: str) -> None:
         """兼容旧测试/调用点：确认 content 分量完成。"""
@@ -1302,11 +1309,25 @@ class EmbeddingOutbox:
                 current["updated_at"] = attempted_at
                 self._refresh_aggregate(current)
                 self._persist_locked()
-        # 同一个桶连续失败不计入熔断计数：那是内容本身有毒的信号，不是供应商
-        # 挂了的信号。只有失败发生在不同的桶身上，才可能是供应商级故障。
-        if bucket_id != self._last_failure_bucket_id:
-            self._last_failure_bucket_id = bucket_id
-            self._record_provider_failure()
+        # A round covers each currently active component once. With no successful
+        # provider call, even a one-item queue may be a provider outage. Keep
+        # retrying with bounded cooldown; only proven item-specific failures
+        # contribute strikes above.
+        with self._lock:
+            self._round_failed.add((bucket_id, kind))
+            active = {
+                (bid, component)
+                for bid, item in self._items.items()
+                for component in _COMPONENT_KINDS
+                if self._component_active(item, component)
+            }
+            if active and active <= self._round_failed:
+                self._global_failure_rounds += 1
+                self._round_failed.clear()
+                self._record_provider_failure(global_round=True)
+            elif not self._global_failure_rounds and bucket_id != self._last_failure_bucket_id:
+                self._last_failure_bucket_id = bucket_id
+                self._record_provider_failure()
         if abandoned:
             logger.warning(
                 "Embedding abandoned / 已放弃这条向量，记忆原文不受影响: "
@@ -1328,19 +1349,23 @@ class EmbeddingOutbox:
             str(error)[:160],
         )
 
-    def _record_provider_failure(self) -> None:
+    def _record_provider_failure(self, *, global_round: bool = False) -> None:
         self._consecutive_failures += 1
-        if self._consecutive_failures < self.circuit_failure_threshold:
+        if not global_round and self._consecutive_failures < self.circuit_failure_threshold:
             return
-        exponent = min(
-            self._consecutive_failures - self.circuit_failure_threshold,
-            16,
-        )
+        if not global_round:
+            # The existing failure threshold can stop the first large batch
+            # early. Count that cooldown too, so the next full failed round
+            # doubles it rather than restarting the outage at five minutes.
+            self._global_failure_rounds += 1
+            self._round_failed.clear()
+        exponent = min(max(0, self._global_failure_rounds - 1), 16)
         delay = min(
             self.circuit_max_seconds,
             self.circuit_base_seconds * (2 ** exponent),
         )
         was_open = self._circuit_delay() > 0
+        self._circuit_global = global_round
         self._circuit_open_until = max(
             self._circuit_open_until,
             time.time() + delay,
@@ -1367,6 +1392,12 @@ class EmbeddingOutbox:
             for bucket_id, item in self._items.items():
                 for kind in _COMPONENT_KINDS:
                     if not self._component_active(item, kind):
+                        continue
+                    # New work is a fresh probe: a single poison item must not
+                    # delay unrelated writes. Failed components obey the global
+                    # cooldown; a successful probe resets it immediately.
+                    if (self._circuit_global and self._circuit_delay() > 0
+                            and self._component_attempts(item, kind) > 0):
                         continue
                     candidates.append(
                         (

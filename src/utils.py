@@ -450,9 +450,9 @@ def load_config(config_path: Optional[str] = None) -> dict:
             "retry_base_seconds": 5,
             "retry_max_seconds": 300,
             "circuit_failure_threshold": 3,
-            "circuit_base_seconds": 30,
-            "circuit_max_seconds": 600,
-            "abandon_after_failures": 0,
+            "circuit_base_seconds": 300,
+            "circuit_max_seconds": 3600,
+            "abandon_after_failures": 10,
         },
     }
 
@@ -529,6 +529,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
     _apply_env_override(config, "OMBRE_EMBED_MODEL", "embedding", "model")
     _apply_env_override(config, "OMBRE_EMBED_FORMAT", "embedding", "api_format")
     _apply_env_float_override(config, "OMBRE_EMBED_TIMEOUT_SECONDS", "embedding", "timeout_seconds")
+    _apply_env_override(config, "OMBRE_EMBED_ABANDON_AFTER_FAILURES", "embedding", "abandon_after_failures")
 
     # Obsidian / Git / manual Markdown edits cache poll interval.
     _apply_env_float_override(
