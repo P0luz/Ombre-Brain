@@ -16,7 +16,9 @@ web/_shared.py — Dashboard/HTTP 层的共享依赖与鉴权工具
   默认 30 天有效且可配置；_load_sessions 原地改 _sessions（不重绑），
   这样 server.py / 其它模块 `from ._shared import _sessions` 始终指向同一对象。
 - 密码：PBKDF2-HMAC-SHA256 存 <buckets_dir>/.dashboard_auth.json；支持环境变量
-  OMBRE_DASHBOARD_PASSWORD 覆盖；安全问题用于忘密码急救。
+  OMBRE_DASHBOARD_PASSWORD 覆盖；安全问题用于忘密码急救。环境变量口令另在同一文件
+  记一个加盐 PBKDF2 指纹（environment_password_fingerprint），只用于启动时发现口令
+  换没换（见 web/auth.reconcile_environment_password_at_startup）。
 
 不做什么：
 - 不定义任何路由（路由在 web/<模块>.py 里，用 register(mcp) 注册）。
@@ -914,6 +916,16 @@ def _revoke_all_sessions() -> None:
         _sessions.clear()
 
 
+def _discard_sessions_in_memory() -> None:
+    """只清本进程内存里的会话，不写盘。
+
+    给启动时的口令核对在撤销写盘失败时兜底：本进程从此不再认旧会话；之后任何一次
+    成功写会话文件，写下去的都是不含旧会话的内存状态。
+    """
+    with _session_state_lock:
+        _sessions.clear()
+
+
 def _read_auth_data_locked(*, strict: bool = False) -> dict:
     try:
         auth_file = _get_auth_file()
@@ -983,6 +995,83 @@ def _needs_rehash(stored: str) -> bool:
         return int(stored.split("$", 3)[1]) < _PBKDF2_ITERATIONS
     except (ValueError, IndexError):
         return True
+
+
+# --- 环境变量口令指纹 ---
+# 环境变量口令改了再重启，旧的 Dashboard 会话和 MCP 授权不会自己失效（会话、令牌校验都
+# 不看口令）。所以在 .dashboard_auth.json 里记一个加盐 PBKDF2 指纹，启动时比一次：
+# - 没有这个键：从没记过（刚升级上来）；
+# - 字符串：上次生效的是环境变量口令，值是它的指纹；
+# - null：上次生效的不是环境变量口令（文件口令或还没设密）。
+# 只认 pbkdf2_sha256 格式；迭代数设上限，防止手改出一个巨大的数把启动卡死。
+_ENV_PASSWORD_FINGERPRINT_KEY = "environment_password_fingerprint"
+_ENV_PASSWORD_FINGERPRINT_MAX_ITERATIONS = _PBKDF2_ITERATIONS * 10
+_ENV_PASSWORD_FINGERPRINT_MISSING = object()
+
+
+def _environment_password_bytes(password: str) -> bytes:
+    # os.environ 用 surrogateescape 解码，非 UTF-8 的口令按原字节还原，不能抛异常。
+    return password.encode("utf-8", "surrogateescape")
+
+
+def _derive_environment_password_fingerprint(password: str) -> str:
+    """给环境变量口令算加盐 PBKDF2 指纹，格式与 _hash_secret 相同。"""
+    salt = secrets.token_hex(_PASSWORD_SALT_BYTES)
+    dk = hashlib.pbkdf2_hmac(
+        "sha256",
+        _environment_password_bytes(password),
+        bytes.fromhex(salt),
+        _PBKDF2_ITERATIONS,
+    )
+    return f"{_PBKDF2_ALGO}${_PBKDF2_ITERATIONS}${salt}${dk.hex()}"
+
+
+def _environment_password_fingerprint_matches(password: str, stored: object) -> bool:
+    """指纹对得上才返回 True。
+
+    旧的 `salt:sha256` 快哈希、非字符串、迭代数为 0 或离谱的值一律当作对不上，
+    不走 _verify_secret 的旧格式兼容分支。
+    """
+    if not isinstance(stored, str) or not stored.startswith(_PBKDF2_ALGO + "$"):
+        return False
+    try:
+        _algo, iterations_text, salt_hex, expected = stored.split("$", 3)
+        if not (iterations_text.isascii() and iterations_text.isdigit()):
+            return False
+        iterations = int(iterations_text)
+        if not 1 <= iterations <= _ENV_PASSWORD_FINGERPRINT_MAX_ITERATIONS:
+            return False
+        salt = bytes.fromhex(salt_hex)
+        if not salt:
+            return False
+        dk = hashlib.pbkdf2_hmac(
+            "sha256", _environment_password_bytes(password), salt, iterations
+        )
+        return hmac.compare_digest(dk.hex(), expected)
+    except (ValueError, TypeError):
+        return False
+
+
+def _read_environment_password_record_locked() -> object:
+    """读指纹记录；调用方须持 _credential_state_guard。
+
+    没有这个键返回 _ENV_PASSWORD_FINGERPRINT_MISSING；文件读不了抛 AuthPersistenceError。
+    """
+    data = _read_auth_data_locked(strict=True)
+    return data.get(_ENV_PASSWORD_FINGERPRINT_KEY, _ENV_PASSWORD_FINGERPRINT_MISSING)
+
+
+def _write_environment_password_record_locked(record: str | None) -> None:
+    """只改 .dashboard_auth.json 里的指纹这一个键，其余键原样保留；调用方须持锁。"""
+    auth_file = _get_auth_file()
+    data = _read_auth_data_locked(strict=True)
+    data[_ENV_PASSWORD_FINGERPRINT_KEY] = record
+    try:
+        _atomic_write_private_json(auth_file, data)
+    except Exception as e:
+        raise AuthPersistenceError(
+            "failed to persist environment password fingerprint"
+        ) from e
 
 
 def _credential_proof_matches_locked(
@@ -1095,6 +1184,9 @@ def _save_prehashed_password(
                 data["security_question"] = existing["security_question"]
             if existing.get("security_answer_hash"):
                 data["security_answer_hash"] = existing["security_answer_hash"]
+        if _ENV_PASSWORD_FINGERPRINT_KEY in existing:
+            # 改文件口令不能把环境变量口令的指纹记录冲掉，否则下次启动会被当成刚升级。
+            data[_ENV_PASSWORD_FINGERPRINT_KEY] = existing[_ENV_PASSWORD_FINGERPRINT_KEY]
         try:
             _atomic_write_private_json(auth_file, data)
         except Exception as e:

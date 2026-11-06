@@ -14,6 +14,9 @@ server.py 的 MCP 鉴权中间件需要 _is_valid_mcp_token 来校验 /mcp(-extr
 对外暴露：
 - register(mcp)：注册 /.well-known/* 与 /oauth/* 路由（并在注册时载入持久化 token）
 - _is_valid_mcp_token：供 server.py 启动期的 _MCPAuthMiddleware 调用
+- revoke_all_mcp_grants：改口令时由 web/auth.py 调用，撤销全部访问令牌、刷新令牌和待兑换 code
+- discard_mcp_grants_in_memory / persist_loaded_oauth_clients：web/auth.py 启动时口令核对用
+  （4.1.4）；前者在撤销写盘失败时只清内存，后者在撤销前把客户端注册落盘
 ========================================
 """
 
@@ -739,6 +742,35 @@ def revoke_all_mcp_grants() -> None:
             _oauth_codes.clear()
             _persist_mcp_token_state({}, {}, {})
             _replace_grant_state_locked({}, {}, {})
+
+
+def discard_mcp_grants_in_memory() -> None:
+    """只清本进程内存里的访问令牌、刷新令牌和待兑换 code，不写盘。
+
+    给启动时的口令核对在 revoke_all_mcp_grants 写盘失败时兜底：本进程从此不再认旧
+    授权；之后任何一次成功写令牌文件，写下去的都是不含旧授权的内存状态。
+    """
+    with sh._credential_state_guard():
+        sh._advance_credential_generation_locked()
+        with _oauth_grant_state_lock:
+            _oauth_codes.clear()
+            _replace_grant_state_locked({}, {}, {})
+
+
+def persist_loaded_oauth_clients() -> None:
+    """撤销全部授权之前，把内存里已装载的客户端注册原样落盘一次。
+
+    没有 activated 字段的老注册，装载时靠还在的刷新令牌推断为已激活，这个推断只在
+    内存里；不先落盘，令牌一撤，下次启动它就会降成待激活并在 1 小时后被清掉，MCP
+    客户端只能删掉连接器重新添加。只在 OAuth 路由装载过客户端表时写，不会拿空表
+    覆盖没装载的文件。写盘失败照常抛 OAuthPersistenceError。
+    """
+    if not _oauth_required_from_config():
+        return
+    with _oauth_client_state_lock:
+        if not _oauth_clients:
+            return
+        _persist_oauth_client_state(_oauth_clients)
 
 
 def _verify_pkce(code_verifier: str, code_challenge: str) -> bool:

@@ -1539,6 +1539,12 @@ if __name__ == "__main__":
     if transport == "streamable-http":
         import uvicorn
         from web import ollama_local as _ollama_local
+        from web.auth import reconcile_environment_password_at_startup
+
+        # 开始接请求之前核对一次 OMBRE_DASHBOARD_PASSWORD：换过（或在环境变量口令与
+        # 文件口令之间切换）就撤销旧的 Dashboard 会话和 MCP 授权。只在 HTTP 进程里做：
+        # stdio 不提供鉴权入口，没资格判断口令变没变；监听端口还被旧进程占着时自动跳过。
+        reconcile_environment_password_at_startup(_BIND_HOST, OMBRE_PORT)
 
         _http_settings = HTTPRuntimeSettings.from_config(config)
         _runtime_lifecycle = RuntimeLifecycle(

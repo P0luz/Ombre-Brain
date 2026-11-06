@@ -405,6 +405,87 @@ def test_revoke_all_mcp_grants_clears_refresh_tokens_durably(oauth_routes):
 
 
 @pytest.mark.asyncio
+async def test_env_password_change_across_restart_revokes_oauth_grants(
+    oauth_routes, monkeypatch, tmp_path
+):
+    from web import auth as auth_web
+
+    monkeypatch.setattr(auth_web, "_listen_port_unavailable", lambda *_args: False)
+    monkeypatch.setenv("OMBRE_CONFIG_PATH", str(tmp_path / "config.yaml"))
+    monkeypatch.delenv("OMBRE_MCP_TOKEN", raising=False)
+    redirect_uri = "https://client.example/callback"
+    resource = "https://ombre.example/mcp"
+    verifier = "v" * 64
+    challenge = base64.urlsafe_b64encode(
+        hashlib.sha256(verifier.encode()).digest()
+    ).rstrip(b"=").decode()
+    monkeypatch.setenv("OMBRE_DASHBOARD_PASSWORD", "password-a")
+    assert auth_web.reconcile_environment_password_at_startup("127.0.0.1", 9) == (
+        "recorded"
+    )
+
+    registered = await oauth_routes[("POST", "/oauth/register")](
+        JsonRequest({"redirect_uris": [redirect_uri], "client_name": "Restart Client"})
+    )
+    client_id = _payload(registered)["client_id"]
+    authorized = await oauth_routes[("POST", "/oauth/authorize")](
+        JsonRequest({
+            "password": "password-a",
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "state": "state-1",
+            "scope": "mcp",
+            "resource": resource,
+            "code_challenge": challenge,
+        })
+    )
+    assert authorized.status_code == 302
+    code = urllib.parse.parse_qs(
+        urllib.parse.urlsplit(authorized.headers["location"]).query
+    )["code"][0]
+    issued = _payload(await oauth_routes[("POST", "/oauth/token")](
+        JsonRequest({
+            "grant_type": "authorization_code",
+            "code": code,
+            "code_verifier": verifier,
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "resource": resource,
+        })
+    ))
+
+    # 模拟换口令后重启：内存清空，按启动顺序重新装载，再做启动核对。
+    oauth_mod._mcp_tokens.clear()
+    oauth_mod._mcp_token_resources.clear()
+    oauth_mod._mcp_refresh_tokens.clear()
+    oauth_mod._oauth_clients.clear()
+    oauth_mod._load_mcp_tokens()
+    oauth_mod._load_oauth_clients()
+    assert oauth_mod._is_valid_mcp_token(issued["access_token"], resource) is True
+    monkeypatch.setenv("OMBRE_DASHBOARD_PASSWORD", "password-b")
+    assert auth_web.reconcile_environment_password_at_startup("127.0.0.1", 9) == (
+        "revoked"
+    )
+
+    refresh_response = await oauth_routes[("POST", "/oauth/token")](
+        JsonRequest({
+            "grant_type": "refresh_token",
+            "refresh_token": issued["refresh_token"],
+            "client_id": client_id,
+            "resource": resource,
+        })
+    )
+    assert oauth_mod._is_valid_mcp_token(issued["access_token"], resource) is False
+    assert refresh_response.status_code == 400
+    assert _payload(refresh_response)["error"] == "invalid_grant"
+
+    oauth_mod._oauth_clients.clear()
+    oauth_mod._load_mcp_tokens()
+    oauth_mod._load_oauth_clients()
+    assert oauth_mod._oauth_clients[client_id]["activated"] is True
+
+
+@pytest.mark.asyncio
 async def test_oauth_popup_completes_pkce_flow_and_binds_mcp_resource(
     oauth_routes, monkeypatch
 ):

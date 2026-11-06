@@ -28,6 +28,24 @@
 - 上游被设置成不转发访客地址（例如 Cloudflare 的“Remove visitor IP headers”）时，所有人共用一个来源。
 - 本机进程直接连 OB 时，连接方是回环、默认可信，仍可以自报地址，和以前一样。
 
+## 环境变量口令轮换（4.1.4）
+
+口令放在 `OMBRE_DASHBOARD_PASSWORD` 时，Dashboard 的改密入口会让你直接改环境变量；但过去改完重启，已签发的 Dashboard 会话、MCP 访问令牌和刷新令牌（刷新令牌一年有效）照样能用，刷新令牌还能接着换新令牌，只能手动删文件。4.1.4 起改完重启会自动撤销，不新增环境变量。
+
+- **先升级重启一次，再改口令重启。** 升级后第一次启动只记录、不撤销：之前没有记录，无从判断口令换没换，也不能让升级把所有人踢下线。如果已经在升级的同一次重启里换了口令，日志里会有一条带个数的 WARNING，请按下面的手动步骤撤销。
+- 手动撤销：停掉服务，删除数据目录里的 `.dashboard_sessions.json` 和 `.dashboard_mcp_tokens.json`，再启动。Docker 的数据目录是容器内 `/app/buckets`，也就是你挂载的那个卷。
+- 怎么判断：`.dashboard_auth.json` 里的 `environment_password_fingerprint` 记着上次生效的环境变量口令的加盐 PBKDF2 指纹（和文件口令 `password_hash` 同一种算法，不存明文，也不存快哈希）；上次生效的不是环境变量口令时记 `null`。HTTP 进程开始接请求前比一次：环境变量口令换了值，或者在环境变量口令和文件口令（含还没设密）之间切换，就先撤销全部 Dashboard 会话、MCP 访问令牌、刷新令牌和待兑换的授权码，再记下新指纹。口令没变就什么都不做；热更新重启也会比一次。stdio 进程不判断。
+- 撤销后要重新登录 Dashboard；MCP 客户端（例如 claude.ai 的连接器）手里的令牌失效，需要重新授权。OAuth 客户端注册不撤销，撤销前还会把内存里的注册落盘一次，老版本留下的、靠刷新令牌推断为“已授权”的注册不会因此降成待激活。
+- `config.yaml` 里的静态 MCP Token（`mcp_token`，Dashboard 设置页“重新生成”写的就是它）一并作废：拿着旧口令登录过的人可以事先生成一把，再把鉴权模式存成 Token 或共存模式，等你换口令重启时一起生效。还要用 Token / 共存模式的话，登录 Dashboard 到设置页重新生成，再更新 MCP 客户端；纯 Token 模式下重新生成之前 `/mcp` 一律拒绝。作废时会重写 `config.yaml`（和在 Dashboard 保存设置一样，手写的注释不保留）；`config.yaml` 里没有这把 Token 时不碰它。
+- 不撤环境变量 `OMBRE_MCP_TOKEN`（你在环境变量里自己管的钥匙，Dashboard 改不了它）、密保问答和登录限流；设了 `OMBRE_MCP_TOKEN` 时日志会提醒，怀疑它和口令一起泄露请一并更换。别人用旧口令登录期间改过的其他设置（鉴权模式、GitHub 备份目标、Webhook 等）也不会被撤回，怀疑口令泄露时请到设置页逐项核对。
+- 有意在环境变量口令和文件口令之间切换，也会撤销一次，需要重新登录。
+- 没设 `OMBRE_DASHBOARD_PASSWORD` 的部署也会走一遍：升级后第一次启动在 `.dashboard_auth.json` 写入 `environment_password_fingerprint: null`（还没设密的全新安装会因此新建这个文件，仍会要求设密），之后不再改写；每次 HTTP 启动还会试绑一次监听端口再立刻放开。
+- 监听端口还被旧进程占着（例如裸机上旧进程没退就又启动了一个）时，本次跳过核对并打 ERROR，旧进程退出后再启动即可完成。否则旧进程之后写令牌或会话文件时，会把撤掉的授权整份写回去。这个探测只看得见同一个网络命名空间里的同一个监听地址：Docker / K8s 的新容器有自己的网络，看不见旧容器；同时改了 `OMBRE_PORT` 或 `OMBRE_BIND_HOST` 时也看不见旧进程。换口令前请确认旧容器或旧进程已经停掉（`docker compose up` 重建容器时默认先停旧的）。
+- 撤销写盘失败（包括 `config.yaml` 写不进去）时打 ERROR：本进程内存里的旧授权照样清掉、不再认，但不记新指纹，下次启动再撤一次。新指纹写不进去时也是下次启动再撤，直到 `.dashboard_auth.json` 可写。升级后第一次记录就写不进去时，每次启动都按“第一次”只记录、不撤销，ERROR 会一直提示，修好之前换口令不会自动撤销。
+- `.dashboard_auth.json` 读不了（例如 JSON 被改坏）时打 ERROR。设了 `OMBRE_DASHBOARD_PASSWORD` 的，无从判断口令换没换，按换过处理、撤销全部授权：环境变量口令模式下登录不读这个文件，不这样做就只剩一行日志，换口令会悄悄不生效；修好或移走这个文件之前，每次启动都会撤一次。没设的，本次跳过核对（登录本身就要读这个文件，问题会直接暴露）。删掉或移走这个文件会连指纹一起删掉，下一次启动按“第一次”只记录、不撤销。
+- 同一个数据目录被两个口令不同的 Web 进程轮流使用（不支持的部署）时，每次启动都会撤销一次。
+- 指纹和文件口令的 `password_hash` 一样，拿到它可以离线爆破口令。迁移 ZIP 和 GitHub 同步都不带它；但如果把整个数据目录同步到 Obsidian、iCloud 之类，它会跟着走（同一目录里的令牌文件本来就更敏感）。
+
 ## 密保与安装下载防护（4.1.3）
 
 4.1.3 收紧现有入口，不迁移恢复码、不改变 MCP 权限。
@@ -200,6 +218,7 @@ docker compose -f deploy/docker-compose.yml up -d --build --force-recreate
 ## 访问控制
 
 - Dashboard 会话默认 30 天过期，可通过 `OMBRE_DASHBOARD_SESSION_DAYS` 调整为 1-365 天。认证文件与 token 文件使用原子写入，并在支持的系统上限制为仅文件所有者可读写。
+- 改 `OMBRE_DASHBOARD_PASSWORD` 的值再重启，会撤销旧的 Dashboard 会话、MCP 授权和 `config.yaml` 里的静态 MCP Token（4.1.4 起，升级后第一次启动除外，见「环境变量口令轮换（4.1.4）」）。
 - 网络 MCP 免鉴权只允许已确认的本机回环边界。启动门禁、Dashboard 配置、部署向导与内置 Tunnel 共用同一规则；`OMBRE_ALLOW_INSECURE_MCP=true` 是不在 Dashboard 暴露的高风险逃生阀，只接受精确的 `true`。
 - 登录和 OAuth 授权共用失败限流。`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` 只在请求确实来自可信反代时采用；其中 `X-Forwarded-For` 从右往左跳过可信网段，取第一个不可信地址（4.1.4 起，见「来源识别（4.1.4）」）。内置 Tunnel 使用回环地址，外置 nginx/Caddy/容器反代应通过 `OMBRE_TRUSTED_PROXY_CIDRS` 添加直接连接 OB 的最后一跳代理 CIDR，不能使用 `0.0.0.0/0`。三个官方 Compose 模板都会把该变量从 `.env` 传入容器。
 - 内置 JSON OAuth 状态按单进程部署设计。官方 Docker/Render 启动方式使用单 worker；自行部署时不要启动多个 Web worker 或多个共享同一数据卷的副本，否则授权状态不具备跨进程事务保证。

@@ -784,8 +784,8 @@ delete_id="", max_results=12)`，实现位于 `src/tools/them/core.py:15` 与 `o
 
 ### 4.2 Dashboard 认证
 
-- 密码存储：SHA-256 + 16 字节随机 salt，文件 `{buckets_dir}/.dashboard_auth.json`，格式 `{"password_hash": "salt:hash"}`
-- 环境变量 `OMBRE_DASHBOARD_PASSWORD` 优先于文件密码；设置后修改密码功能在 UI 中禁用
+- 密码存储：PBKDF2-HMAC-SHA256 + 16 字节随机 salt，文件 `{buckets_dir}/.dashboard_auth.json`，格式 `{"password_hash": "pbkdf2_sha256$迭代数$salt$hash"}`；旧的 `salt:sha256` 格式仍能校验，登录成功后静默升级
+- 环境变量 `OMBRE_DASHBOARD_PASSWORD` 优先于文件密码；设置后修改密码功能在 UI 中禁用。同一文件的 `environment_password_fingerprint` 记环境变量口令的 PBKDF2 指纹（不是环境变量口令时为 `null`），HTTP 进程启动时据此发现口令换没换，换了就撤销全部会话、MCP 授权和 config.yaml 里的静态 MCP Token（4.1.4，`web/auth.reconcile_environment_password_at_startup`）
 - Session：内存字典（服务重启失效），cookie `ombre_session`（HttpOnly, SameSite=Lax, 7 天）
 - 密码长度 ≥ 6 位
 

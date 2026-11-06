@@ -4,6 +4,7 @@
 
 ## 4.1.4
 
+- 升级提示（口令放在 `OMBRE_DASHBOARD_PASSWORD` 的部署）：请先升级并重启一次，再改口令重启。升级后第一次启动只记录当前口令、不撤销任何登录；如果在升级的同一次重启里已经换了口令，请停掉服务，删除数据目录（Docker 为 `/app/buckets`）里的 `.dashboard_sessions.json` 和 `.dashboard_mcp_tokens.json`，再启动；用静态 MCP Token 的，再到设置页重新生成。
 - 修复来源识别：登录、OAuth 授权、密保恢复、OAuth 动态注册、autorecall 和 hooks 的按来源限流，过去在可信反代后面取 `X-Forwarded-For` 的第一段。nginx `$proxy_add_x_forwarded_for` 这类追加写法会把客户端自带的值留在第一段，每次换一个假地址就永远不被锁，只剩全局每分钟 60 次兜底。现在从右往左跳过 `OMBRE_TRUSTED_PROXY_CIDRS` 里的地址，取第一个不可信的地址；多条 `X-Forwarded-For` 头按顺序合并，认得带端口和 `[IPv6]:端口` 的写法，遇到认不出的值就停，不再往左看。
 - 按 Cloudflare 文档，请求已带 `X-Forwarded-For` 时 Cloudflare 会追加访客地址，所以内置 Tunnel 下旧版同样能这样绕过锁定。这一条按文档推断，未在真实 Cloudflare 边缘实测。
 - 直接连接方是 IPv4 映射的 IPv6 地址（如 `::ffff:127.0.0.1`）时，过去不算可信代理；现在和链里的地址一样按对应的 IPv4 比对可信网段。这个判断各处共用，所以这种对端带来的 `X-Forwarded-Proto` / `X-Forwarded-Host` 现在也会被采信（Origin 校验、会话 cookie 的 Secure 标记、OAuth 元数据地址），待遇和 `127.0.0.1` 相同。OB 自带的 uvicorn 监听 `::` 时只收 IPv6 连接，这种对端只出现在自行改成双栈监听之类的环境里，影响很小。
@@ -11,6 +12,12 @@
 - 兼容影响：会追加 `X-Forwarded-For` 的上游（CDN、云负载均衡、公司代理）不在可信列表里时，升级后取到的是上游节点地址，走同一节点的人共用一把锁（可用性下降，不是安全下降；旧版在这种形状下取到的是能伪造的值）。按推荐顺序处理：改走内置 Tunnel；或先让源站只接受你自己账号的回源（例如 Cloudflare Authenticated Origin Pulls），再把回源网段加入 `OMBRE_TRUSTED_PROXY_CIDRS`，或在 nginx 配 `real_ip` 后用 `$remote_addr` 覆盖。没有这个前提就信 CDN 公共网段，等于信这家 CDN 的所有租户。细则和改了也解决不了的情况见 `docs/OPERATIONS.md`「来源识别（4.1.4）」。
 - 密保恢复限流按来源摘要计数，升级前的旧记录最多 15 分钟自然过期，全部来源合计 20 次的总额照算，不需要迁移。不新增环境变量。
 - 2026-11-06 验证：新增 35 项，其中 20 项修复前失败；全库 3407 passed、120 skipped、0 failed（断网沙箱，Python 3.10）。ruff 通过，bandit 结果与改动前相同（仍是 autorecall 客户端与 openwebui 的原有 10 条）。未做无缓存镜像构建、浏览器验收，未在真实 nginx 和 Cloudflare 边缘上实测。
+- 修复环境变量口令换了不撤旧授权：过去改 `OMBRE_DASHBOARD_PASSWORD` 再重启，旧的 Dashboard 会话、MCP 访问令牌和刷新令牌（一年有效）照样能用，刷新令牌还能接着换新令牌；删掉这个变量后也一样。现在 HTTP 进程开始接请求前，比对 `.dashboard_auth.json` 里的口令指纹（新键 `environment_password_fingerprint`，加盐 PBKDF2，和文件口令同一种算法）；换了值，或者在环境变量口令与文件口令（含未设密）之间切换，就先撤销全部会话、令牌和待兑换的授权码，再记下新指纹。stdio 进程不判断。
+- 同时作废 `config.yaml` 里的静态 MCP Token（`mcp_token`）：拿着旧口令登录过的人可以事先在设置页生成一把、再把鉴权模式存成共存或 Token 模式，换口令重启后照样能连 `/mcp`。还要用的请到设置页重新生成；纯 Token 模式下重新生成之前 `/mcp` 一律拒绝。环境变量 `OMBRE_MCP_TOKEN` 不动，设了时日志提醒一并更换。在 Dashboard 里改文件口令的流程不变，不作废静态 Token。
+- OAuth 客户端注册、密保不动；别人用旧口令登录期间改过的其他设置不会被撤回。撤销前把内存里的客户端注册落盘一次，老版本留下的、靠刷新令牌推断为已授权的注册不会因为令牌被撤而降成待激活。撤销后 MCP 客户端需要重新授权。
+- 监听端口还被旧进程占着时跳过核对并打 ERROR，避免旧进程把撤掉的授权写回磁盘；这个探测只看得见同一网络命名空间里的同一个监听地址，Docker / K8s 下换口令前请确认旧容器已停。试绑和 asyncio 一样跳过建不了 socket 或报 EADDRNOTAVAIL 的地址族。撤销或记录写盘失败时打 ERROR、下次启动再撤。设了环境变量口令而 `.dashboard_auth.json` 读不了时，按换过处理，修好之前每次启动都撤；没设时跳过。细则见 `docs/OPERATIONS.md`「环境变量口令轮换（4.1.4）」。
+- 没设环境变量口令的部署：升级后第一次启动也会在 `.dashboard_auth.json` 写入 `environment_password_fingerprint: null`（还没设密的全新安装会因此新建这个文件，仍要求设密），之后不再改写；每次 HTTP 启动会试绑一次监听端口。
+- 2026-11-06 验证：新增 33 项，修复前全部失败；全库 3440 passed、120 skipped、0 failed（断网沙箱，Python 3.10），改动前就有的测试逐条对比没有一条变化。真进程端到端（断网沙箱、临时数据目录、`python src/server.py`）：口令 A 登录并走完 OAuth，同口令重启不撤；旧进程未退时另起口令 B 的进程，跳过核对并因端口占用退出；用 A 的会话把鉴权模式存成共存并生成静态 Token，换成 B 重启后旧会话失效、旧访问令牌 401、旧刷新令牌 400 `invalid_grant`、那把静态 Token 401，口令 A 登录 401、B 200，客户端注册仍为已授权；`.dashboard_auth.json` 被截断时换口令，旧会话同样失效。ruff 通过，bandit 与改动前相同。未做无缓存镜像构建、浏览器验收和 claude.ai 真实重新授权。
 
 ## 4.1.3
 

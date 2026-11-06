@@ -632,8 +632,8 @@
     },
     {
       "path": "src/server.py",
-      "sha256": "fd898a96d47a9854af18a9bb2d0b4b123577f55eb7ed7a5f23f5e670a5618ee2",
-      "size": 85728
+      "sha256": "32978865a641df938b5ac75bead4a4c7db42a4450199407e0b7d69416e72ed6a",
+      "size": 86221
     },
     {
       "path": "src/server_app.py",
@@ -857,13 +857,13 @@
     },
     {
       "path": "src/web/_shared.py",
-      "sha256": "9f405e0f89fa9427b7b50950877c420f1c87a87ec00b8b65838aa5fbc48f5064",
-      "size": 48126
+      "sha256": "4da5ac00cfdeddc2eac236915b8b87e7b02ed85784a0bca1eecbd4d17331e866",
+      "size": 52343
     },
     {
       "path": "src/web/auth.py",
-      "sha256": "000d3ac065dc18f799e17e54650e81d727ca1014a270573f40aac496e40b98b5",
-      "size": 24646
+      "sha256": "0a3cd287f159be947764a979843f6a94c3c2d08a6b7de607d8acafded660d906",
+      "size": 38508
     },
     {
       "path": "src/web/autorecall.py",
@@ -917,8 +917,8 @@
     },
     {
       "path": "src/web/oauth.py",
-      "sha256": "7191ae440c72f380b7613cca74dfe5ce77c1053f7b6f347df3a75d1e2042826c",
-      "size": 60971
+      "sha256": "b8177113a693b1c9fb8aefbf32fdb4abea1f74e06d353dd0921cf91d436c8b84",
+      "size": 62641
     },
     {
       "path": "src/web/ollama_local.py",

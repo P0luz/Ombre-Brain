@@ -94,6 +94,27 @@ def test_auth_material_is_written_with_private_permissions(auth_dir):
         assert stat.S_IMODE(path.stat().st_mode) == 0o600
 
 
+def test_environment_password_fingerprint_is_salted_slow_and_private(auth_dir):
+    first = sh._derive_environment_password_fingerprint("env-secret")
+    second = sh._derive_environment_password_fingerprint("env-secret")
+
+    assert first.startswith(f"pbkdf2_sha256${sh._PBKDF2_ITERATIONS}$")
+    assert sh._PBKDF2_ITERATIONS >= 200_000
+    assert first != second
+    assert sh._environment_password_fingerprint_matches("env-secret", first)
+    assert sh._environment_password_fingerprint_matches("env-secret", second)
+    assert not sh._environment_password_fingerprint_matches("env-secre", first)
+
+    with sh._credential_state_guard():
+        sh._write_environment_password_record_locked(first)
+    path = auth_dir / ".dashboard_auth.json"
+    stored = path.read_text(encoding="utf-8")
+    assert "env-secret" not in stored
+    assert hashlib.sha256(b"env-secret").hexdigest() not in stored
+    if os.name != "nt":
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
 def test_persisted_century_session_is_capped_to_current_ttl(
     auth_dir, monkeypatch
 ):
