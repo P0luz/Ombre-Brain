@@ -39,6 +39,13 @@ from pathlib import Path
 from datetime import date, datetime
 from typing import Callable, Optional
 
+# 本模块的告警一律走模块 logger，不用 logging.warning() 这类根 logger 的模块级函数。
+# load_config() 在 server.py 里先于 setup_logging() 执行；根 logger 还没有 handler 时，
+# 那些函数会隐式 basicConfig()，setup_logging() 里的 basicConfig() 随之变成空操作：
+# 格式退回默认、INFO 丢失、<数据目录>/.logs/server.log 不再写。模块 logger 在这时
+# 走 logging.lastResort 直接写 stderr，不改根 logger 的配置；之后照常经根 logger 输出。
+_logger = logging.getLogger(__name__)
+
 
 # ============================================================
 # 常量 / Named constants
@@ -136,7 +143,7 @@ def _migrate_legacy_render_config(legacy_path: str, persistent_path: str) -> Non
             except FileExistsError:
                 pass
         except Exception as exc:
-            logging.warning(
+            _logger.warning(
                 "Failed to migrate Render config.yaml from %s to %s: %s",
                 legacy_abs,
                 persistent_abs,
@@ -470,12 +477,12 @@ def load_config(config_path: Optional[str] = None) -> dict:
             if isinstance(file_config, dict):
                 config = _deep_merge(defaults, file_config)
             else:
-                logging.warning(
+                _logger.warning(
                     f"Config file is not a valid YAML dict, using defaults / "
                     f"配置文件不是有效的 YAML 字典，使用默认配置: {config_path}"
                 )
         except yaml.YAMLError as e:
-            logging.warning(
+            _logger.warning(
                 f"Failed to parse config file, using defaults / "
                 f"配置文件解析失败，使用默认配置: {e}"
             )
@@ -497,12 +504,12 @@ def load_config(config_path: Optional[str] = None) -> dict:
     legacy_base_url = os.environ.get("OMBRE_BASE_URL", "").strip()
     if legacy_api_key and not os.environ.get("OMBRE_COMPRESS_API_KEY", "").strip():
         config.setdefault("dehydration", {})["api_key"] = legacy_api_key
-        logging.warning(
+        _logger.warning(
             "OMBRE_API_KEY 是兼容变量；请迁移到 OMBRE_COMPRESS_API_KEY，旧名仍会继续生效。"
         )
     if legacy_base_url and not os.environ.get("OMBRE_COMPRESS_BASE_URL", "").strip():
         config.setdefault("dehydration", {})["base_url"] = legacy_base_url
-        logging.warning(
+        _logger.warning(
             "OMBRE_BASE_URL 是兼容变量；请迁移到 OMBRE_COMPRESS_BASE_URL，旧名仍会继续生效。"
         )
 
@@ -510,7 +517,7 @@ def load_config(config_path: Optional[str] = None) -> dict:
     legacy_password = os.environ.get("PASSWORD", "").strip()
     if legacy_password and not os.environ.get("OMBRE_DASHBOARD_PASSWORD", "").strip():
         os.environ["OMBRE_DASHBOARD_PASSWORD"] = legacy_password
-        logging.warning(
+        _logger.warning(
             "PASSWORD 是兼容变量；请迁移到 OMBRE_DASHBOARD_PASSWORD，旧名仍会继续生效。"
         )
 
@@ -597,13 +604,13 @@ def load_config(config_path: Optional[str] = None) -> dict:
     # 安全兜底：选了 token 模式却没配密钥——宁可继续用更强的 OAuth 兜底，也不要让用户
     # 误以为已经开了保护、实际上 /mcp 会因校验函数拿不到密钥而被意外锁死或裸奔。
     if config["mcp_auth_mode"] == "token" and not str(config.get("mcp_token") or "").strip():
-        logging.warning(
+        _logger.warning(
             "mcp_auth_mode=token 但未配置 mcp_token / OMBRE_MCP_TOKEN，已自动回退为 oauth 模式 / "
             "mcp_auth_mode=token but no mcp_token/OMBRE_MCP_TOKEN configured — falling back to oauth"
         )
         config["mcp_auth_mode"] = "oauth"
     elif config["mcp_auth_mode"] == "hybrid" and not str(config.get("mcp_token") or "").strip():
-        logging.warning(
+        _logger.warning(
             "mcp_auth_mode=hybrid 但尚未配置静态 Token；OAuth 仍可用，静态 Token 入口将在配置密钥后生效 / "
             "mcp_auth_mode=hybrid has no static token yet; OAuth remains available"
         )

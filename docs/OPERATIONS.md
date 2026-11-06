@@ -36,7 +36,7 @@
 - 手动撤销：停掉服务，删除数据目录里的 `.dashboard_sessions.json` 和 `.dashboard_mcp_tokens.json`，再启动。Docker 的数据目录是容器内 `/app/buckets`，也就是你挂载的那个卷。
 - 怎么判断：`.dashboard_auth.json` 里的 `environment_password_fingerprint` 记着上次生效的环境变量口令的加盐 PBKDF2 指纹（和文件口令 `password_hash` 同一种算法，不存明文，也不存快哈希）；上次生效的不是环境变量口令时记 `null`。HTTP 进程开始接请求前比一次：环境变量口令换了值，或者在环境变量口令和文件口令（含还没设密）之间切换，就先撤销全部 Dashboard 会话、MCP 访问令牌、刷新令牌和待兑换的授权码，再记下新指纹。口令没变就什么都不做；热更新重启也会比一次。stdio 进程不判断。
 - 撤销后要重新登录 Dashboard；MCP 客户端（例如 claude.ai 的连接器）手里的令牌失效，需要重新授权。OAuth 客户端注册不撤销，撤销前还会把内存里的注册落盘一次，老版本留下的、靠刷新令牌推断为“已授权”的注册不会因此降成待激活。
-- `config.yaml` 里的静态 MCP Token（`mcp_token`，Dashboard 设置页“重新生成”写的就是它）一并作废：拿着旧口令登录过的人可以事先生成一把，再把鉴权模式存成 Token 或共存模式，等你换口令重启时一起生效。还要用 Token / 共存模式的话，登录 Dashboard 到设置页重新生成，再更新 MCP 客户端；纯 Token 模式下重新生成之前 `/mcp` 一律拒绝。作废时会重写 `config.yaml`（和在 Dashboard 保存设置一样，手写的注释不保留）；`config.yaml` 里没有这把 Token 时不碰它。
+- `config.yaml` 里的静态 MCP Token（`mcp_token`，Dashboard 设置页“重新生成”写的就是它）一并作废：拿着旧口令登录过的人可以事先生成一把，再把鉴权模式存成 Token 或共存模式，等你换口令重启时一起生效。还要用 Token / 共存模式的话，登录 Dashboard 到设置页重新生成，再更新 MCP 客户端。纯 Token 模式下，撤销的那次启动里重新生成之前 `/mcp` 一律拒绝；没重新生成就又重启的，会按原有的兜底退回 OAuth 模式（日志有一条警告），`/mcp` 改走 OAuth 授权，到设置页重新生成静态 Token 后再重启一次才回到 Token 模式。作废时会重写 `config.yaml`（和在 Dashboard 保存设置一样，手写的注释不保留）；`config.yaml` 里没有这把 Token 时不碰它。
 - 不撤环境变量 `OMBRE_MCP_TOKEN`（你在环境变量里自己管的钥匙，Dashboard 改不了它）、密保问答和登录限流；设了 `OMBRE_MCP_TOKEN` 时日志会提醒，怀疑它和口令一起泄露请一并更换。别人用旧口令登录期间改过的其他设置（鉴权模式、GitHub 备份目标、Webhook 等）也不会被撤回，怀疑口令泄露时请到设置页逐项核对。
 - 有意在环境变量口令和文件口令之间切换，也会撤销一次，需要重新登录。
 - 没设 `OMBRE_DASHBOARD_PASSWORD` 的部署也会走一遍：升级后第一次启动在 `.dashboard_auth.json` 写入 `environment_password_fingerprint: null`（还没设密的全新安装会因此新建这个文件，仍会要求设密），之后不再改写；每次 HTTP 启动还会试绑一次监听端口再立刻放开。

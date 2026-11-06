@@ -8,8 +8,13 @@
 - mcp_auth_mode=token 但未配置密钥时，load_config() 自动回退为 oauth 并告警
 - _is_valid_static_mcp_token 的 env 优先级与常量时间比较行为
 - hybrid 模式同时接受 OAuth Bearer 与静态 Bearer，并保留 OAuth discovery/DCR
+- 静态 Token 为空时 load_config() 的告警不抢先配置日志，随后 setup_logging() 照常写 server.log
 """
 import json
+import os
+import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -452,6 +457,72 @@ def test_load_config_keeps_hybrid_without_static_secret(monkeypatch, tmp_path, c
     assert config["mcp_auth_mode"] == "hybrid"
     assert config["mcp_token"] == ""
     assert "OAuth 仍可用" in caplog.text
+
+
+# 和 server.py 启动顺序一致：先 load_config()，再 setup_logging()。子进程里跑，
+# 不动本进程的全局 logging（pytest 的 caplog 也挂在根 logger 上）。
+_LOAD_CONFIG_THEN_SETUP_LOGGING = """
+import logging
+import sys
+
+sys.path.insert(0, sys.argv[1])
+from utils import load_config, setup_logging
+
+config = load_config(sys.argv[2])
+setup_logging(config.get("log_level", "INFO"))
+logging.getLogger("ombre_brain").info("startup-info-probe")
+print(config["mcp_auth_mode"])
+"""
+
+
+@pytest.mark.parametrize(
+    ("mode", "expected_mode", "warning_text"),
+    [
+        ("hybrid", "hybrid", "OAuth 仍可用"),
+        ("token", "oauth", "已自动回退为 oauth 模式"),
+    ],
+    ids=["hybrid", "token"],
+)
+def test_empty_static_token_warning_does_not_preempt_setup_logging(
+    tmp_path, mode, expected_mode, warning_text
+):
+    # 换环境变量口令会清空 config.yaml 的静态 Token，之后每次启动都走这条告警。
+    # 告警若用根 logger 的模块级函数，会隐式 basicConfig，setup_logging 的配置随之落空：
+    # 格式退回 WARNING:root:、INFO 丢失、<数据目录>/.logs/server.log 不再写。
+    buckets = tmp_path / "buckets"
+    cfg_path = tmp_path / "config.yaml"
+    cfg_path.write_text(
+        f'buckets_dir: "{buckets.as_posix()}"\nmcp_auth_mode: "{mode}"\n',
+        encoding="utf-8",
+    )
+    env = {
+        key: value
+        for key, value in os.environ.items()
+        if key not in ("OMBRE_MCP_TOKEN", "OMBRE_MCP_AUTH_MODE", "OMBRE_LOG_DIR", "OMBRE_LOG_FILE")
+    }
+    env["OMBRE_BUCKETS_DIR"] = str(buckets)
+    env["OMBRE_VAULT_DIR"] = str(buckets)
+    env["PYTHONIOENCODING"] = "utf-8"
+    src_dir = Path(__file__).resolve().parent.parent / "src"
+
+    proc = subprocess.run(
+        [sys.executable, "-c", _LOAD_CONFIG_THEN_SETUP_LOGGING, str(src_dir), str(cfg_path)],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        timeout=60,
+    )
+
+    assert proc.returncode == 0, proc.stderr
+    assert proc.stdout.strip() == expected_mode
+    log_text = (buckets / ".logs" / "server.log").read_text(encoding="utf-8")
+    assert "ombre_brain INFO: startup-info-probe" in log_text
+    assert "ombre_brain INFO: startup-info-probe" in proc.stderr
+    # setup_logging() 之前根 logger 没有 handler，告警经 logging.lastResort 写到 stderr，仍看得见。
+    assert warning_text in proc.stderr
+    assert "WARNING:root:" not in proc.stderr
 
 
 def test_load_config_accepts_hybrid_environment_override(monkeypatch, tmp_path):
