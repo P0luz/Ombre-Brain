@@ -2,6 +2,16 @@
 
 本项目版本号见根目录 `VERSION` 文件，Docker 镜像 tag 与之对应（`p0luz/ombre-brain:<VERSION>`）。
 
+## 4.1.4
+
+- 修复来源识别：登录、OAuth 授权、密保恢复、OAuth 动态注册、autorecall 和 hooks 的按来源限流，过去在可信反代后面取 `X-Forwarded-For` 的第一段。nginx `$proxy_add_x_forwarded_for` 这类追加写法会把客户端自带的值留在第一段，每次换一个假地址就永远不被锁，只剩全局每分钟 60 次兜底。现在从右往左跳过 `OMBRE_TRUSTED_PROXY_CIDRS` 里的地址，取第一个不可信的地址；多条 `X-Forwarded-For` 头按顺序合并，认得带端口和 `[IPv6]:端口` 的写法，遇到认不出的值就停，不再往左看。
+- 按 Cloudflare 文档，请求已带 `X-Forwarded-For` 时 Cloudflare 会追加访客地址，所以内置 Tunnel 下旧版同样能这样绕过锁定。这一条按文档推断，未在真实 Cloudflare 边缘实测。
+- 直接连接方是 IPv4 映射的 IPv6 地址（如 `::ffff:127.0.0.1`）时，过去不算可信代理；现在和链里的地址一样按对应的 IPv4 比对可信网段。这个判断各处共用，所以这种对端带来的 `X-Forwarded-Proto` / `X-Forwarded-Host` 现在也会被采信（Origin 校验、会话 cookie 的 Secure 标记、OAuth 元数据地址），待遇和 `127.0.0.1` 相同。OB 自带的 uvicorn 监听 `::` 时只收 IPv6 连接，这种对端只出现在自行改成双栈监听之类的环境里，影响很小。
+- 照 README 用 `proxy_set_header X-Forwarded-For $remote_addr;` 覆盖的部署，取到的地址不变。`X-Forwarded-Proto` / `X-Forwarded-Host` 仍取第一段，不变。
+- 兼容影响：会追加 `X-Forwarded-For` 的上游（CDN、云负载均衡、公司代理）不在可信列表里时，升级后取到的是上游节点地址，走同一节点的人共用一把锁（可用性下降，不是安全下降；旧版在这种形状下取到的是能伪造的值）。按推荐顺序处理：改走内置 Tunnel；或先让源站只接受你自己账号的回源（例如 Cloudflare Authenticated Origin Pulls），再把回源网段加入 `OMBRE_TRUSTED_PROXY_CIDRS`，或在 nginx 配 `real_ip` 后用 `$remote_addr` 覆盖。没有这个前提就信 CDN 公共网段，等于信这家 CDN 的所有租户。细则和改了也解决不了的情况见 `docs/OPERATIONS.md`「来源识别（4.1.4）」。
+- 密保恢复限流按来源摘要计数，升级前的旧记录最多 15 分钟自然过期，全部来源合计 20 次的总额照算，不需要迁移。不新增环境变量。
+- 2026-11-06 验证：新增 35 项，其中 20 项修复前失败；全库 3407 passed、120 skipped、0 failed（断网沙箱，Python 3.10）。ruff 通过，bandit 结果与改动前相同（仍是 autorecall 客户端与 openwebui 的原有 10 条）。未做无缓存镜像构建、浏览器验收，未在真实 nginx 和 Cloudflare 边缘上实测。
+
 ## 4.1.3
 
 - 设置或修改密保必须验证当前密码，保存时拒绝已过期的凭据版本；首次设密和设置页同步支持验密。

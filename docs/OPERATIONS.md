@@ -1,5 +1,33 @@
 # Ombre Brain 可靠性与恢复手册
 
+## 来源识别（4.1.4）
+
+登录、OAuth 授权、密保恢复、OAuth 动态注册、autorecall 和 hooks 都按“来源”分别限流。4.1.4 改了可信反代后面的来源取法，不新增环境变量。
+
+- 只有直接连接 OB 的一方在 `OMBRE_TRUSTED_PROXY_CIDRS` 里时，才读 `X-Forwarded-For`；这道门不变。默认只信回环，内置 Cloudflare Tunnel 就从回环连进来。
+- 过去取 `X-Forwarded-For` 的第一段。nginx 的 `$proxy_add_x_forwarded_for` 是“追加”：客户端自己带来的值留在第一段，每次换一个假地址就永远不被锁，只剩全局每分钟 60 次兜底。按 Cloudflare 文档，请求已带 `X-Forwarded-For` 时 Cloudflare 也是追加，所以内置 Tunnel 下同样能这样绕过（按文档推断，未在真实 Cloudflare 边缘实测）。
+- 现在从最右一段往左走，跳过可信网段里的地址，第一个不可信的地址就是客户端。多条 `X-Forwarded-For` 头按收到顺序合并；`203.0.113.7:51234`、`[2001:db8::1]:443` 这类带端口的写法也认。遇到认不出的值（`unknown`、空段、带引号的值等）就停，不再往左看，改用已经跨过的可信地址或直接连接方。最多看最右 32 段。
+- 照 README 用 `proxy_set_header X-Forwarded-For $remote_addr;` 覆盖的部署，取到的地址和以前一样。
+- 直接连接方是 IPv4 映射的 IPv6 地址（如 `::ffff:127.0.0.1`）时，现在按对应的 IPv4 比对可信网段，和链里的地址同一口径。同一个判断也决定是否采信这个连接带来的 `X-Forwarded-Proto` / `X-Forwarded-Host`（Origin 校验、会话 cookie 的 Secure 标记、OAuth 元数据里的地址），所以这种对端现在在各处都和 `127.0.0.1` 一样对待。OB 自带的 uvicorn 监听 `::` 时只收 IPv6 连接，这种对端只会出现在自行改成双栈监听之类的环境里。
+- `X-Forwarded-Proto` / `X-Forwarded-Host` 仍取第一段：多层代理追加时最左边才是客户端看到的协议和主机，伪造它们只影响同一个请求自己的回应。前提是这些回应不进共享缓存，不要让 CDN 对 `/.well-known/*` 和 `/oauth/*` 开“缓存一切”。
+
+**会追加的上游不在可信列表里：升级后按上游节点共用一把锁。** 形状是“会追加 `X-Forwarded-For` 的上游（CDN、云负载均衡、公司代理）→ 追加写法的 nginx/Caddy/Traefik → OB”，且上游的网段不在 `OMBRE_TRUSTED_PROXY_CIDRS` 里。旧版在这种形状下取到的是客户端能随意伪造的值；新版取到的是上游节点地址，走同一个节点的人共用一把锁，同地区有人连错 5 次，你也会被锁 60 秒起、最长 1 小时；hooks 和 autorecall 的每来源额度也按节点共用。这是可用性下降，不是安全下降。日志 `[auth] login rate-limit: client <来源> locked` 里看到的是上游节点地址，就是踩到了这一条。按推荐顺序任选一种处理：
+
+1. 改走内置 Cloudflare Tunnel，源站端口不对公网开放。上游就是本机回环，默认可信，不用改配置。
+2. 先让源站只接受你自己账号的回源（例如 Cloudflare Authenticated Origin Pulls，或防火墙只放行带回源证书的连接），再把 CDN 公布的回源网段加入 `OMBRE_TRUSTED_PROXY_CIDRS`。
+3. 同样先满足第 2 条的前提，再在 nginx 配 `real_ip`（`set_real_ip_from` 填 CDN 回源网段，`real_ip_header` 用 CDN 给的访客地址头，或 `X-Forwarded-For` 加 `real_ip_recursive on`），然后 `proxy_set_header X-Forwarded-For $remote_addr;`。
+
+不满足第 2 条的前提，信 CDN 的公共回源网段（不管是写进 `OMBRE_TRUSTED_PROXY_CIDRS`，还是写进 nginx `set_real_ip_from`）就等于信这家 CDN 的所有租户：别人可以用自己的账号（例如 Cloudflare Worker）把请求打到你的源站 IP，转发头由他随便填。把一个网段加入可信列表后，从这个网段直接连来的请求带的 `X-Forwarded-Proto` / `X-Forwarded-Host` 也会被采信。
+
+改了也解决不了的情况：
+
+- 反代必须写 `X-Forwarded-For`，覆盖或追加都行。nginx 只写 `proxy_pass` 时会把客户端带的头原样转给 OB，任何取法都能被伪造。
+- 可信网段里不能有客户端。例如把 VPN 客户端网段写进去，那个网段里的人就能伪造左边的值；`0.0.0.0/0` 和客户端 IP 一律不要写。
+- 本机 TCP 级转发（`ssh -R`、frp 或 cpolar 的 tcp 模式、socat、部分 rootless 容器的端口转发）从回环连进来，默认可信，却不写 `X-Forwarded-For`，客户端带的头会原样到达 OB，新旧版本都能每次换一个地址。裸机或源码部署可以设 `OMBRE_TRUSTED_PROXY_CIDRS=`（空串）不信任任何代理，代价是内置 Tunnel 也不再被信任：所有经隧道进来的请求共用一个来源；隧道带来的 `X-Forwarded-Proto` / `X-Forwarded-Host` 也不再采信，Dashboard 会话 cookie 因此不带 Secure 标记，没填“公网连接地址”时 OAuth 元数据还会退回 `http://` 内部地址，claude.ai 之类的客户端会拒绝连接。用内置 Tunnel 又要这样设的，先填好“公网连接地址”。官方 Compose 模板里空串会被换回默认值，容器部署只能改成只写真实反代的网段，或者不用这类转发。
+- IPv6 按 /64 分组，手里有更大前缀（例如 /48）的人仍能不断换来源，只剩全局每分钟 60 次兜底。
+- 上游被设置成不转发访客地址（例如 Cloudflare 的“Remove visitor IP headers”）时，所有人共用一个来源。
+- 本机进程直接连 OB 时，连接方是回环、默认可信，仍可以自报地址，和以前一样。
+
 ## 密保与安装下载防护（4.1.3）
 
 4.1.3 收紧现有入口，不迁移恢复码、不改变 MCP 权限。
@@ -145,9 +173,11 @@ location / {
 
 `$http_host` 会保留非默认公网端口；不要用上游地址覆盖 Host，也不要只发送
 RFC 7239 `Forwarded` 而省略上述 `X-Forwarded-*`。如果 nginx 前面还有 CDN，
-先正确配置 nginx `real_ip`，再使用清洗后的 `$remote_addr`。
+先正确配置 nginx `real_ip`，再使用清洗后的 `$remote_addr`；信 CDN 网段之前先看
+上文「来源识别（4.1.4）」的前提。4.1.4 起改用 `$proxy_add_x_forwarded_for`
+追加也不会再被伪造地址绕过锁定，但 `$remote_addr` 仍是最省事的写法。
 
-v2.7.1+ 只采信来自 `OMBRE_TRUSTED_PROXY_CIDRS` 的转发头。这里应填写
+v2.7.1+ 只采信来自 `OMBRE_TRUSTED_PROXY_CIDRS` 的转发头。这里至少要填写
 **直接连接 OB 的最后一跳 nginx/代理地址或网段**，不是浏览器公网 IP、域名或
 `0.0.0.0/0`。Docker 中该 peer 常是精确的 `172.x` 网桥网段；修改
 `deploy/.env` 后要用 `docker compose ... up -d --force-recreate`，仅重启旧容器
@@ -171,7 +201,7 @@ docker compose -f deploy/docker-compose.yml up -d --build --force-recreate
 
 - Dashboard 会话默认 30 天过期，可通过 `OMBRE_DASHBOARD_SESSION_DAYS` 调整为 1-365 天。认证文件与 token 文件使用原子写入，并在支持的系统上限制为仅文件所有者可读写。
 - 网络 MCP 免鉴权只允许已确认的本机回环边界。启动门禁、Dashboard 配置、部署向导与内置 Tunnel 共用同一规则；`OMBRE_ALLOW_INSECURE_MCP=true` 是不在 Dashboard 暴露的高风险逃生阀，只接受精确的 `true`。
-- 登录和 OAuth 授权共用失败限流。`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` 只在请求确实来自可信反代时采用；内置 Tunnel 使用回环地址，外置 nginx/Caddy/容器反代应通过 `OMBRE_TRUSTED_PROXY_CIDRS` 添加直接连接 OB 的最后一跳代理 CIDR，不能使用 `0.0.0.0/0`。三个官方 Compose 模板都会把该变量从 `.env` 传入容器。
+- 登录和 OAuth 授权共用失败限流。`X-Forwarded-For` / `X-Forwarded-Proto` / `X-Forwarded-Host` 只在请求确实来自可信反代时采用；其中 `X-Forwarded-For` 从右往左跳过可信网段，取第一个不可信地址（4.1.4 起，见「来源识别（4.1.4）」）。内置 Tunnel 使用回环地址，外置 nginx/Caddy/容器反代应通过 `OMBRE_TRUSTED_PROXY_CIDRS` 添加直接连接 OB 的最后一跳代理 CIDR，不能使用 `0.0.0.0/0`。三个官方 Compose 模板都会把该变量从 `.env` 传入容器。
 - 内置 JSON OAuth 状态按单进程部署设计。官方 Docker/Render 启动方式使用单 worker；自行部署时不要启动多个 Web worker 或多个共享同一数据卷的副本，否则授权状态不具备跨进程事务保证。
 - `limits.max_management_request_bytes` 限制普通 Dashboard/OAuth 写请求；导入文本和迁移 ZIP 仍使用各自更大的流式上限。
 - `/api/update-info` 包含数据目录和容器信息，因此需要 Dashboard 登录；公开健康检查仅使用 `/health` 和 `/api/version`。

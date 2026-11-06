@@ -75,6 +75,17 @@ def test_ipv4_mapped_ipv6_keeps_the_underlying_ipv4_identity():
     assert sh._client_key(request) == "192.0.2.44"
 
 
+def test_forwarded_ipv6_client_is_grouped_like_a_direct_peer(monkeypatch):
+    monkeypatch.setenv("OMBRE_TRUSTED_PROXY_CIDRS", "127.0.0.0/8,::1/128")
+
+    forwarded = sh._client_key(
+        request_for("::1", forwarded="198.51.100.66, 2001:db8:1234:5678::1")
+    )
+    direct = sh._client_key(request_for("2001:db8:1234:5678:ffff::2"))
+
+    assert forwarded == direct == "2001:db8:1234:5678::/64"
+
+
 def test_login_source_tracking_is_lru_bounded(monkeypatch):
     monkeypatch.setattr(sh, "_LOGIN_MAX_TRACKED_SOURCES", 4, raising=False)
 

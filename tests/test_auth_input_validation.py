@@ -273,6 +273,68 @@ def test_recovery_total_budget_blocks_rotating_sources(tmp_path, monkeypatch):
         assert (retry == 0) == (number < 20)
 
 
+def _appended_forwarded_request(body, index):
+    # 反代用追加写法：左边是客户端每次换的伪造值，右边是反代写的真地址。
+    request = JsonRequest(body)
+    request.headers = {
+        "host": "ombre.example",
+        "x-forwarded-for": f"198.51.100.{index + 1}, 203.0.113.7",
+    }
+    return request
+
+
+def test_recovery_source_budget_survives_rotating_forged_forwarded_for(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setitem(shared_web.config, "buckets_dir", str(tmp_path))
+    monkeypatch.setenv("OMBRE_TRUSTED_PROXY_CIDRS", "127.0.0.0/8,::1/128")
+
+    results = [
+        auth_web._reserve_recovery_attempt(_appended_forwarded_request({}, index))
+        for index in range(auth_web._RECOVERY_SOURCE_ATTEMPTS + 1)
+    ]
+
+    assert results[:-1] == [0] * auth_web._RECOVERY_SOURCE_ATTEMPTS
+    assert results[-1] > 0
+
+
+@pytest.mark.asyncio
+async def test_login_lockout_survives_rotating_forged_forwarded_for(
+    tmp_path, monkeypatch
+):
+    sh = shared_web
+    monkeypatch.setitem(sh.config, "buckets_dir", str(tmp_path))
+    monkeypatch.setenv("OMBRE_DASHBOARD_PASSWORD", "correct-password")
+    monkeypatch.setenv("OMBRE_TRUSTED_PROXY_CIDRS", "127.0.0.0/8,::1/128")
+    sh._sessions.clear()
+    sh._login_failures.clear()
+    sh._login_locked_until.clear()
+    sh._login_source_lru.clear()
+    sh._login_global_attempts.clear()
+    mcp = FakeMCP()
+    auth_web.register(mcp)
+    login = mcp.routes[("POST", "/auth/login")]
+
+    try:
+        for index in range(sh._LOGIN_MAX_FAILURES):
+            response = await login(
+                _appended_forwarded_request({"password": "wrong-password"}, index)
+            )
+            assert response.status_code == 401
+        locked = await login(
+            _appended_forwarded_request({"password": "correct-password"}, 99)
+        )
+    finally:
+        sh._sessions.clear()
+        sh._login_failures.clear()
+        sh._login_locked_until.clear()
+        sh._login_source_lru.clear()
+        sh._login_global_attempts.clear()
+
+    assert locked.status_code == 429
+    assert int(locked.headers["retry-after"]) > 0
+
+
 @pytest.mark.asyncio
 async def test_security_question_rejects_password_changed_during_save(tmp_path, monkeypatch):
     sh = shared_web

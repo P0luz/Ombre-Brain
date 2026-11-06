@@ -530,7 +530,7 @@ location / {
 }
 ```
 
-外置代理还要在 `.env` 中把**直接连接 OB 的最后一跳代理 CIDR**加入 `OMBRE_TRUSTED_PROXY_CIDRS`，再 `docker compose ... up -d --force-recreate`。不要填写客户端公网 IP、域名或 `0.0.0.0/0`；非默认 HTTPS 端口应使用保留端口的 `$http_host`。v2.7.0 被 403 卡住、连热更新和重启都无法操作时，按 [运维文档的手动脱困步骤](docs/OPERATIONS.md#nginx-反代与-v270-脱困) 从宿主机升级。
+外置代理还要在 `.env` 中把**直接连接 OB 的最后一跳代理 CIDR**加入 `OMBRE_TRUSTED_PROXY_CIDRS`，再 `docker compose ... up -d --force-recreate`。不要填写客户端公网 IP、域名或 `0.0.0.0/0`；非默认 HTTPS 端口应使用保留端口的 `$http_host`。nginx 前面还有 CDN 或云负载均衡时，按 [运维文档「来源识别（4.1.4）」](docs/OPERATIONS.md#来源识别414) 处理，否则大家可能按 CDN 节点共用一把登录锁。v2.7.0 被 403 卡住、连热更新和重启都无法操作时，按 [运维文档的手动脱困步骤](docs/OPERATIONS.md#nginx-反代与-v270-脱困) 从宿主机升级。
 
 ### 不用 Docker（纯 Python）
 

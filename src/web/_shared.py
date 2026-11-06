@@ -468,8 +468,8 @@ def _environment_password_proof(password: str) -> str:
 
 # --- 登录失败限流 / 指数退避锁定（防在线密码爆破）---
 # 纯内存滑窗，无外部依赖；进程重启即清零（可接受：重启本身打断了攻击者的连续尝试）。
-# 按客户端标识（X-Forwarded-For 首段，回退 request.client.host）分桶，避免一个坏客户端
-# 把所有人都锁死。成功登录立即清零。
+# 按客户端标识（见 _client_key：可信反代时取 X-Forwarded-For 从右往左第一个不可信地址，
+# 否则用 request.client.host）分桶，避免一个坏客户端把所有人都锁死。成功登录立即清零。
 _LOGIN_WINDOW_SECONDS = 900          # 15 分钟滑窗内统计失败
 _LOGIN_MAX_FAILURES = 5              # 窗口内允许的失败次数，超过即进入锁定
 _LOGIN_BASE_LOCK_SECONDS = 60        # 首次锁定时长，按超出次数指数增长
@@ -510,27 +510,150 @@ def _normalize_login_source(value: str) -> str:
     return str(address)
 
 
-def _client_key(request: Request) -> str:
-    """Return a spoof-resistant login rate-limit key.
+# X-Forwarded-For 链最多看最右边多少段。真实部署只有 1～4 跳；上限只为防止
+# 可信网段里的进程塞一条超长链。超出部分按"认不出"处理，结果仍是固定值。
+_FORWARDED_FOR_MAX_HOPS = 32
+_FORWARDED_FOR_MAX_ELEMENT_CHARS = 100
 
-    Forwarding headers are accepted only from an explicitly trusted proxy.
-    Direct clients cannot evade lockout by rotating a forged X-Forwarded-For.
-    The built-in Cloudflare child connects over loopback, which is trusted by
-    default. Additional proxy CIDRs can be listed in
-    ``OMBRE_TRUSTED_PROXY_CIDRS``.
+
+def _forwarded_for_chain(request: Request) -> str:
+    """把请求里全部 X-Forwarded-For 头按收到的顺序用逗号拼成一条链。
+
+    按 RFC 9110，多条同名头与按顺序逗号拼接的一条头等价；只读第一条会读到
+    客户端自己另起的那条。测试里常用普通 dict 当 headers，没有 getlist 时退回 get。
+    """
+    headers = getattr(request, "headers", None)
+    if headers is None:
+        return ""
+    getlist = getattr(headers, "getlist", None)
+    if callable(getlist):
+        values = list(getlist("x-forwarded-for"))
+    else:
+        value = headers.get("x-forwarded-for")
+        values = [value] if value else []
+    return ",".join(str(value) for value in values)
+
+
+def _is_port_text(text: str) -> bool:
+    return (
+        1 <= len(text) <= 5
+        and text.isascii()
+        and text.isdigit()
+        and 1 <= int(text) <= 65535
+    )
+
+
+def _parse_forwarded_for_element(
+    element: str,
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """解析链里的一段，认不出来就返回 None。
+
+    接受裸 IPv4、裸 IPv6（可带 %zone）、`IPv4:端口`、`[IPv6]`、`[IPv6]:端口`；
+    端口只认 1～65535 的 ASCII 数字。`unknown`、`_hidden` 这类混淆标识、
+    带引号的值、前导零 IPv4 等一律认不出。
+    """
+    text = element.strip(" \t")
+    if not text or len(text) > _FORWARDED_FOR_MAX_ELEMENT_CHARS:
+        return None
+    ipv4_only = False
+    if text.startswith("["):
+        end = text.find("]")
+        if end < 0:
+            return None
+        host, rest = text[1:end], text[end + 1 :]
+        if rest and not (rest.startswith(":") and _is_port_text(rest[1:])):
+            return None
+        if ":" not in host:
+            # 方括号只给 IPv6 用，`[203.0.113.7]` 不是合法写法。
+            return None
+    elif text.count(":") == 1:
+        host, port = text.split(":", 1)
+        if not _is_port_text(port):
+            return None
+        ipv4_only = True
+    else:
+        host = text
+    try:
+        address = ipaddress.ip_address(host)
+    except ValueError:
+        return None
+    if ipv4_only and address.version != 4:
+        return None
+    return address
+
+
+def _address_in_networks(
+    address: ipaddress.IPv4Address | ipaddress.IPv6Address,
+    networks: tuple[ipaddress._BaseNetwork, ...],
+) -> bool:
+    """IPv4 映射的 IPv6 地址（如 ::ffff:127.0.0.1）按原样和对应的 IPv4 各比一次。
+
+    自行改成双栈监听时，IPv4 回环连接会显示成映射地址；只按原样比，IPv4 写的可信
+    网段就认不出它。
+    """
+    candidates = [address]
+    mapped = getattr(address, "ipv4_mapped", None)
+    if mapped is not None:
+        candidates.append(mapped)
+    return any(
+        candidate in network
+        for candidate in candidates
+        for network in networks
+    )
+
+
+def _client_address_from_forwarded_for(
+    chain: str,
+    networks: tuple[ipaddress._BaseNetwork, ...],
+) -> ipaddress.IPv4Address | ipaddress.IPv6Address | None:
+    """从右往左走 X-Forwarded-For 链，返回第一个不在可信网段里的地址。
+
+    链里每一段都是它右边那一跳写进去的，只有可信代理写的段才可信，所以：
+    - 跳过可信网段里的地址，第一个不可信的地址就是客户端；
+    - 遇到认不出的段（包括空段）就停，不再往左看，再往左全是不可控的数据；
+    - 停下时或整条都可信时，返回已跨过的最左一个可信地址。它是可信代理写的，
+      攻击者换不出新值；一个都没跨过就返回 None，由调用方改用直接连接方。
+    """
+    pieces = chain.rsplit(",", _FORWARDED_FOR_MAX_HOPS)
+    if len(pieces) > _FORWARDED_FOR_MAX_HOPS:
+        pieces = pieces[1:]
+    crossed = None
+    for piece in reversed(pieces):
+        address = _parse_forwarded_for_element(piece)
+        if address is None:
+            break
+        if not _address_in_networks(address, networks):
+            return address
+        crossed = address
+    return crossed
+
+
+def _client_key(request: Request) -> str:
+    """返回登录、OAuth 授权等按来源限流用的标识，客户端伪造不出新值。
+
+    只有直接连接方在 OMBRE_TRUSTED_PROXY_CIDRS 里（默认只有回环；内置 Cloudflare
+    Tunnel 子进程就从回环连进来）时才读 X-Forwarded-For，并且按标准做法从右往左
+    取第一个不可信的地址，不取首段：nginx 的 `$proxy_add_x_forwarded_for` 以及
+    会追加这个头的 CDN 和代理，都会把客户端自己带来的值留在首段，取首段等于让
+    客户端每次换一个假地址躲开锁定。照文档用 `$remote_addr` 覆盖的部署结果不变。
+    取不到（没有这个头、最右一段就认不出）时用直接连接方。
     """
     client = getattr(request, "client", None)
     host = getattr(client, "host", "") if client else ""
     peer = str(host or "").strip()
-    if _is_trusted_proxy(peer):
+    networks = _trusted_proxy_networks()
+    if _is_trusted_proxy(peer, networks):
         try:
-            forwarded = (
-                request.headers.get("x-forwarded-for") or ""
-            ).split(",", 1)[0].strip()
-            if forwarded:
-                return _normalize_login_source(forwarded)
-        except (AttributeError, ValueError):
-            pass
+            address = _client_address_from_forwarded_for(
+                _forwarded_for_chain(request), networks
+            )
+        except Exception:
+            address = None
+        if address is not None:
+            try:
+                return _normalize_login_source(str(address))
+            except ValueError:
+                address = None
     try:
         return _normalize_login_source(peer)
     except ValueError:
@@ -597,16 +720,27 @@ def _trusted_proxy_networks() -> tuple[ipaddress._BaseNetwork, ...]:
     return tuple(networks)
 
 
-def _is_trusted_proxy(peer: str) -> bool:
+def _is_trusted_proxy(
+    peer: str,
+    networks: tuple[ipaddress._BaseNetwork, ...] | None = None,
+) -> bool:
     try:
         address = ipaddress.ip_address(peer)
     except ValueError:
         return False
-    return any(address in network for network in _trusted_proxy_networks())
+    if networks is None:
+        networks = _trusted_proxy_networks()
+    return _address_in_networks(address, networks)
 
 
 def _trusted_forwarded_value(request: Request, header: str) -> str:
-    """Read one forwarded header only when the immediate peer is trusted."""
+    """Read one forwarded header only when the immediate peer is trusted.
+
+    给 X-Forwarded-Proto / X-Forwarded-Host 用，故意取首段，和 _client_key 的
+    从右往左相反：多层代理追加时最左边才是客户端看到的协议和主机（例如
+    CDN 走 https、nginx 走 http 会追加成 `https, http`）。伪造这两个值只影响同一个
+    请求自己的回应，不像来源标识那样能跨请求躲开锁定；前提是这些回应不进共享缓存。
+    """
     client = getattr(request, "client", None)
     peer = str(getattr(client, "host", "") or "") if client else ""
     if not _is_trusted_proxy(peer):

@@ -1034,6 +1034,51 @@ async def test_oauth_authorize_password_failures_share_login_lockout(
 
 
 @pytest.mark.asyncio
+async def test_oauth_authorize_lockout_survives_rotating_forged_forwarded_for(
+    oauth_routes, monkeypatch
+):
+    monkeypatch.setenv("OMBRE_TRUSTED_PROXY_CIDRS", "127.0.0.0/8,::1/128")
+    oauth_mod._oauth_clients["client-rotate"] = {
+        "redirect_uris": ["https://client.example/callback"],
+        "client_name": "Rotate Test",
+    }
+    monkeypatch.setattr(oauth_mod.sh, "_is_setup_needed", lambda: False)
+    monkeypatch.setattr(
+        oauth_mod.sh, "_verify_password_for_rotation", lambda _password: None
+    )
+    body = {
+        "password": "wrong",
+        "client_id": "client-rotate",
+        "redirect_uri": "https://client.example/callback",
+        "scope": "mcp",
+        "resource": "https://ombre.example/mcp",
+        "code_challenge": "c" * 43,
+    }
+
+    def appended(index):
+        # 反代用追加写法：左边是客户端自带的伪造值，右边是反代写的真地址。
+        return JsonRequest(
+            body,
+            headers={
+                "content-type": "application/json",
+                "host": "ombre.example",
+                "x-forwarded-for": f"198.51.100.{index + 1}, 203.0.113.7",
+            },
+            client_host="127.0.0.1",
+        )
+
+    for index in range(oauth_mod.sh._LOGIN_MAX_FAILURES):
+        response = await oauth_routes[("POST", "/oauth/authorize")](
+            appended(index)
+        )
+        assert response.status_code == 401
+
+    locked = await oauth_routes[("POST", "/oauth/authorize")](appended(99))
+    assert locked.status_code == 429
+    assert int(locked.headers["retry-after"]) > 0
+
+
+@pytest.mark.asyncio
 async def test_oauth_authorize_password_verification_does_not_block_event_loop(
     oauth_routes, monkeypatch
 ):
