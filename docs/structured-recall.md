@@ -7,6 +7,11 @@ retrieval and automatic surfacing policy as ordinary breath search, scoped to
 active search results. It does not run exact-ID lookup, random surfacing,
 rendering, reinforcement or webhooks.
 
+The existing Bearer credential authorizes the entire MCP resource. It does
+not grant tool-level read-only access. The read-only boundary depends on
+`recall_candidates` itself and our-home's fixed call path to that tool.
+Callers must not implement generic MCP forwarding.
+
 The result is exclusively in MCP `structuredContent`. Schema version 1 has
 `schema_version` and `candidates`, with up to six candidates. Each candidate
 contains `bucket_id`, `content`, `score`, `created_at`, `updated_at`,
