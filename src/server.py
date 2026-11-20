@@ -43,6 +43,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult
 
 from bucket_manager import BucketManager
 from deletion_requests import DeletionRequestStore
@@ -65,6 +66,7 @@ from utils import get_version, load_config, setup_logging
 # tools/anchor, tools/plan, tools/dream 里，便于单独阅读和修改。
 from tools import _runtime as _tools_runtime
 from tools import breath as _t_breath
+from tools.breath.candidates import recall_candidates as _recall_candidates
 from tools import hold as _t_hold
 from tools import grow as _t_grow
 from tools import trace as _t_trace
@@ -778,6 +780,16 @@ async def breath_search(
 
 
 @mcp.tool()
+async def recall_candidates(query: str) -> CallToolResult:
+    """Return bounded automatic recall candidates as structured data only."""
+    try:
+        payload = await _recall_candidates(query)
+    except Exception:
+        return CallToolResult(content=[], isError=True)
+    return CallToolResult(content=[], structuredContent=payload)
+
+
+@mcp.tool()
 async def breath_advanced(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,
@@ -1308,6 +1320,7 @@ def _forbid_unknown_tool_arguments(tool_name: str) -> None:
 
 for _strict_tool_name in (
     "breath_search",
+    "recall_candidates",
     "breath_advanced",
     "hold",
     "grow",
