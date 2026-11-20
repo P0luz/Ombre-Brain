@@ -135,11 +135,12 @@ def _render_archived_hit(bucket: dict, footprint: str) -> tuple[str, int]:
     return rendered, count_tokens_approx(rendered)
 
 
-async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], str]:
+async def _semantic_scores(query: str, top_k: int, *, diagnostics=True) -> tuple[dict[str, float], str]:
     """Run the vector query once and return scores plus an optional notice."""
     engine = rt.embedding_engine
     if not engine or not getattr(engine, "enabled", False):
-        rt.logger.warning("breath semantic search unavailable; using keyword/BM25 only")
+        if diagnostics:
+            rt.logger.warning("breath semantic search unavailable; using keyword/BM25 only")
         return {}, _SEMANTIC_DISABLED_NOTE
 
     try:
@@ -150,10 +151,11 @@ async def _semantic_scores(query: str, top_k: int) -> tuple[dict[str, float], st
             pairs = await engine.search_similar(query, top_k=top_k)
         return {bucket_id: float(score) for bucket_id, score in pairs}, ""
     except Exception as exc:
-        rt.logger.warning(
-            f"breath semantic search failed; using keyword/BM25 only: "
-            f"{type(exc).__name__}: {exc}"
-        )
+        if diagnostics:
+            rt.logger.warning(
+                f"breath semantic search failed; using keyword/BM25 only: "
+                f"{type(exc).__name__}: {exc}"
+            )
         return {}, _SEMANTIC_DISABLED_NOTE
 
 
@@ -211,6 +213,78 @@ def _semantic_diagnostics(
             if key in outbox_status
         },
     }
+
+
+async def search_eligible_matches(
+    query: str,
+    max_results: int,
+    call_mode: str,
+    *,
+    domain_filter=None,
+    q_valence=None,
+    q_arousal=None,
+    include_archive: bool = True,
+    diagnostics: bool = True,
+):
+    """Share ranked retrieval and surfacing policy across search transports."""
+    omitted_by_policy = 0
+    _footprint = footprint_reader()
+    vector_scores, semantic_notice = await _semantic_scores(
+        query, top_k=max(max_results, _VECTOR_QUERY_TOPK), diagnostics=diagnostics
+    )
+    semantic_diag = {}
+    if diagnostics:
+        semantic_diag = _semantic_diagnostics(query, vector_scores, semantic_notice)
+        rt.logger.info("op=breath_search phase=semantic diagnostics=%s", semantic_diag)
+
+    search_kwargs = {
+        "limit": max(max_results, 20),
+        "domain_filter": domain_filter,
+        "query_valence": q_valence,
+        "query_arousal": q_arousal,
+        "vector_scores": vector_scores,
+    }
+    try:
+        try:
+            matches = await rt.bucket_mgr.search(
+                query, include_archive=include_archive, **search_kwargs
+            )
+        except TypeError as exc:
+            # Lightweight third-party/test managers may predate the archive
+            # option.  Preserve active search there; production supports it.
+            if "include_archive" not in str(exc):
+                raise
+            matches = await rt.bucket_mgr.search(query, **search_kwargs)
+    except Exception as e:
+        if diagnostics:
+            rt.logger.error(f"Search failed / 检索失败: {e}")
+        raise
+
+    eligible_matches = []
+    for bucket in matches:
+        meta = bucket.get("metadata", {}) or {}
+        if is_letter_bucket(bucket):
+            continue
+        if _is_archived(bucket):
+            if not include_archive:
+                continue
+            original_kind = _footprint.original_kind(
+                str(bucket.get("id") or ""), meta
+            )
+            if original_kind in ("feel", "plan", "letter"):
+                continue
+        elif meta.get("type") in ("feel", "plan", "letter"):
+            continue
+        elif not _can_surface_search(bucket, call_mode):
+            # 分开数：被「别主动拿给我」这类标记挡掉的条数要报给调用方。
+            # 调用方现在只能靠解析渲染文本自己剔，而那条路失效的方向是
+            # 「该藏的漏出来」——一个明确的计数能让静默失效变成可观测的。
+            decision = _SURFACE_POLICY.evaluate_bucket(bucket, mode=call_mode)
+            if {"dont_surface", "digested"} & set(decision.reasons):
+                omitted_by_policy += 1
+            continue
+        eligible_matches.append(bucket)
+    return eligible_matches, omitted_by_policy, semantic_notice, semantic_diag
 
 
 async def surface_search(
@@ -308,57 +382,13 @@ async def surface_search(
                 )
             return rendered
 
-    vector_scores, semantic_notice = await _semantic_scores(
-        query, top_k=max(max_results, _VECTOR_QUERY_TOPK)
-    )
-    semantic_diag = _semantic_diagnostics(query, vector_scores, semantic_notice)
-    rt.logger.info("op=breath_search phase=semantic diagnostics=%s", semantic_diag)
-
-    search_kwargs = {
-        "limit": max(max_results, 20),
-        "domain_filter": domain_filter,
-        "query_valence": q_valence,
-        "query_arousal": q_arousal,
-        "vector_scores": vector_scores,
-    }
     try:
-        try:
-            matches = await rt.bucket_mgr.search(
-                query, include_archive=True, **search_kwargs
-            )
-        except TypeError as exc:
-            # Lightweight third-party/test managers may predate the archive
-            # option.  Preserve active search there; production supports it.
-            if "include_archive" not in str(exc):
-                raise
-            matches = await rt.bucket_mgr.search(query, **search_kwargs)
-    except Exception as e:
-        rt.logger.error(f"Search failed / 检索失败: {e}")
+        matches, omitted_by_policy, semantic_notice, semantic_diag = await search_eligible_matches(
+            query, max_results, call_mode, domain_filter=domain_filter,
+            q_valence=q_valence, q_arousal=q_arousal,
+        )
+    except Exception:
         return "检索过程出错，请稍后重试。"
-
-    eligible_matches = []
-    for bucket in matches:
-        meta = bucket.get("metadata", {}) or {}
-        if is_letter_bucket(bucket):
-            continue
-        if _is_archived(bucket):
-            original_kind = _footprint.original_kind(
-                str(bucket.get("id") or ""), meta
-            )
-            if original_kind in ("feel", "plan", "letter"):
-                continue
-        elif meta.get("type") in ("feel", "plan", "letter"):
-            continue
-        elif not _can_surface_search(bucket, call_mode):
-            # 分开数：被「别主动拿给我」这类标记挡掉的条数要报给调用方。
-            # 调用方现在只能靠解析渲染文本自己剔，而那条路失效的方向是
-            # 「该藏的漏出来」——一个明确的计数能让静默失效变成可观测的。
-            decision = _SURFACE_POLICY.evaluate_bucket(bucket, mode=call_mode)
-            if {"dont_surface", "digested"} & set(decision.reasons):
-                omitted_by_policy += 1
-            continue
-        eligible_matches.append(bucket)
-    matches = eligible_matches
     matches = [b for b in matches if bucket_has_tags(b["metadata"], tag_filter)]
     matches = [
         b for b in matches

@@ -29,6 +29,7 @@ from server_app import (
 EXPECTED_PUBLIC_MCP_TOOLS = (
     "breath",
     "breath_search",
+    "recall_candidates",
     "breath_advanced",
     "hold",
     "grow",

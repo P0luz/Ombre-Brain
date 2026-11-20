@@ -23,7 +23,7 @@ web._shared，然后以 @mcp.tool() 注册薄封装（真正的实现在 src/too
 - 不写 HTTP 路由处理（全在 web/* 下）；不写 LLM prompt（dehydrator 负责）
 - 不直接读写桶文件（bucket_manager 负责）
 
-对外暴露：唯一连接器 `mcp`，16 个基础工具（含 3.4.0 并回的信件三件套）
+对外暴露：唯一连接器 `mcp`，17 个基础工具（含结构化自动召回）
           + 可选的 You / Them（各按自己的持久开关动态挂载）；HTTP 路由在 src/web/*
 ========================================
 """
@@ -43,6 +43,7 @@ import httpx
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 from mcp.server.fastmcp import FastMCP
+from mcp.types import CallToolResult
 
 from bucket_manager import BucketManager
 from deletion_requests import DeletionRequestStore
@@ -65,6 +66,7 @@ from utils import get_version, load_config, setup_logging
 # tools/anchor, tools/plan, tools/dream 里，便于单独阅读和修改。
 from tools import _runtime as _tools_runtime
 from tools import breath as _t_breath
+from tools.breath.candidates import recall_candidates as _recall_candidates
 from tools import hold as _t_hold
 from tools import grow as _t_grow
 from tools import trace as _t_trace
@@ -778,6 +780,16 @@ async def breath_search(
 
 
 @mcp.tool()
+async def recall_candidates(query: str) -> CallToolResult:
+    """Search the current message (`query`) and return automatic recall candidates as structured data."""
+    try:
+        payload = await _recall_candidates(query)
+    except Exception:
+        return CallToolResult(content=[], isError=True)
+    return CallToolResult(content=[], structuredContent=payload)
+
+
+@mcp.tool()
 async def breath_advanced(
     query: Optional[str] = "",
     max_tokens: Optional[int] = 0,
@@ -1308,6 +1320,7 @@ def _forbid_unknown_tool_arguments(tool_name: str) -> None:
 
 for _strict_tool_name in (
     "breath_search",
+    "recall_candidates",
     "breath_advanced",
     "hold",
     "grow",
@@ -1487,7 +1500,7 @@ if __name__ == "__main__":
         )
         if transport == "streamable-http":
             logger.info(
-                "MCP /mcp：16 个基础工具（单连接器），You / Them 各按独立开关动态显隐"
+                "MCP /mcp：17 个基础工具（单连接器），You / Them 各按独立开关动态显隐"
             )
         logger.info("CORS middleware enabled for remote transport / 已启用 CORS 中间件")
         logger.info(
@@ -1527,7 +1540,7 @@ if __name__ == "__main__":
             logger.warning(
                 "=" * 60 + "\n"
                 "⚠️  MCP 认证已关闭 (mcp_require_auth: false)：/mcp 无需任何令牌即可直连，\n"
-                "    16 个基础工具及当前已启用的可选工具均对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
+                "    17 个基础工具及当前已启用的可选工具均对外开放——任何能访问本端口的人都能读写你的全部记忆。\n"
                 f"    本服务进程监听 {_BIND_HOST}，若端口暴露到局域网/公网，请务必用反代鉴权、防火墙\n"
                 "    或仅绑定 127.0.0.1 保护；免鉴权只建议用于已确认的本机回环连接。\n"
                 + "=" * 60
@@ -1574,7 +1587,7 @@ if __name__ == "__main__":
             proxy_headers=False,
         )
     elif transport == "stdio":
-        # stdio：唯一实例提供 16 个基础工具，You / Them 各按独立开关显隐；启动成功边界由
+        # stdio：唯一实例提供 17 个基础工具，You / Them 各按独立开关显隐；启动成功边界由
         # FastMCP public lifespan 触发。向量队列必须与 HTTP 一样纳入生命周期，
         # 否则正文落盘后会退回同步索引，让慢 provider 拖住工具回包。
         _stdio_runtime_lifecycle = RuntimeLifecycle(

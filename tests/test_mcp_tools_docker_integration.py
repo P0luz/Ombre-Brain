@@ -27,6 +27,7 @@ pytestmark = pytest.mark.skipif(not MCP_URL, reason="Docker MCP integration serv
 EXPECTED_TOOLS = {
     "breath",
     "breath_search",
+    "recall_candidates",
     "breath_advanced",
     "hold",
     "grow",
@@ -45,6 +46,7 @@ EXPECTED_TOOLS = {
 EXPECTED_TOOL_ORDER = (
     "breath",
     "breath_search",
+    "recall_candidates",
     "breath_advanced",
     "hold",
     "grow",
@@ -62,6 +64,7 @@ EXPECTED_TOOL_ORDER = (
 )
 
 EXPECTED_TOOL_PROPERTIES = {
+    "recall_candidates": {"query"},
     "breath": set(),
     "breath_search": {
         "query", "domain", "max_results", "date_from", "date_to", "quotes",
@@ -165,6 +168,7 @@ EXPECTED_TOOL_PROPERTIES = {
 }
 
 EXPECTED_REQUIRED_PROPERTIES = {
+    "recall_candidates": {"query"},
     "breath_search": {"query"},
     "hold": {"content"},
     "trace": {"bucket_id"},
